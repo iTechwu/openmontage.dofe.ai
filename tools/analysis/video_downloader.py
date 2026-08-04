@@ -1,13 +1,15 @@
-"""Video downloader tool wrapping yt-dlp.
+"""Video downloader tool with platform-specific routing.
 
 Downloads video, audio, or subtitles from YouTube, Shorts, Instagram Reels,
-TikTok, and 1000+ other sites. Designed for reference video analysis — downloads
+TikTok, Douyin, and 1000+ other sites. Douyin uses its dedicated public-share
+downloader; other platforms use yt-dlp. Designed for reference video analysis
 at analysis quality (720p), not production quality.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -24,6 +26,13 @@ from tools.base_tool import (
     ToolTier,
     ToolRuntime,
 )
+from lib.video_sources import (
+    BROWSER_USER_AGENT,
+    VideoSourceError,
+    detect_video_platform,
+    normalize_video_url,
+    resolve_cookie_file,
+)
 
 
 class VideoDownloader(BaseTool):
@@ -37,12 +46,13 @@ class VideoDownloader(BaseTool):
     determinism = Determinism.DETERMINISTIC
     runtime = ToolRuntime.LOCAL
 
-    dependencies = ["python:yt_dlp"]
+    dependencies = ["python:yt_dlp", "cmd:ffmpeg"]
     install_instructions = (
         "Install yt-dlp: pip install yt-dlp\n"
-        "For YouTube support, also install Deno (JS runtime): "
+        "For YouTube support, also install a supported JS runtime: "
         "https://deno.land/#installation\n"
-        "Without Deno, YouTube downloads may fail but other platforms still work."
+        "For restricted sites, pass cookie_file or set OPENMONTAGE_YTDLP_COOKIES. "
+        "Public Douyin videos use the cookie-free dedicated share-page downloader."
     )
     agent_skills = ["video-download"]
 
@@ -87,6 +97,10 @@ class VideoDownloader(BaseTool):
                 "type": "integer",
                 "default": 600,
                 "description": "Reject videos longer than this (safety limit)",
+            },
+            "cookie_file": {
+                "type": "string",
+                "description": "Optional Netscape-format cookies.txt path",
             },
         },
     }
@@ -135,30 +149,27 @@ class VideoDownloader(BaseTool):
 
     def _detect_platform(self, url: str) -> str:
         """Detect platform from URL."""
-        url_lower = url.lower()
-        if "youtube.com/shorts" in url_lower or "youtu.be" in url_lower and "/shorts" in url_lower:
-            return "shorts"
-        if "youtube.com" in url_lower or "youtu.be" in url_lower:
-            return "youtube"
-        if "instagram.com" in url_lower:
-            return "instagram"
-        if "tiktok.com" in url_lower:
-            return "tiktok"
-        if "vimeo.com" in url_lower:
-            return "vimeo"
-        if "twitter.com" in url_lower or "x.com" in url_lower:
-            return "twitter"
-        return "other_url"
+        return detect_video_platform(url)
 
-    def _extract_metadata(self, url: str) -> dict:
+    def _ydl_options(self, cookie_file: str | None) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "retries": 3,
+            "fragment_retries": 3,
+            "http_headers": {"User-Agent": BROWSER_USER_AGENT},
+        }
+        if cookie_file:
+            options["cookiefile"] = cookie_file
+        return options
+
+    def _extract_metadata(self, url: str, cookie_file: str | None = None) -> dict:
         """Extract metadata without downloading."""
         import yt_dlp
 
-        ydl_opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-        }
+        ydl_opts = self._ydl_options(cookie_file)
+        ydl_opts["skip_download"] = True
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -179,18 +190,50 @@ class VideoDownloader(BaseTool):
             return {"error": str(e), "title": "", "duration": 0}
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
-        url = inputs["url"]
+        raw_url = inputs["url"]
         output_dir = Path(inputs["output_dir"])
         dl_format = inputs.get("format", "video")
         max_res = inputs.get("max_resolution", "720p")
         max_duration = inputs.get("max_duration_seconds", 600)
 
-        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            url = normalize_video_url(raw_url)
+        except VideoSourceError as exc:
+            return ToolResult(success=False, error=str(exc))
+
         platform = self._detect_platform(url)
+        try:
+            cookie_file = (
+                None
+                if platform == "douyin"
+                else resolve_cookie_file(
+                    inputs.get("cookie_file")
+                    or os.environ.get("OPENMONTAGE_YTDLP_COOKIES")
+                )
+            )
+        except VideoSourceError as exc:
+            return ToolResult(success=False, error=str(exc))
+
+        output_dir.mkdir(parents=True, exist_ok=True)
         start = time.time()
 
-        # Step 1: Always get metadata first
-        metadata = self._extract_metadata(url)
+        douyin_client = None
+        if platform == "douyin":
+            try:
+                from tools.analysis.douyin import DouyinShareClient
+
+                douyin_client = DouyinShareClient()
+                metadata = douyin_client.extract(url)
+                metadata["extractor"] = "douyin_public_share"
+            except Exception as exc:
+                return ToolResult(
+                    success=False,
+                    error=f"Douyin extraction failed: {exc}",
+                    data={"platform": platform, "resolved_url": url},
+                    duration_seconds=round(time.time() - start, 2),
+                )
+        else:
+            metadata = self._extract_metadata(url, cookie_file)
 
         # Check duration limit
         duration = metadata.get("duration", 0)
@@ -213,6 +256,8 @@ class VideoDownloader(BaseTool):
                     "subtitle_path": None,
                     "metadata": metadata,
                     "platform": platform,
+                    "source_url": raw_url,
+                    "resolved_url": url,
                 },
                 duration_seconds=round(time.time() - start, 2),
             )
@@ -223,13 +268,39 @@ class VideoDownloader(BaseTool):
 
         try:
             if dl_format == "video":
-                video_path, audio_path = self._download_video(
-                    url, output_dir, max_res
-                )
+                if douyin_client is not None:
+                    video_path = douyin_client.download(metadata, output_dir / "reference_video.mp4")
+                    audio_path = self._extract_audio_track(video_path, output_dir)
+                else:
+                    video_path, audio_path = self._download_video(
+                        url, output_dir, max_res, cookie_file
+                    )
             elif dl_format == "audio_only":
-                audio_path = self._download_audio(url, output_dir)
+                if douyin_client is not None:
+                    video_path = douyin_client.download(metadata, output_dir / "reference_video.mp4")
+                    audio_path = self._extract_audio_track(video_path, output_dir)
+                    if audio_path is None:
+                        return ToolResult(
+                            success=False,
+                            error="Douyin audio extraction failed after downloading the video.",
+                            data={"metadata": metadata, "platform": platform},
+                            artifacts=[video_path],
+                            duration_seconds=round(time.time() - start, 2),
+                        )
+                else:
+                    audio_path = self._download_audio(url, output_dir, cookie_file)
             elif dl_format == "subtitles_only":
-                subtitle_path = self._download_subtitles(url, output_dir)
+                if douyin_client is not None:
+                    return ToolResult(
+                        success=False,
+                        error=(
+                            "The dedicated Douyin downloader does not provide subtitles; "
+                            "download the video or audio and transcribe it instead."
+                        ),
+                        data={"metadata": metadata, "platform": platform},
+                        duration_seconds=round(time.time() - start, 2),
+                    )
+                subtitle_path = self._download_subtitles(url, output_dir, cookie_file)
         except Exception as e:
             elapsed = time.time() - start
             return ToolResult(
@@ -250,13 +321,15 @@ class VideoDownloader(BaseTool):
                 "subtitle_path": subtitle_path,
                 "metadata": metadata,
                 "platform": platform,
+                "source_url": raw_url,
+                "resolved_url": url,
             },
             artifacts=artifacts,
             duration_seconds=round(elapsed, 2),
         )
 
     def _download_video(
-        self, url: str, output_dir: Path, max_res: str
+        self, url: str, output_dir: Path, max_res: str, cookie_file: str | None = None
     ) -> tuple[str | None, str | None]:
         """Download video + extract audio track."""
         import yt_dlp
@@ -264,14 +337,12 @@ class VideoDownloader(BaseTool):
         height = self._RES_MAP.get(max_res, 720)
         video_out = str(output_dir / "reference_video.%(ext)s")
 
-        ydl_opts = {
+        ydl_opts = self._ydl_options(cookie_file)
+        ydl_opts.update({
             "format": f"bestvideo[height<={height}]+bestaudio/best[height<={height}]/best",
             "merge_output_format": "mp4",
             "outtmpl": video_out,
-            "noplaylist": True,
-            "quiet": True,
-            "no_warnings": True,
-        }
+        })
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
@@ -279,33 +350,31 @@ class VideoDownloader(BaseTool):
         video_path = self._find_downloaded(output_dir, "reference_video", ["mp4", "mkv", "webm"])
 
         # Extract audio separately for transcription
-        audio_path = None
-        if video_path:
-            audio_out = output_dir / "reference_audio.wav"
-            try:
-                audio_cmd = [
-                    "ffmpeg", "-y",
-                    "-i", video_path,
-                    "-vn",
-                    "-acodec", "pcm_s16le",
-                    "-ar", "16000",
-                    "-ac", "1",
-                    str(audio_out),
-                ]
-                self.run_command(audio_cmd, timeout=120)
-                if audio_out.exists():
-                    audio_path = str(audio_out)
-            except Exception:
-                pass  # Audio extraction is optional
+        audio_path = self._extract_audio_track(video_path, output_dir) if video_path else None
 
         return video_path, audio_path
 
-    def _download_audio(self, url: str, output_dir: Path) -> str | None:
+    def _extract_audio_track(self, video_path: str, output_dir: Path) -> str | None:
+        audio_out = output_dir / "reference_audio.wav"
+        try:
+            audio_cmd = [
+                "ffmpeg", "-y", "-i", video_path, "-vn",
+                "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", str(audio_out),
+            ]
+            self.run_command(audio_cmd, timeout=180)
+            return str(audio_out) if audio_out.exists() else None
+        except Exception:
+            return None
+
+    def _download_audio(
+        self, url: str, output_dir: Path, cookie_file: str | None = None
+    ) -> str | None:
         """Download audio only."""
         import yt_dlp
 
         audio_out = str(output_dir / "reference_audio.%(ext)s")
-        ydl_opts = {
+        ydl_opts = self._ydl_options(cookie_file)
+        ydl_opts.update({
             "format": "bestaudio/best",
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
@@ -313,30 +382,27 @@ class VideoDownloader(BaseTool):
                 "preferredquality": "0",
             }],
             "outtmpl": audio_out,
-            "noplaylist": True,
-            "quiet": True,
-            "no_warnings": True,
-        }
+        })
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
         return self._find_downloaded(output_dir, "reference_audio", ["wav", "mp3", "m4a", "opus"])
 
-    def _download_subtitles(self, url: str, output_dir: Path) -> str | None:
+    def _download_subtitles(
+        self, url: str, output_dir: Path, cookie_file: str | None = None
+    ) -> str | None:
         """Download subtitles only."""
         import yt_dlp
 
         sub_out = str(output_dir / "reference_subs.%(ext)s")
-        ydl_opts = {
+        ydl_opts = self._ydl_options(cookie_file)
+        ydl_opts.update({
             "writesubtitles": True,
             "writeautomaticsub": True,
             "subtitleslangs": ["en"],
             "subtitlesformat": "srt",
             "skip_download": True,
             "outtmpl": sub_out,
-            "noplaylist": True,
-            "quiet": True,
-            "no_warnings": True,
-        }
+        })
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
