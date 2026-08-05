@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import sys
 import time
+from datetime import timedelta
 from typing import Any
 
 from openmontage.reference_clone import (
@@ -80,7 +82,51 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--interval", type=float, default=2.0)
     publish.add_argument("--limit", type=int, default=100)
     publish.add_argument("--json", action="store_true")
+
+    worker = sub.add_parser("worker", help="Run the durable video Job Worker.")
+    worker_commands = worker.add_subparsers(dest="worker_command", required=True)
+    run = worker_commands.add_parser("run", help="Claim and execute queued video Jobs.")
+    run.add_argument("--once", action="store_true", help="Process at most one lease and exit.")
+    run.add_argument("--interval", type=float, default=2.0, help="Idle poll interval in seconds.")
+    run.add_argument("--lease-seconds", type=float, default=120.0)
+    run.add_argument("--heartbeat-seconds", type=float, default=30.0)
+    run.add_argument("--retry-seconds", type=float, default=15.0)
+    run.add_argument("--max-attempts", type=int, default=3)
+    run.add_argument("--json", action="store_true")
     return parser
+
+
+def _build_job_worker(args: argparse.Namespace):
+    from lib.paths import PROJECTS_DIR
+    from openmontage.artifact_bridge import ArtifactBridgeClient
+    from openmontage.job_api import default_job_service
+    from openmontage.job_worker import JobWorker
+    from openmontage.pipeline_executor import AgentCommandPipelineExecutor
+
+    worker_id = os.environ.get("OPENMONTAGE_WORKER_ID", "").strip()
+    if not worker_id:
+        worker_id = f"{socket.gethostname()}-{os.getpid()}"
+    return JobWorker(
+        default_job_service(),
+        AgentCommandPipelineExecutor.from_environment(),
+        projects_dir=PROJECTS_DIR,
+        worker_id=worker_id,
+        lease_duration=timedelta(seconds=args.lease_seconds),
+        heartbeat_interval=timedelta(seconds=args.heartbeat_seconds),
+        retry_delay=timedelta(seconds=args.retry_seconds),
+        max_executor_attempts=args.max_attempts,
+        artifact_bridge=ArtifactBridgeClient.from_environment(),
+    )
+
+
+def _worker_document(result: Any | None) -> dict[str, Any]:
+    if result is None:
+        return {"outcome": "idle"}
+    return {
+        "jobId": result.job_id,
+        "stage": result.stage,
+        "outcome": result.outcome,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -128,9 +174,29 @@ def main(argv: list[str] | None = None) -> int:
                 if args.once:
                     return 1 if result.failed else 0
                 time.sleep(args.interval)
+        if args.command == "worker" and args.worker_command == "run":
+            if args.interval <= 0:
+                raise ValueError("--interval must be greater than zero")
+            if args.lease_seconds <= 0:
+                raise ValueError("--lease-seconds must be greater than zero")
+            if args.heartbeat_seconds <= 0:
+                raise ValueError("--heartbeat-seconds must be greater than zero")
+            if args.retry_seconds < 0:
+                raise ValueError("--retry-seconds must not be negative")
+            if args.max_attempts < 1:
+                raise ValueError("--max-attempts must be greater than zero")
+            worker = _build_job_worker(args)
+            while True:
+                result = worker.run_once()
+                if result is not None or args.once:
+                    _print(_worker_document(result), as_json=args.json)
+                if args.once:
+                    return 0
+                if result is None:
+                    time.sleep(args.interval)
     except KeyboardInterrupt:
         return 0
-    except (ReferenceCloneError, ValueError, OSError) as exc:
+    except (ReferenceCloneError, ValueError, OSError, RuntimeError) as exc:
         print(json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
     return 1

@@ -74,6 +74,72 @@ manifest with `JobService.publish_artifact()` so the ordered
 `openmontage.artifact.published` event, REST query, and MCP query remain
 recoverable across restarts. Media bytes never belong in MCP JSON.
 
+## Durable Job Worker
+
+The Job control plane does not execute creative stages inside Python. A
+dedicated Worker claims a fenced SQLite lease, writes a stage assignment, and
+invokes an external AI Agent process. The Agent reads the repository pipeline
+manifest and director skills, uses the normal OpenMontage tools, and records its
+result as a validated checkpoint. Configure the process as a JSON argv array;
+shell strings are intentionally rejected:
+
+```bash
+export OPENMONTAGE_AGENT_EXECUTOR_JSON='["codex","exec","-C","/absolute/path/to/OpenMontage","-"]'
+export OPENMONTAGE_AGENT_TIMEOUT_SECONDS=3600
+openmontage worker run --once --json
+openmontage worker run --interval 2 --json
+```
+
+The command must read the assignment prompt from stdin. Its first line points
+to the durable assignment JSON. The process must write `in_progress`,
+`awaiting_human`, `completed`, or `failed` through the normal checkpoint
+protocol; stdout is not treated as success and is not persisted. Use only flags
+approved for the selected Agent CLI. Do not put API keys, delegation secrets,
+or user input in the argv value.
+
+For Docker, the configured executable must exist inside the Linux image. Build
+an approved derived image containing the Agent CLI, or use an internal Agent
+executor binary supplied by the runtime platform. A Codex executable installed
+on a macOS host cannot be bind-mounted as a Linux executable. Supply Agent
+authentication through the platform's secret mechanism, not through Compose
+source or argv. Then start all three long-lived processes:
+
+```bash
+docker compose --profile agentspace up --build -d \
+  openmontage-mcp openmontage-events openmontage-worker
+```
+
+`openmontage-worker` fails closed when `OPENMONTAGE_AGENT_EXECUTOR_JSON` or the
+Artifact Bridge configuration is absent. This is deliberate: the service does
+not fall back to a Python creative orchestrator or a shared provider key.
+
+### Recovery and publication semantics
+
+- One Worker owns a Job lease at a time. Heartbeats extend active work; expiry
+  lets another Worker recover it, while the old lease token is fenced from all
+  Job, stage, and Artifact mutations.
+- A valid completed checkpoint is reconciled before the Agent is invoked. If a
+  paid stage finished just before a Worker crash, recovery advances the Job
+  without repeating that stage.
+- Approval checkpoints enter `WAITING_APPROVAL`. They are not claimable again
+  until AgentSpace resolves the authenticated approval; the next assignment
+  contains the latest approved Job snapshot.
+- Artifact inputs are downloaded into `projects/<job-id>/inputs/` using a
+  one-time grant. A local receipt is reused only after size and SHA-256
+  verification.
+- The final MP4 is accepted only from a validated `publish_log` or
+  `render_report` path inside the Job workspace. Artifact Bridge upload and the
+  durable `artifact.published` event complete before `job.completed`.
+- AgentSpace publication is idempotent by root Task, content digest, and file
+  name. A crash after upload but before local manifest persistence returns the
+  same employee Artifact on retry.
+
+The Worker carries trusted employee, Runtime Task, Job, stage, invocation, and
+trace identifiers in each assignment. It does not yet receive a delegated
+models credential. Per-Job models delegation, authoritative usage links, and
+the billing E2E remain the next implementation gate; until then, do not claim
+that Worker model calls are fully attributed to an AI employee bill.
+
 The publisher reads the same SQLite outbox as the MCP server. A successful 2xx
 response marks an event delivered; network and non-2xx failures remain durable
 and retry with bounded exponential backoff. Operators can perform one flush and
@@ -153,6 +219,8 @@ openmontage status <project-id> --json
 openmontage mcp --transport stdio
 openmontage mcp --transport streamable-http --host 0.0.0.0 --port 8765
 openmontage events publish --once --json
+openmontage worker run --once --json
+openmontage worker run --interval 2 --json
 ```
 
 `clone` prepares the production: it downloads and analyzes the reference, writes
