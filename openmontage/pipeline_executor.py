@@ -8,7 +8,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Protocol, Sequence
 
 from lib.checkpoint import CheckpointValidationError, read_checkpoint
 from lib.pipeline_loader import get_stage_skill, load_pipeline_readonly
@@ -39,6 +39,7 @@ class StageAssignment:
     director_skill: str | None
     request: dict[str, Any]
     attribution: dict[str, Any]
+    job_snapshot: dict[str, Any]
 
     @classmethod
     def from_job(
@@ -70,6 +71,7 @@ class StageAssignment:
             director_skill=f"skills/{skill}.md" if skill else None,
             request=job.request.to_wire(),
             attribution=job.attribution.to_wire(),
+            job_snapshot=job.to_wire(),
         )
 
     def to_wire(self) -> dict[str, Any]:
@@ -86,6 +88,7 @@ class StageAssignment:
             "directorSkill": self.director_skill,
             "request": self.request,
             "attribution": self.attribution,
+            "jobSnapshot": self.job_snapshot,
         }
 
 
@@ -94,6 +97,11 @@ class PipelineExecutionResult:
     status: str
     checkpoint: dict[str, Any]
     assignment_path: Path
+
+
+class PipelineExecutor(Protocol):
+    def execute(self, assignment: StageAssignment) -> PipelineExecutionResult:
+        """Execute one stage and return the checkpoint-backed outcome."""
 
 
 class AgentCommandPipelineExecutor:

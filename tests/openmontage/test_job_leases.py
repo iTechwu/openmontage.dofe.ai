@@ -125,6 +125,15 @@ def test_expired_lease_is_recovered_and_old_worker_is_fenced(tmp_path: Path) -> 
             now=NOW + timedelta(seconds=7),
         )
 
+    with pytest.raises(JobLeaseError, match="lease token"):
+        service.start_stage(
+            old.job_id,
+            "research",
+            lease_token=old.lease_token,
+            lease_now=NOW + timedelta(seconds=7),
+        )
+    assert service.get_job(old.job_id).last_sequence == 1
+
 
 def test_retry_deferral_prevents_early_reclaim(tmp_path: Path) -> None:
     service = JobService(tmp_path / "jobs.sqlite3")

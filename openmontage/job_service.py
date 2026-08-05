@@ -348,6 +348,7 @@ class JobService:
         lease_token: str,
         retry_at: datetime | None = None,
         error: str | None = None,
+        reset_attempts: bool = False,
         now: datetime | None = None,
     ) -> None:
         effective_now = now or _now()
@@ -365,12 +366,15 @@ class JobService:
                 """
                 UPDATE openmontage_job_execution
                 SET worker_id = NULL, lease_token = NULL, lease_expires_at = NULL,
-                    next_attempt_at = ?, last_error = ?, updated_at = ?
+                    next_attempt_at = ?, last_error = ?,
+                    attempts = CASE WHEN ? THEN 0 ELSE attempts END,
+                    updated_at = ?
                 WHERE job_id = ?
                 """,
                 (
                     retry_at.isoformat() if retry_at is not None else None,
                     error[:1000] if error else None,
+                    reset_attempts,
                     effective_now.isoformat(),
                     job_id,
                 ),
@@ -403,9 +407,13 @@ class JobService:
         self,
         job_id: str,
         artifact: PublishedArtifact,
+        *,
+        lease_token: str | None = None,
+        lease_now: datetime | None = None,
     ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now)
             snapshot = self._load_job(connection, job_id)
             if artifact.job_id != snapshot.job_id:
                 raise JobStateError("Published artifact Job identity does not match")
@@ -517,9 +525,17 @@ class JobService:
             if cursor.rowcount != 1:
                 raise LookupError(f"OpenMontage Job event not found: {event_id}")
 
-    def start_stage(self, job_id: str, stage_code: str) -> JobSnapshot:
+    def start_stage(
+        self,
+        job_id: str,
+        stage_code: str,
+        *,
+        lease_token: str | None = None,
+        lease_now: datetime | None = None,
+    ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             stage_index, stage = self._stage(snapshot, stage_code)
             incomplete = [
@@ -547,9 +563,17 @@ class JobService:
                 self._stage_payload(stage),
             )
 
-    def complete_stage(self, job_id: str, stage_code: str) -> JobSnapshot:
+    def complete_stage(
+        self,
+        job_id: str,
+        stage_code: str,
+        *,
+        lease_token: str | None = None,
+        lease_now: datetime | None = None,
+    ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             _, stage = self._stage(snapshot, stage_code)
             if stage.approval_required and stage.approval_status != ApprovalStatus.APPROVED:
@@ -573,6 +597,8 @@ class JobService:
         completed_units: int,
         total_units: int,
         label_code: str,
+        lease_token: str | None = None,
+        lease_now: datetime | None = None,
     ) -> JobSnapshot:
         if total_units <= 0:
             raise JobStateError("total_units must be greater than zero")
@@ -583,6 +609,7 @@ class JobService:
 
         with self._connect() as connection:
             self._begin_write(connection)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             _, stage = self._stage(snapshot, stage_code)
             if stage.status != StageStatus.RUNNING:
@@ -599,9 +626,18 @@ class JobService:
                 {**self._stage_payload(stage), "progress": stage.progress},
             )
 
-    def request_stage_approval(self, job_id: str, stage_code: str, *, reason: str) -> JobSnapshot:
+    def request_stage_approval(
+        self,
+        job_id: str,
+        stage_code: str,
+        *,
+        reason: str,
+        lease_token: str | None = None,
+        lease_now: datetime | None = None,
+    ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             _, stage = self._stage(snapshot, stage_code)
             if not stage.approval_required:
@@ -697,6 +733,8 @@ class JobService:
         code: str,
         message: str,
         retryable: bool,
+        lease_token: str | None = None,
+        lease_now: datetime | None = None,
     ) -> JobSnapshot:
         if not code.strip():
             raise JobStateError("code must not be empty")
@@ -705,6 +743,7 @@ class JobService:
 
         with self._connect() as connection:
             self._begin_write(connection)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             try:
                 validate_job_transition(snapshot.status, JobStatus.FAILED)
@@ -773,9 +812,16 @@ class JobService:
             )
             return snapshot
 
-    def confirm_cancel(self, job_id: str) -> JobSnapshot:
+    def confirm_cancel(
+        self,
+        job_id: str,
+        *,
+        lease_token: str | None = None,
+        lease_now: datetime | None = None,
+    ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             try:
                 validate_job_transition(snapshot.status, JobStatus.CANCELLED)
@@ -794,9 +840,16 @@ class JobService:
                 {"status": JobStatus.CANCELLED.value},
             )
 
-    def complete_job(self, job_id: str) -> JobSnapshot:
+    def complete_job(
+        self,
+        job_id: str,
+        *,
+        lease_token: str | None = None,
+        lease_now: datetime | None = None,
+    ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             if any(
                 stage.status not in {StageStatus.SUCCEEDED, StageStatus.SKIPPED}
@@ -846,6 +899,18 @@ class JobService:
         if expires_at <= now:
             raise JobLeaseError("Job lease has expired")
         return row
+
+    @classmethod
+    def _require_lease_if_present(
+        cls,
+        connection: sqlite3.Connection,
+        job_id: str,
+        lease_token: str | None,
+        lease_now: datetime | None,
+    ) -> None:
+        if lease_token is None:
+            return
+        cls._require_active_lease(connection, job_id, lease_token, lease_now or _now())
 
     @staticmethod
     def _require_expected_sequence(
