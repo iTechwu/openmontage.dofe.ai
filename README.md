@@ -230,7 +230,18 @@ This repo is built for agentic operation. If you're an OpenClaw-style agent, her
 ```bash
 # .env — every key is optional, add what you have
 
-# Image + video gateway:
+# Unified DoFe.AI model gateway (recommended):
+DOFE_ENABLED=true
+DOFE_MODEL_BASE_URL=https://model.local.dofe.ai/api
+DOFE_MODEL_API_KEY=your-key
+DOFE_IMAGE_MODEL=seedream-5.0
+DOFE_VIDEO_MODEL=seedance-2.0-fast
+DOFE_STT_MODEL=openspeech-auc
+DOFE_INTERNAL_API_BASE_URL=https://model.local.dofe.ai
+DOFE_TENANT_ID=your-tenant-uuid
+INTERNAL_API_SECRET=your-internal-service-secret
+
+# Optional direct-provider compatibility paths:
 FAL_KEY=your-key               # FLUX images + Google Veo, Kling, MiniMax video + Recraft images
 ATLASCLOUD_API_KEY=your-key    # Atlas Cloud — Seedream/Nano Banana/GPT Image + Kling/Seedance/Hailuo video
 
@@ -705,6 +716,13 @@ OpenMontage is built to be extended. The two most common contributions:
 3. Reference existing tools — or add new ones if needed
 
 See `docs/ARCHITECTURE.md` for the full technical reference, `docs/PROVIDERS.md` for the complete provider guide (setup, pricing, free tiers), and `AGENT_GUIDE.md` for the agent contract.
+
+### Docker, MCP, and video-link recreation
+
+OpenMontage can run as a Dockerized MCP server for Codex or Claude and includes
+the `$recreate-video` skill. It accepts YouTube, TikTok, Instagram, **Douyin**
+(including `v.douyin.com` short links and pasted share text), and local video
+references. See [Docker and agent integration](docs/DOCKER_AND_AGENTS.md).
 
 ### Join the Community
 

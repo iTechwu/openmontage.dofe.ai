@@ -1,0 +1,18 @@
+services:
+  openmontage-mcp:
+    environment:
+      OPENMONTAGE_YTDLP_COOKIES: /run/secrets/ytdlp-cookies.txt
+    volumes:
+      - type: bind
+        source: ${OPENMONTAGE_YTDLP_COOKIES_HOST:?Set this to an exported Netscape cookies.txt file}
+        target: /run/secrets/ytdlp-cookies.txt
+        read_only: true
+
+  openmontage-cli:
+    environment:
+      OPENMONTAGE_YTDLP_COOKIES: /run/secrets/ytdlp-cookies.txt
+    volumes:
+      - type: bind
+        source: ${OPENMONTAGE_YTDLP_COOKIES_HOST:?Set this to an exported Netscape cookies.txt file}
+        target: /run/secrets/ytdlp-cookies.txt
+        read_only: true

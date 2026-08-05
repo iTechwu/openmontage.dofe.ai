@@ -1,0 +1,12 @@
+services:
+  openmontage-mcp:
+    environment:
+      DOFE_MODEL_BASE_URL: https://model.local.dofe.ai/api
+    extra_hosts:
+      - "model.local.dofe.ai:host-gateway"
+
+  openmontage-cli:
+    environment:
+      DOFE_MODEL_BASE_URL: https://model.local.dofe.ai/api
+    extra_hosts:
+      - "model.local.dofe.ai:host-gateway"

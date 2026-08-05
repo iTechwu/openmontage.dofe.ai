@@ -1,0 +1,44 @@
+name: openmontage
+
+x-openmontage-common: &openmontage-common
+  platform: ${OPENMONTAGE_PLATFORM:-linux/amd64}
+  build:
+    context: .
+  image: openmontage:local
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    OPENMONTAGE_PROJECTS_DIR: /data/projects
+    OPENMONTAGE_MCP_HOST: 0.0.0.0
+    OPENMONTAGE_MCP_PORT: 8765
+    DOFE_ENABLED: "true"
+    DOFE_MODEL_BASE_URL: ${DOFE_INTERNAL_BASE_URL:-http://api:3101}
+    DOFE_INTERNAL_BASE_URL: ${DOFE_INTERNAL_BASE_URL:-http://api:3101}
+    DOFE_INTERNAL_API_BASE_URL: ${DOFE_INTERNAL_BASE_URL:-http://api:3101}
+    DOFE_TENANT_ID: ${DOFE_TENANT_ID:-}
+    INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-}
+    DOFE_CA_BUNDLE: ${DOFE_CA_BUNDLE:-}
+  volumes:
+    - ./projects:/data/projects
+    - ./music_library:/data/music_library
+  networks:
+    - dofe-models
+
+services:
+  openmontage-mcp:
+    <<: *openmontage-common
+    command: ["mcp", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8765"]
+    ports:
+      - "${OPENMONTAGE_MCP_PORT:-8765}:8765"
+    restart: unless-stopped
+
+  openmontage-cli:
+    <<: *openmontage-common
+    profiles: ["tools"]
+    command: ["--help"]
+
+networks:
+  dofe-models:
+    external: true
+    name: ${DOFE_DOCKER_NETWORK:-modelsdofeai_default}
