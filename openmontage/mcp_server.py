@@ -150,6 +150,19 @@ def create_server(
             "lastSequence": snapshot.last_sequence,
         }
 
+    @server.tool()
+    def list_video_artifacts(job_id: str, ctx: Context) -> dict[str, Any]:
+        """List durable video outputs published for a Job."""
+        from openmontage.job_api import require_same_workspace
+
+        attribution = resolve_attribution(ctx.headers)
+        snapshot = jobs().get_job(job_id)
+        require_same_workspace(snapshot, attribution)
+        return {
+            "artifacts": [artifact.to_wire() for artifact in snapshot.artifacts],
+            "lastSequence": snapshot.last_sequence,
+        }
+
     @server.resource("openmontage://reference-clone-guide")
     def reference_clone_guide() -> str:
         """Return the authoritative agent workflow for URL-driven video recreation."""

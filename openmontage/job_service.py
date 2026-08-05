@@ -19,6 +19,7 @@ from openmontage.contracts import (
     JobSnapshot,
     JobStatus,
     OutboxRecord,
+    PublishedArtifact,
     StageSnapshot,
     StageStatus,
     WorkflowDefinition,
@@ -207,6 +208,49 @@ class JobService:
                 (job_id, after_sequence),
             ).fetchall()
         return [JobEvent.model_validate_json(row["event_json"]) for row in rows]
+
+    def publish_artifact(
+        self,
+        job_id: str,
+        artifact: PublishedArtifact,
+    ) -> JobSnapshot:
+        with self._connect() as connection:
+            self._begin_write(connection)
+            snapshot = self._load_job(connection, job_id)
+            if artifact.job_id != snapshot.job_id:
+                raise JobStateError("Published artifact Job identity does not match")
+            if artifact.employee_id != snapshot.attribution.employee_id:
+                raise JobStateError("Published artifact employee identity does not match")
+            existing = next(
+                (
+                    item
+                    for item in snapshot.artifacts
+                    if item.employee_artifact_id == artifact.employee_artifact_id
+                ),
+                None,
+            )
+            if existing is not None:
+                if existing != artifact:
+                    raise JobConflictError(
+                        "employee_artifact_id was already published with different metadata"
+                    )
+                return snapshot
+            snapshot.artifacts = (*snapshot.artifacts, artifact)
+            return self._persist_event(
+                connection,
+                snapshot,
+                JobEventType.ARTIFACT_PUBLISHED,
+                {
+                    "artifactId": artifact.employee_artifact_id,
+                    "employeeId": artifact.employee_id,
+                    "role": artifact.role,
+                    "fileName": artifact.file_name,
+                    "mediaType": artifact.media_type,
+                    "sizeBytes": artifact.size_bytes,
+                    "sha256": artifact.sha256,
+                    "publishedAt": artifact.published_at.isoformat().replace("+00:00", "Z"),
+                },
+            )
 
     def list_pending_outbox(
         self,

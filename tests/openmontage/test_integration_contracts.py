@@ -55,6 +55,7 @@ async def test_mcp_server_publishes_reference_clone_surface():
         "approve_video_stage",
         "cancel_video_job",
         "get_video_job",
+        "list_video_artifacts",
         "list_video_job_events",
         "openmontage_capabilities",
         "prepare_reference_clone",

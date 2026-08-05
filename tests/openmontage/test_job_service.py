@@ -11,6 +11,7 @@ from openmontage.contracts import (
     JobCreateRequest,
     JobEventType,
     JobStatus,
+    PublishedArtifact,
     StageStatus,
 )
 from openmontage.job_service import JobConflictError, JobService, JobStateError
@@ -71,6 +72,49 @@ def test_create_job_persists_manifest_snapshot_and_created_event(tmp_path: Path)
         "name": "animated-explainer",
         "version": "2.0",
     }
+
+
+def test_published_artifact_is_durable_idempotent_and_emits_visible_event(tmp_path: Path) -> None:
+    db_path = tmp_path / "jobs.sqlite3"
+    service = _service(db_path)
+    job = service.create_job(_request(), _attribution())
+    artifact = PublishedArtifact(
+        job_id=job.job_id,
+        employee_artifact_id="eart-1",
+        employee_id="employee-1",
+        role="final_video",
+        file_name="final.mp4",
+        media_type="video/mp4",
+        size_bytes=5,
+        sha256="a" * 64,
+        published_at="2026-08-05T10:00:02Z",
+    )
+
+    published = service.publish_artifact(job.job_id, artifact)
+    repeated = service.publish_artifact(job.job_id, artifact)
+    restored = _service(db_path).get_job(job.job_id)
+
+    assert published.artifacts == (artifact,)
+    assert repeated.last_sequence == published.last_sequence
+    assert restored.artifacts == (artifact,)
+    event = service.list_events(job.job_id)[-1]
+    assert event.event_type == JobEventType.ARTIFACT_PUBLISHED
+    assert event.payload == {
+        "artifactId": "eart-1",
+        "employeeId": "employee-1",
+        "role": "final_video",
+        "fileName": "final.mp4",
+        "mediaType": "video/mp4",
+        "sizeBytes": 5,
+        "sha256": "a" * 64,
+        "publishedAt": "2026-08-05T10:00:02Z",
+    }
+
+    with pytest.raises(JobStateError, match="employee"):
+        service.publish_artifact(
+            job.job_id,
+            artifact.model_copy(update={"employee_id": "employee-2"}),
+        )
 
 
 def test_create_job_is_idempotent_for_the_same_workspace_and_request(tmp_path: Path) -> None:

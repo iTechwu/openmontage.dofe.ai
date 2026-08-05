@@ -135,6 +135,19 @@ class StageSnapshot(WireModel):
     completed_at: datetime | None = None
 
 
+class PublishedArtifact(WireModel):
+    schema_version: Literal[1] = 1
+    job_id: str = Field(min_length=1, max_length=256)
+    employee_artifact_id: str = Field(min_length=1, max_length=256)
+    employee_id: str = Field(min_length=1, max_length=256)
+    role: str = Field(min_length=1, max_length=64)
+    file_name: str = Field(min_length=1, max_length=255)
+    media_type: str = Field(min_length=1, max_length=255)
+    size_bytes: int = Field(gt=0)
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    published_at: datetime
+
+
 class JobSnapshot(WireModel):
     schema_version: Literal[1] = 1
     job_id: str = Field(min_length=1)
@@ -143,6 +156,7 @@ class JobSnapshot(WireModel):
     attribution: JobAttribution
     request: JobCreateRequest
     stages: tuple[StageSnapshot, ...]
+    artifacts: tuple[PublishedArtifact, ...] = ()
     current_stage: str | None = None
     last_sequence: int = Field(default=0, ge=0)
     created_at: datetime
@@ -231,19 +245,6 @@ class ArtifactWriteGrant(WireModel):
     token: str = Field(min_length=32, max_length=512)
     expires_at: datetime
     artifact: OutputArtifactMetadata
-
-
-class PublishedArtifact(WireModel):
-    schema_version: Literal[1] = 1
-    job_id: str = Field(min_length=1, max_length=256)
-    employee_artifact_id: str = Field(min_length=1, max_length=256)
-    employee_id: str = Field(min_length=1, max_length=256)
-    role: str = Field(min_length=1, max_length=64)
-    file_name: str = Field(min_length=1, max_length=255)
-    media_type: str = Field(min_length=1, max_length=255)
-    size_bytes: int = Field(gt=0)
-    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    published_at: datetime
 
 
 _STAGE_TRANSITIONS: dict[StageStatus, frozenset[StageStatus]] = {

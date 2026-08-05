@@ -130,6 +130,20 @@ def create_job_routes(
         except Exception as exc:
             return _error_response(exc)
 
+    async def list_artifacts(request: Request) -> JSONResponse:
+        try:
+            attribution = attribution_resolver(request.headers)
+            snapshot = service.get_job(request.path_params["job_id"])
+            require_same_workspace(snapshot, attribution)
+            return JSONResponse(
+                {
+                    "artifacts": [artifact.to_wire() for artifact in snapshot.artifacts],
+                    "lastSequence": snapshot.last_sequence,
+                }
+            )
+        except Exception as exc:
+            return _error_response(exc)
+
     async def cancel_job(request: Request) -> JSONResponse:
         try:
             attribution = attribution_resolver(request.headers)
@@ -176,6 +190,7 @@ def create_job_routes(
         Route("/api/v1/jobs", create_job, methods=["POST"]),
         Route("/api/v1/jobs/{job_id}", get_job, methods=["GET"]),
         Route("/api/v1/jobs/{job_id}/events", list_events, methods=["GET"]),
+        Route("/api/v1/jobs/{job_id}/artifacts", list_artifacts, methods=["GET"]),
         Route("/api/v1/jobs/{job_id}/cancel", cancel_job, methods=["POST"]),
         Route("/api/v1/jobs/{job_id}/approve", approve_stage, methods=["POST"]),
     ]
