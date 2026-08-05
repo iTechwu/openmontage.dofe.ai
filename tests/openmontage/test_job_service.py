@@ -220,6 +220,35 @@ def test_approval_stage_cannot_complete_until_approval_is_resolved(tmp_path: Pat
     ]
 
 
+def test_approval_command_is_idempotent_across_service_restarts(tmp_path: Path) -> None:
+    db_path = tmp_path / "jobs.sqlite3"
+    service = _service(db_path)
+    job = service.create_job(_request(), _attribution())
+    service.start_stage(job.job_id, "research")
+    service.complete_stage(job.job_id, "research")
+    service.start_stage(job.job_id, "proposal")
+    waiting = service.request_stage_approval(job.job_id, "proposal", reason="Approve plan")
+
+    first = service.resolve_stage_approval(
+        job.job_id,
+        "proposal",
+        approved=True,
+        expected_sequence=waiting.last_sequence,
+        idempotency_key="approve-proposal-4",
+    )
+    repeated = _service(db_path).resolve_stage_approval(
+        job.job_id,
+        "proposal",
+        approved=True,
+        expected_sequence=waiting.last_sequence,
+        idempotency_key="approve-proposal-4",
+    )
+
+    assert repeated.last_sequence == first.last_sequence
+    assert repeated.stages[1].approval_status == "APPROVED"
+    assert [event.sequence for event in service.list_events(job.job_id)] == [1, 2, 3, 4, 5, 6]
+
+
 def test_rejected_approval_emits_resolved_and_terminal_failed_events(tmp_path: Path) -> None:
     service = _service(tmp_path / "jobs.sqlite3")
     job = service.create_job(_request(), _attribution())

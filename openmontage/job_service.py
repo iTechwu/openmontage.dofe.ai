@@ -95,6 +95,15 @@ class JobService:
 
                 CREATE INDEX IF NOT EXISTS idx_openmontage_job_event_pending
                     ON openmontage_job_event(delivery_status, next_attempt_at, created_at);
+
+                CREATE TABLE IF NOT EXISTS openmontage_job_command (
+                    job_id TEXT NOT NULL REFERENCES openmontage_job(job_id) ON DELETE CASCADE,
+                    idempotency_key TEXT NOT NULL,
+                    command_hash TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (job_id, idempotency_key)
+                );
                 """
             )
             columns = {
@@ -384,10 +393,27 @@ class JobService:
         stage_code: str,
         *,
         approved: bool,
+        expected_sequence: int | None = None,
+        idempotency_key: str | None = None,
     ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
+            command_hash = self._command_hash(
+                idempotency_key,
+                {
+                    "command": "resolve_stage_approval",
+                    "stage": stage_code,
+                    "approved": approved,
+                    "expectedSequence": expected_sequence,
+                },
+            )
+            replay = self._read_command_result(
+                connection, job_id, idempotency_key, command_hash
+            )
+            if replay is not None:
+                return replay
+            self._require_expected_sequence(snapshot, expected_sequence)
             _, stage = self._stage(snapshot, stage_code)
             if stage.status != StageStatus.WAITING_APPROVAL:
                 raise JobStateError(f"Stage {stage_code!r} has no pending approval")
@@ -425,6 +451,9 @@ class JobService:
                         },
                     },
                 )
+            self._record_command_result(
+                connection, snapshot, idempotency_key, command_hash
+            )
             return snapshot
 
     def fail_job(
@@ -471,21 +500,44 @@ class JobService:
                 },
             )
 
-    def request_cancel(self, job_id: str) -> JobSnapshot:
+    def request_cancel(
+        self,
+        job_id: str,
+        *,
+        expected_sequence: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
+            command_hash = self._command_hash(
+                idempotency_key,
+                {
+                    "command": "request_cancel",
+                    "expectedSequence": expected_sequence,
+                },
+            )
+            replay = self._read_command_result(
+                connection, job_id, idempotency_key, command_hash
+            )
+            if replay is not None:
+                return replay
+            self._require_expected_sequence(snapshot, expected_sequence)
             try:
                 validate_job_transition(snapshot.status, JobStatus.CANCEL_REQUESTED)
             except ValueError as exc:
                 raise JobStateError(str(exc)) from exc
             snapshot.status = JobStatus.CANCEL_REQUESTED
-            return self._persist_event(
+            snapshot = self._persist_event(
                 connection,
                 snapshot,
                 JobEventType.JOB_CANCEL_REQUESTED,
                 {"status": JobStatus.CANCEL_REQUESTED.value},
             )
+            self._record_command_result(
+                connection, snapshot, idempotency_key, command_hash
+            )
+            return snapshot
 
     def confirm_cancel(self, job_id: str) -> JobSnapshot:
         with self._connect() as connection:
@@ -538,6 +590,80 @@ class JobService:
         if row is None:
             raise JobNotFoundError(f"OpenMontage Job not found: {job_id}")
         return JobSnapshot.model_validate_json(row["snapshot_json"])
+
+    @staticmethod
+    def _require_expected_sequence(
+        snapshot: JobSnapshot,
+        expected_sequence: int | None,
+    ) -> None:
+        if expected_sequence is None:
+            return
+        if expected_sequence < 0:
+            raise JobStateError("expected_sequence must be non-negative")
+        if snapshot.last_sequence != expected_sequence:
+            raise JobConflictError(
+                "Job changed since the action was requested; refresh and retry"
+            )
+
+    @staticmethod
+    def _command_hash(
+        idempotency_key: str | None,
+        command: dict[str, Any],
+    ) -> str | None:
+        if idempotency_key is None:
+            return None
+        if not idempotency_key.strip() or len(idempotency_key) > 256:
+            raise JobStateError("idempotency_key must be between 1 and 256 characters")
+        return hashlib.sha256(_canonical_json(command).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _read_command_result(
+        connection: sqlite3.Connection,
+        job_id: str,
+        idempotency_key: str | None,
+        command_hash: str | None,
+    ) -> JobSnapshot | None:
+        if idempotency_key is None or command_hash is None:
+            return None
+        row = connection.execute(
+            """
+            SELECT command_hash, snapshot_json
+            FROM openmontage_job_command
+            WHERE job_id = ? AND idempotency_key = ?
+            """,
+            (job_id, idempotency_key),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["command_hash"] != command_hash:
+            raise JobConflictError(
+                "idempotency_key was already used for a different Job command"
+            )
+        return JobSnapshot.model_validate_json(row["snapshot_json"])
+
+    @staticmethod
+    def _record_command_result(
+        connection: sqlite3.Connection,
+        snapshot: JobSnapshot,
+        idempotency_key: str | None,
+        command_hash: str | None,
+    ) -> None:
+        if idempotency_key is None or command_hash is None:
+            return
+        connection.execute(
+            """
+            INSERT INTO openmontage_job_command (
+                job_id, idempotency_key, command_hash, snapshot_json, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot.job_id,
+                idempotency_key,
+                command_hash,
+                _canonical_json(snapshot.to_wire()),
+                _now().isoformat(),
+            ),
+        )
 
     @staticmethod
     def _map_outbox_record(row: sqlite3.Row) -> OutboxRecord:

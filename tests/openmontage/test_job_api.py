@@ -108,6 +108,35 @@ def test_rest_job_access_is_scoped_to_attribution_workspace(tmp_path: Path) -> N
     assert response.status_code == 404
 
 
+def test_rest_cancel_uses_persisted_idempotency_and_sequence_fencing(tmp_path: Path) -> None:
+    client, service = _client(tmp_path)
+    job_id = client.post("/api/v1/jobs", json=_request(), headers=_headers()).json()["jobId"]
+    headers = {**_headers(), "Idempotency-Key": "cancel-job-1-at-sequence-1"}
+
+    first = client.post(
+        f"/api/v1/jobs/{job_id}/cancel",
+        json={"expectedSequence": 1},
+        headers=headers,
+    )
+    repeated = client.post(
+        f"/api/v1/jobs/{job_id}/cancel",
+        json={"expectedSequence": 1},
+        headers=headers,
+    )
+    conflicting = client.post(
+        f"/api/v1/jobs/{job_id}/cancel",
+        json={"expectedSequence": 2},
+        headers=headers,
+    )
+
+    assert first.status_code == 200
+    assert repeated.status_code == 200
+    assert first.json()["lastSequence"] == 2
+    assert repeated.json()["lastSequence"] == 2
+    assert conflicting.status_code == 409
+    assert [event.sequence for event in service.list_events(job_id)] == [1, 2]
+
+
 @pytest.mark.asyncio
 async def test_mcp_job_tools_do_not_expose_trusted_attribution_as_model_input(tmp_path: Path) -> None:
     from mcp import Client

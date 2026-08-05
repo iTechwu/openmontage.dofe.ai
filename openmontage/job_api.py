@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hmac
+import json
 import os
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -135,7 +136,14 @@ def create_job_routes(
             job_id = request.path_params["job_id"]
             snapshot = service.get_job(job_id)
             require_same_workspace(snapshot, attribution)
-            return JSONResponse(service.request_cancel(job_id).to_wire())
+            body = await _optional_json_object(request)
+            return JSONResponse(
+                service.request_cancel(
+                    job_id,
+                    expected_sequence=_expected_sequence(body),
+                    idempotency_key=_header(request.headers, "Idempotency-Key"),
+                ).to_wire()
+            )
         except Exception as exc:
             return _error_response(exc)
 
@@ -145,15 +153,21 @@ def create_job_routes(
             job_id = request.path_params["job_id"]
             snapshot = service.get_job(job_id)
             require_same_workspace(snapshot, attribution)
-            body = await request.json()
-            stage = body.get("stage") if isinstance(body, dict) else None
-            approved = body.get("approved", True) if isinstance(body, dict) else True
+            body = await _optional_json_object(request)
+            stage = body.get("stage")
+            approved = body.get("approved", True)
             if not isinstance(stage, str) or not stage:
                 raise ValueError("stage is required")
             if not isinstance(approved, bool):
                 raise ValueError("approved must be boolean")
             return JSONResponse(
-                service.resolve_stage_approval(job_id, stage, approved=approved).to_wire()
+                service.resolve_stage_approval(
+                    job_id,
+                    stage,
+                    approved=approved,
+                    expected_sequence=_expected_sequence(body),
+                    idempotency_key=_header(request.headers, "Idempotency-Key"),
+                ).to_wire()
             )
         except Exception as exc:
             return _error_response(exc)
@@ -165,6 +179,25 @@ def create_job_routes(
         Route("/api/v1/jobs/{job_id}/cancel", cancel_job, methods=["POST"]),
         Route("/api/v1/jobs/{job_id}/approve", approve_stage, methods=["POST"]),
     ]
+
+
+async def _optional_json_object(request: Request) -> dict[str, Any]:
+    raw = await request.body()
+    if not raw:
+        return {}
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError("request body must be an object")
+    return value
+
+
+def _expected_sequence(body: Mapping[str, Any]) -> int | None:
+    value = body.get("expectedSequence")
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError("expectedSequence must be a non-negative integer")
+    return value
 
 
 def _error_response(error: Exception) -> JSONResponse:
