@@ -31,7 +31,7 @@ def create_server(
             "creatively differentiated video. Then follow the returned agent_instructions "
             "and the OpenMontage pipeline approval gates."
         ),
-        version="0.2.0",
+        version="0.3.0",
     )
 
     def jobs() -> Any:
