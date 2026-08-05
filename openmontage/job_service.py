@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -38,6 +39,20 @@ class JobStateError(RuntimeError):
 
 class JobNotFoundError(LookupError):
     """Raised when a Job ID does not exist."""
+
+
+class JobLeaseError(RuntimeError):
+    """Raised when a Worker lease is invalid, expired, or no longer owned."""
+
+
+@dataclass(frozen=True)
+class JobLease:
+    job_id: str
+    worker_id: str
+    lease_token: str
+    expires_at: datetime
+    attempt: int
+    snapshot: JobSnapshot
 
 
 def _now() -> datetime:
@@ -105,6 +120,20 @@ class JobService:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (job_id, idempotency_key)
                 );
+
+                CREATE TABLE IF NOT EXISTS openmontage_job_execution (
+                    job_id TEXT PRIMARY KEY REFERENCES openmontage_job(job_id) ON DELETE CASCADE,
+                    worker_id TEXT,
+                    lease_token TEXT,
+                    lease_expires_at TEXT,
+                    next_attempt_at TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_openmontage_job_execution_claim
+                    ON openmontage_job_execution(lease_expires_at, next_attempt_at);
                 """
             )
             columns = {
@@ -195,6 +224,167 @@ class JobService:
     def get_job(self, job_id: str) -> JobSnapshot:
         with self._connect() as connection:
             return self._load_job(connection, job_id)
+
+    def claim_job(
+        self,
+        *,
+        worker_id: str,
+        lease_duration: timedelta,
+        now: datetime | None = None,
+    ) -> JobLease | None:
+        normalized_worker_id = worker_id.strip()
+        if not normalized_worker_id or len(normalized_worker_id) > 256:
+            raise JobLeaseError("worker_id must be between 1 and 256 characters")
+        if lease_duration <= timedelta(0):
+            raise JobLeaseError("lease_duration must be greater than zero")
+        effective_now = now or _now()
+        expires_at = effective_now + lease_duration
+
+        with self._connect() as connection:
+            self._begin_write(connection)
+            rows = connection.execute(
+                """
+                SELECT job.job_id, job.snapshot_json
+                FROM openmontage_job AS job
+                LEFT JOIN openmontage_job_execution AS execution
+                  ON execution.job_id = job.job_id
+                WHERE (execution.lease_token IS NULL OR execution.lease_expires_at <= ?)
+                  AND (execution.next_attempt_at IS NULL OR execution.next_attempt_at <= ?)
+                ORDER BY job.created_at ASC
+                """,
+                (effective_now.isoformat(), effective_now.isoformat()),
+            ).fetchall()
+            selected: JobSnapshot | None = None
+            for row in rows:
+                candidate = JobSnapshot.model_validate_json(row["snapshot_json"])
+                if candidate.status in {
+                    JobStatus.QUEUED,
+                    JobStatus.RUNNING,
+                    JobStatus.CANCEL_REQUESTED,
+                }:
+                    selected = candidate
+                    break
+            if selected is None:
+                return None
+
+            lease_token = f"om_lease_{uuid4().hex}"
+            connection.execute(
+                """
+                INSERT INTO openmontage_job_execution (
+                    job_id, worker_id, lease_token, lease_expires_at,
+                    next_attempt_at, attempts, last_error, updated_at
+                ) VALUES (?, ?, ?, ?, NULL, 1, NULL, ?)
+                ON CONFLICT(job_id) DO UPDATE SET
+                    worker_id = excluded.worker_id,
+                    lease_token = excluded.lease_token,
+                    lease_expires_at = excluded.lease_expires_at,
+                    next_attempt_at = NULL,
+                    attempts = openmontage_job_execution.attempts + 1,
+                    last_error = NULL,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    selected.job_id,
+                    normalized_worker_id,
+                    lease_token,
+                    expires_at.isoformat(),
+                    effective_now.isoformat(),
+                ),
+            )
+            execution = connection.execute(
+                "SELECT attempts FROM openmontage_job_execution WHERE job_id = ?",
+                (selected.job_id,),
+            ).fetchone()
+            return JobLease(
+                job_id=selected.job_id,
+                worker_id=normalized_worker_id,
+                lease_token=lease_token,
+                expires_at=expires_at,
+                attempt=int(execution["attempts"]),
+                snapshot=selected,
+            )
+
+    def heartbeat_lease(
+        self,
+        lease: JobLease,
+        *,
+        lease_duration: timedelta,
+        now: datetime | None = None,
+    ) -> JobLease:
+        if lease_duration <= timedelta(0):
+            raise JobLeaseError("lease_duration must be greater than zero")
+        effective_now = now or _now()
+        expires_at = effective_now + lease_duration
+        with self._connect() as connection:
+            self._begin_write(connection)
+            self._require_active_lease(
+                connection,
+                lease.job_id,
+                lease.lease_token,
+                effective_now,
+            )
+            connection.execute(
+                """
+                UPDATE openmontage_job_execution
+                SET lease_expires_at = ?, updated_at = ?
+                WHERE job_id = ?
+                """,
+                (expires_at.isoformat(), effective_now.isoformat(), lease.job_id),
+            )
+            snapshot = self._load_job(connection, lease.job_id)
+        return JobLease(
+            job_id=lease.job_id,
+            worker_id=lease.worker_id,
+            lease_token=lease.lease_token,
+            expires_at=expires_at,
+            attempt=lease.attempt,
+            snapshot=snapshot,
+        )
+
+    def release_lease(
+        self,
+        job_id: str,
+        *,
+        lease_token: str,
+        retry_at: datetime | None = None,
+        error: str | None = None,
+        now: datetime | None = None,
+    ) -> None:
+        effective_now = now or _now()
+        if retry_at is not None and retry_at < effective_now:
+            raise JobLeaseError("retry_at must not be earlier than now")
+        with self._connect() as connection:
+            self._begin_write(connection)
+            self._require_active_lease(
+                connection,
+                job_id,
+                lease_token,
+                effective_now,
+            )
+            connection.execute(
+                """
+                UPDATE openmontage_job_execution
+                SET worker_id = NULL, lease_token = NULL, lease_expires_at = NULL,
+                    next_attempt_at = ?, last_error = ?, updated_at = ?
+                WHERE job_id = ?
+                """,
+                (
+                    retry_at.isoformat() if retry_at is not None else None,
+                    error[:1000] if error else None,
+                    effective_now.isoformat(),
+                    job_id,
+                ),
+            )
+
+    def require_active_lease(
+        self,
+        job_id: str,
+        *,
+        lease_token: str,
+        now: datetime | None = None,
+    ) -> None:
+        with self._connect() as connection:
+            self._require_active_lease(connection, job_id, lease_token, now or _now())
 
     def list_events(self, job_id: str, *, after_sequence: int = 0) -> list[JobEvent]:
         with self._connect() as connection:
@@ -634,6 +824,28 @@ class JobService:
         if row is None:
             raise JobNotFoundError(f"OpenMontage Job not found: {job_id}")
         return JobSnapshot.model_validate_json(row["snapshot_json"])
+
+    @staticmethod
+    def _require_active_lease(
+        connection: sqlite3.Connection,
+        job_id: str,
+        lease_token: str,
+        now: datetime,
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            """
+            SELECT lease_token, lease_expires_at
+            FROM openmontage_job_execution
+            WHERE job_id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+        if row is None or row["lease_token"] != lease_token:
+            raise JobLeaseError("Job lease token is no longer active")
+        expires_at = datetime.fromisoformat(row["lease_expires_at"])
+        if expires_at <= now:
+            raise JobLeaseError("Job lease has expired")
+        return row
 
     @staticmethod
     def _require_expected_sequence(
