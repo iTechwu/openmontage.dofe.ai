@@ -1,0 +1,138 @@
+from __future__ import annotations
+
+import base64
+import json
+from pathlib import Path
+
+import pytest
+from starlette.testclient import TestClient
+
+from openmontage.contracts import JobAttribution
+from openmontage.job_api import TrustedAttributionResolver
+from openmontage.job_service import JobService
+from openmontage.mcp_server import build_http_app, create_server
+
+
+SERVICE_TOKEN = "service-token"
+
+
+def _attribution() -> JobAttribution:
+    return JobAttribution(
+        workspace_id="ws-1",
+        employee_id="employee-1",
+        runtime_id="runtime-1",
+        root_task_id="task-1",
+        conversation_id="conversation-1",
+        source_invocation_id="invocation-1",
+        trace_id="trace-1",
+    )
+
+
+def _headers() -> dict[str, str]:
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(_attribution().to_wire(), separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+    return {
+        "Authorization": f"Bearer {SERVICE_TOKEN}",
+        "X-Dofe-Job-Attribution": encoded,
+    }
+
+
+def _request() -> dict[str, object]:
+    return {
+        "schemaVersion": 1,
+        "clientRequestId": "request-1",
+        "workflow": "framework-smoke",
+        "input": {"type": "text", "inlineText": "Smoke"},
+        "brief": {"title": "Smoke"},
+        "output": {"container": "mp4"},
+        "budget": {"maxAmount": "1.00", "currency": "CNY"},
+    }
+
+
+def _client(tmp_path: Path) -> tuple[TestClient, JobService]:
+    service = JobService(tmp_path / "jobs.sqlite3")
+    app = build_http_app(
+        job_service=service,
+        attribution_resolver=TrustedAttributionResolver(SERVICE_TOKEN),
+    )
+    return TestClient(app), service
+
+
+def test_rest_job_creation_requires_trusted_service_context(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+
+    response = client.post("/api/v1/jobs", json=_request())
+
+    assert response.status_code == 401
+    assert response.json() == {"error": {"code": "OPENMONTAGE_UNAUTHORIZED"}}
+
+
+def test_rest_job_create_status_and_event_replay(tmp_path: Path) -> None:
+    client, service = _client(tmp_path)
+
+    created = client.post("/api/v1/jobs", json=_request(), headers=_headers())
+    assert created.status_code == 201
+    job_id = created.json()["jobId"]
+
+    service.start_stage(job_id, "research")
+    status = client.get(f"/api/v1/jobs/{job_id}", headers=_headers())
+    replay = client.get(
+        f"/api/v1/jobs/{job_id}/events?afterSequence=1",
+        headers=_headers(),
+    )
+
+    assert status.status_code == 200
+    assert status.json()["status"] == "RUNNING"
+    assert status.json()["currentStage"] == "research"
+    assert [event["sequence"] for event in replay.json()["events"]] == [2]
+    assert replay.json()["lastSequence"] == 2
+
+
+def test_rest_job_access_is_scoped_to_attribution_workspace(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    job_id = client.post("/api/v1/jobs", json=_request(), headers=_headers()).json()["jobId"]
+    other = _attribution().model_copy(update={"workspace_id": "ws-2"})
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(other.to_wire(), separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+
+    response = client.get(
+        f"/api/v1/jobs/{job_id}",
+        headers={
+            "Authorization": f"Bearer {SERVICE_TOKEN}",
+            "X-Dofe-Job-Attribution": encoded,
+        },
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_mcp_job_tools_do_not_expose_trusted_attribution_as_model_input(tmp_path: Path) -> None:
+    from mcp import Client
+
+    service = JobService(tmp_path / "jobs.sqlite3")
+
+    def resolve_for_test(_headers: object) -> JobAttribution:
+        return _attribution()
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=resolve_for_test)
+    ) as client:
+        tools = await client.list_tools()
+        created = await client.call_tool("submit_video_job", {"request": _request()})
+
+    by_name = {tool.name: tool for tool in tools.tools}
+    assert {
+        "submit_video_job",
+        "get_video_job",
+        "cancel_video_job",
+        "approve_video_stage",
+        "list_video_job_events",
+    }.issubset(by_name)
+    submit_schema = by_name["submit_video_job"].input_schema
+    serialized_schema = json.dumps(submit_schema)
+    assert "workspaceId" not in serialized_schema
+    assert "employeeId" not in serialized_schema
+    assert created.structured_content["status"] == "QUEUED"

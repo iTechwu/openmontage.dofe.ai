@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openmontage.local/schemas/integration/openmontage-job-event-v1.schema.json",
+  "title": "OpenMontage Job Event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "eventId",
+    "eventType",
+    "occurredAt",
+    "jobId",
+    "sequence",
+    "workspaceId",
+    "employeeId",
+    "runtimeId",
+    "rootTaskId",
+    "conversationId",
+    "sourceInvocationId",
+    "traceId",
+    "payload"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "eventId": { "type": "string", "minLength": 1 },
+    "eventType": {
+      "enum": [
+        "openmontage.job.created",
+        "openmontage.stage.started",
+        "openmontage.stage.progressed",
+        "openmontage.stage.completed",
+        "openmontage.job.waiting_approval",
+        "openmontage.approval.resolved",
+        "openmontage.usage.updated",
+        "openmontage.artifact.published",
+        "openmontage.job.completed",
+        "openmontage.job.failed",
+        "openmontage.job.cancel_requested",
+        "openmontage.job.cancelled"
+      ]
+    },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "jobId": { "type": "string", "minLength": 1 },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "workspaceId": { "type": "string", "minLength": 1 },
+    "employeeId": { "type": "string", "minLength": 1 },
+    "runtimeId": { "type": "string", "minLength": 1 },
+    "rootTaskId": { "type": "string", "minLength": 1 },
+    "conversationId": { "type": "string", "minLength": 1 },
+    "sourceInvocationId": { "type": "string", "minLength": 1 },
+    "traceId": { "type": "string", "minLength": 1 },
+    "payload": { "type": "object" }
+  }
+}

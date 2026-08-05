@@ -10,8 +10,12 @@ x-openmontage-common: &openmontage-common
       required: false
   environment:
     OPENMONTAGE_PROJECTS_DIR: /data/projects
+    OPENMONTAGE_JOB_DB: /data/projects/.openmontage/jobs.sqlite3
     OPENMONTAGE_MCP_HOST: 0.0.0.0
     OPENMONTAGE_MCP_PORT: 8765
+    OPENMONTAGE_SERVICE_TOKEN: ${OPENMONTAGE_SERVICE_TOKEN:?Set OPENMONTAGE_SERVICE_TOKEN in .env}
+    OPENMONTAGE_EVENT_ENDPOINT: ${OPENMONTAGE_EVENT_ENDPOINT:-http://host.docker.internal:1455/api/internal/openmontage/events}
+    OPENMONTAGE_EVENT_SIGNING_SECRET: ${OPENMONTAGE_EVENT_SIGNING_SECRET:?Set OPENMONTAGE_EVENT_SIGNING_SECRET in .env}
     DOFE_ENABLED: "true"
     DOFE_MODEL_BASE_URL: ${DOFE_INTERNAL_BASE_URL:-http://api:3101}
     DOFE_INTERNAL_BASE_URL: ${DOFE_INTERNAL_BASE_URL:-http://api:3101}
@@ -24,6 +28,8 @@ x-openmontage-common: &openmontage-common
     - ./music_library:/data/music_library
   networks:
     - dofe-models
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
 
 services:
   openmontage-mcp:
@@ -37,6 +43,12 @@ services:
     <<: *openmontage-common
     profiles: ["tools"]
     command: ["--help"]
+
+  openmontage-events:
+    <<: *openmontage-common
+    profiles: ["agentspace"]
+    command: ["events", "publish", "--interval", "2", "--json"]
+    restart: unless-stopped
 
 networks:
   dofe-models:

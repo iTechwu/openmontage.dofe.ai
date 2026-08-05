@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "eventId": "om_evt_fixture_1",
+  "eventType": "openmontage.job.created",
+  "occurredAt": "2026-08-05T10:00:00Z",
+  "jobId": "om_job_fixture_1",
+  "sequence": 1,
+  "workspaceId": "ws-fixture",
+  "employeeId": "employee-fixture",
+  "runtimeId": "runtime-fixture",
+  "rootTaskId": "task-fixture",
+  "conversationId": "conversation-fixture",
+  "sourceInvocationId": "invocation-fixture",
+  "traceId": "trace-fixture",
+  "payload": {
+    "workflow": {
+      "name": "animated-explainer",
+      "version": "2.0"
+    }
+  }
+}

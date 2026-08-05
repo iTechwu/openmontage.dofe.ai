@@ -36,15 +36,42 @@ input. Actual spend is finalized from the provider-reported output-token usage.
 
 ## Docker deployment
 
-Build and start the Streamable HTTP MCP server:
+Generate independent service and event-signing secrets in `.env`, then build and
+start the Streamable HTTP MCP server:
 
 ```bash
+openssl rand -hex 32  # OPENMONTAGE_SERVICE_TOKEN
+openssl rand -hex 32  # OPENMONTAGE_EVENT_SIGNING_SECRET
 docker compose up --build -d openmontage-mcp
 curl http://localhost:8765/healthz
 ```
 
 The MCP endpoint is `http://localhost:8765/mcp`. Generated projects persist in
 `./projects`; the local music library is mounted from `./music_library`.
+The durable Job snapshot and transactional event outbox are stored at
+`./projects/.openmontage/jobs.sqlite3`.
+
+When AgentSpace is available, start the signed event publisher as well:
+
+```bash
+docker compose --profile agentspace up --build -d openmontage-mcp openmontage-events
+```
+
+`OPENMONTAGE_SERVICE_TOKEN` authenticates AgentSpace requests to OpenMontage.
+`OPENMONTAGE_EVENT_SIGNING_SECRET` signs the exact event body sent to
+`OPENMONTAGE_EVENT_ENDPOINT`; use the same signing secret in the AgentSpace
+event bridge. The defaults target AgentSpace on the Docker host at port `1455`.
+Override the endpoint with an internal service URL when both applications share
+a Docker network. Do not reuse either secret as a model-provider credential.
+
+The publisher reads the same SQLite outbox as the MCP server. A successful 2xx
+response marks an event delivered; network and non-2xx failures remain durable
+and retry with bounded exponential backoff. Operators can perform one flush and
+receive a non-zero exit code on delivery failure:
+
+```bash
+docker compose run --rm openmontage-cli events publish --once --json
+```
 
 By default, Compose joins the existing `modelsdofeai_default` network and uses
 the Airouter API service directly at `http://api:3101`. Override these names when
@@ -115,6 +142,7 @@ openmontage capabilities --json
 openmontage status <project-id> --json
 openmontage mcp --transport stdio
 openmontage mcp --transport streamable-http --host 0.0.0.0 --port 8765
+openmontage events publish --once --json
 ```
 
 `clone` prepares the production: it downloads and analyzes the reference, writes
@@ -156,7 +184,17 @@ Use /recreate-video on this Douyin link: <url>. Create an original 9:16 version.
 - `prepare_reference_clone`: download, analyze, preflight, and initialize.
 - `openmontage_capabilities`: compact provider/runtime readiness summary.
 - `reference_clone_status`: current project and next pipeline stage.
+- `submit_video_job`: create an asynchronous, attributable video Job.
+- `get_video_job`: return the durable Job and manifest-derived stage snapshot.
+- `list_video_job_events`: replay ordered events after a sequence cursor.
+- `cancel_video_job`: request cooperative cancellation.
+- `approve_video_stage`: approve or reject a pending human gate.
 - `openmontage://reference-clone-guide`: shared agent workflow resource.
+
+The Job tools never accept workspace, employee, conversation, task, invocation,
+or trace attribution as model-controlled arguments. The authenticated AgentSpace
+gateway supplies that context through the transport. REST equivalents are
+available under `/api/v1/jobs`; cross-workspace reads return `404`.
 
 Only transform references the user is authorized to use. The workflow requires
 creative differentiation and does not promise a frame-for-frame copy.

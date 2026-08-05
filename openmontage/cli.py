@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from typing import Any
 
 from openmontage.reference_clone import (
@@ -71,6 +72,14 @@ def build_parser() -> argparse.ArgumentParser:
     mcp.add_argument(
         "--port", type=int, default=int(os.environ.get("OPENMONTAGE_MCP_PORT", "8765"))
     )
+
+    events = sub.add_parser("events", help="Operate the durable AgentSpace event outbox.")
+    event_commands = events.add_subparsers(dest="events_command", required=True)
+    publish = event_commands.add_parser("publish", help="Publish pending signed Job events.")
+    publish.add_argument("--once", action="store_true", help="Flush once and exit.")
+    publish.add_argument("--interval", type=float, default=2.0)
+    publish.add_argument("--limit", type=int, default=100)
+    publish.add_argument("--json", action="store_true")
     return parser
 
 
@@ -102,6 +111,25 @@ def main(argv: list[str] | None = None) -> int:
 
             run_server(args.transport, host=args.host, port=args.port)
             return 0
+        if args.command == "events" and args.events_command == "publish":
+            from openmontage.event_outbox import OutboxPublisher
+
+            if args.interval <= 0:
+                raise ValueError("--interval must be greater than zero")
+            if args.limit <= 0:
+                raise ValueError("--limit must be greater than zero")
+            publisher = OutboxPublisher.from_environment()
+            while True:
+                result = publisher.publish_pending(limit=args.limit)
+                _print(
+                    {"delivered": result.delivered, "failed": result.failed},
+                    as_json=args.json,
+                )
+                if args.once:
+                    return 1 if result.failed else 0
+                time.sleep(args.interval)
+    except KeyboardInterrupt:
+        return 0
     except (ReferenceCloneError, ValueError, OSError) as exc:
         print(json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
