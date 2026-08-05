@@ -4,6 +4,12 @@ Start here. This is the complete operating guide and agent contract for OpenMont
 
 For architecture, key files, and conventions see [`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md).
 
+## Git 提交约定（强制）
+
+- **提交信息一律使用中文**，采用 Conventional Commits 风格（`feat:` / `fix:` / `refactor:` / `docs:` / `test:` / `chore:`），正文说明本次改动实际完成的内容。
+- **每完成一个可独立交付的实施单元，立即提交并推送到远端**，不要攒到一批任务全部做完再上传。提交信息对应本次单元，而不是整批工作。
+- 提交前运行相关测试，确认改动可用后再上传。
+
 ## First Interaction — Onboarding
 
 When the user's first message is vague, exploratory, or asks what you can do ("make me a video", "what can you do?", "help me create something", "I want to make content"), read the onboarding skill **before** doing anything else:
