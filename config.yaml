@@ -1,8 +1,11 @@
 # OpenMontage - Global Configuration
 
 llm:
-  provider: anthropic            # anthropic | openai | gemini | openrouter | ollama | mistral | minimax
-  model: null                    # null = use provider default
+  provider: dofe                 # unified models.dofe.ai router
+  protocol: openai               # openai | openai_response | anthropic | gemini
+  base_url: https://model.local.dofe.ai/api
+  api_key_env: DOFE_MODEL_API_KEY
+  model: gpt-5.6-terra           # tenant-visible gateway alias
   temperature: 0.7
   max_tokens: 4096
 

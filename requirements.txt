@@ -6,9 +6,12 @@ python-dotenv>=1.0
 Pillow>=10.0
 numpy>=1.24
 requests>=2.31
+truststore>=0.10      # Use the OS CA store for local dofe.ai TLS certificates
 google-auth>=2.0       # service-account auth for Google TTS + Imagen (Vertex AI)
 google-genai>=1.0.0    # Gemini Developer API clients for Lyria, Veo, and Gemini Omni
 openai>=2.44.0         # Videos API support for Sora 2
+mcp>=2,<3              # MCP server for Codex and Claude
+yt-dlp>=2026.7.4       # Reference URL ingestion, including Douyin
 
 # Backlot - the living storyboard (local board server)
 fastapi>=0.110

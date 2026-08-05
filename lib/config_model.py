@@ -26,7 +26,10 @@ class CheckpointPolicy(str, Enum):
 
 
 class LLMConfig(BaseModel):
-    provider: str = "anthropic"
+    provider: str = "dofe"
+    protocol: str = "openai"
+    base_url: str = "https://model.local.dofe.ai/api"
+    api_key_env: str = "DOFE_MODEL_API_KEY"
     model: Optional[str] = None
     temperature: float = 0.7
     max_tokens: int = 4096

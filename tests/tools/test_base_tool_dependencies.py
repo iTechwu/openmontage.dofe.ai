@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -34,6 +35,21 @@ class BinaryDependencyTests(unittest.TestCase):
 
         with patch("tools.base_tool.shutil.which", return_value="/usr/bin/ffmpeg"):
             tool.check_dependencies()
+
+    def test_env_dependency_accepts_alternative_names(self) -> None:
+        tool = DummyTool()
+        tool.dependencies = ["env:PRIMARY_KEY|LEGACY_KEY"]
+
+        with patch.dict(os.environ, {"PRIMARY_KEY": "", "LEGACY_KEY": "configured"}):
+            tool.check_dependencies()
+
+    def test_env_dependency_reports_all_missing_alternatives(self) -> None:
+        tool = DummyTool()
+        tool.dependencies = ["env:PRIMARY_KEY|LEGACY_KEY"]
+
+        with patch.dict(os.environ, {"PRIMARY_KEY": "", "LEGACY_KEY": ""}):
+            with self.assertRaisesRegex(DependencyError, "PRIMARY_KEY.*LEGACY_KEY"):
+                tool.check_dependencies()
     def test_run_command_error_preserves_called_process_error_type(self) -> None:
         tool = DummyTool()
 
