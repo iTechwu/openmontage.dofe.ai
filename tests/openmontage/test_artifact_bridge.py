@@ -42,6 +42,39 @@ def _grant(content: bytes = b"video") -> dict[str, Any]:
     }
 
 
+def _write_grant(content: bytes = b"video") -> dict[str, Any]:
+    return {
+        "schemaVersion": 1,
+        "grantId": "om_ag_write_1",
+        "operation": "WRITE",
+        "uploadUrl": "http://agentspace.internal:1455/api/internal/openmontage/artifact-grants/om_ag_write_1",
+        "token": "w" * 43,
+        "expiresAt": "2026-08-05T10:05:00Z",
+        "artifact": {
+            "role": "final_video",
+            "fileName": "final.mp4",
+            "mediaType": "video/mp4",
+            "sizeBytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        },
+    }
+
+
+def _published(content: bytes = b"video") -> dict[str, Any]:
+    return {
+        "schemaVersion": 1,
+        "jobId": "om_job_1",
+        "employeeArtifactId": "eart-1",
+        "employeeId": "employee-1",
+        "role": "final_video",
+        "fileName": "final.mp4",
+        "mediaType": "video/mp4",
+        "sizeBytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "publishedAt": "2026-08-05T10:00:02Z",
+    }
+
+
 class _Response:
     def __init__(self, *, payload: dict[str, Any] | None = None, content: bytes = b"", status: int = 200):
         self._payload = payload
@@ -69,11 +102,18 @@ class _Response:
 
 
 class _Session:
-    def __init__(self, grant: dict[str, Any], content: bytes):
+    def __init__(
+        self,
+        grant: dict[str, Any],
+        content: bytes,
+        published: dict[str, Any] | None = None,
+    ):
         self.grant = grant
         self.content = content
+        self.published = published
         self.post_calls: list[dict[str, Any]] = []
         self.get_calls: list[dict[str, Any]] = []
+        self.put_calls: list[dict[str, Any]] = []
 
     def post(self, url: str, **kwargs: Any) -> _Response:
         self.post_calls.append({"url": url, **kwargs})
@@ -82,6 +122,12 @@ class _Session:
     def get(self, url: str, **kwargs: Any) -> _Response:
         self.get_calls.append({"url": url, **kwargs})
         return _Response(content=self.content)
+
+    def put(self, url: str, **kwargs: Any) -> _Response:
+        data = kwargs.pop("data")
+        uploaded = data.read()
+        self.put_calls.append({"url": url, "uploaded": uploaded, **kwargs})
+        return _Response(payload=self.published, status=201)
 
 
 def test_download_input_uses_trusted_attribution_and_atomically_verifies_bytes(tmp_path: Path) -> None:
@@ -163,4 +209,62 @@ def test_download_input_rejects_mismatched_grants_and_paths(tmp_path: Path) -> N
             attribution=_attribution(),
             artifact_id="att-video-1",
             destination_dir=tmp_path / "input",
+        )
+
+
+def test_upload_output_hashes_file_and_publishes_with_one_time_grant(tmp_path: Path) -> None:
+    content = b"video"
+    output = tmp_path / "final.mp4"
+    output.write_bytes(content)
+    session = _Session(_write_grant(content), b"", _published(content))
+    client = ArtifactBridgeClient(
+        base_url="http://agentspace.internal:1455",
+        service_token="service-token",
+        session=session,
+    )
+
+    result = client.upload_output(
+        job_id="om_job_1",
+        attribution=_attribution(),
+        path=output,
+        role="final_video",
+    )
+
+    assert result.employee_artifact_id == "eart-1"
+    assert result.employee_id == "employee-1"
+    post = session.post_calls[0]
+    assert post["json"] == {
+        "operation": "WRITE",
+        "artifact": {
+            "role": "final_video",
+            "fileName": "final.mp4",
+            "mediaType": "video/mp4",
+            "sizeBytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        },
+    }
+    put = session.put_calls[0]
+    assert put["uploaded"] == content
+    assert put["headers"]["Authorization"] == f"Bearer {'w' * 43}"
+    assert put["headers"]["Content-Length"] == str(len(content))
+
+
+def test_upload_output_rejects_mismatched_publish_manifest(tmp_path: Path) -> None:
+    content = b"video"
+    output = tmp_path / "final.mp4"
+    output.write_bytes(content)
+    mismatched = _published(content)
+    mismatched["employeeId"] = "employee-2"
+    client = ArtifactBridgeClient(
+        base_url="http://agentspace.internal:1455",
+        service_token="service-token",
+        session=_Session(_write_grant(content), b"", mismatched),
+    )
+
+    with pytest.raises(ArtifactBridgeError, match="publish manifest"):
+        client.upload_output(
+            job_id="om_job_1",
+            attribution=_attribution(),
+            path=output,
+            role="final_video",
         )
