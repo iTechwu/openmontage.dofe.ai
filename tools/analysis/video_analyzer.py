@@ -1,9 +1,9 @@
 """Video analyzer tool — comprehensive reference video analysis.
 
 Orchestrates multiple analysis tools to produce a VideoAnalysisBrief from a
-video URL or local file. Runs entirely locally with zero API keys: yt-dlp for
-download, youtube-transcript-api for captions, PySceneDetect/FFmpeg for scene
-detection, FFmpeg for frame extraction, and faster-whisper for transcription.
+video URL or local file. It uses yt-dlp for download, youtube-transcript-api for
+published captions, and FFmpeg/PySceneDetect for deterministic media analysis.
+Local Whisper is disabled when strict DoFe routing is enabled.
 
 The agent's own vision model analyzes extracted keyframes — this tool provides
 the structured data; the agent provides the visual interpretation.
@@ -15,6 +15,8 @@ import json
 import time
 from pathlib import Path
 from typing import Any
+
+from lib.video_sources import detect_video_platform, extract_video_url
 
 from tools.base_tool import (
     BaseTool,
@@ -95,6 +97,15 @@ class VideoAnalyzer(BaseTool):
                 "maximum": 50,
                 "description": "Maximum keyframes to extract",
             },
+            "max_resolution": {
+                "type": "string",
+                "enum": ["360p", "480p", "720p", "1080p"],
+                "default": "720p",
+            },
+            "cookie_file": {
+                "type": "string",
+                "description": "Optional Netscape-format cookies.txt path",
+            },
             "output_dir": {
                 "type": "string",
                 "description": "Directory for analysis outputs (default: auto-generated)",
@@ -126,22 +137,17 @@ class VideoAnalyzer(BaseTool):
 
     def _is_url(self, source: str) -> bool:
         """Check if source is a URL vs local file."""
-        return source.startswith(("http://", "https://", "www."))
+        try:
+            extract_video_url(source)
+            return True
+        except ValueError:
+            return False
 
     def _detect_platform(self, source: str) -> str:
         """Detect platform from URL."""
         if not self._is_url(source):
             return "local_file"
-        s = source.lower()
-        if "youtube.com/shorts" in s:
-            return "shorts"
-        if "youtube.com" in s or "youtu.be" in s:
-            return "youtube"
-        if "instagram.com" in s:
-            return "instagram"
-        if "tiktok.com" in s:
-            return "tiktok"
-        return "other_url"
+        return detect_video_platform(source)
 
     def _is_youtube(self, platform: str) -> bool:
         return platform in ("youtube", "shorts")
@@ -150,6 +156,10 @@ class VideoAnalyzer(BaseTool):
         source = inputs["source"]
         depth = inputs.get("analysis_depth", "standard")
         max_keyframes = inputs.get("max_keyframes", 20)
+        max_resolution = inputs.get("max_resolution", "720p")
+        from tools.dofe.config import is_dofe_enabled
+
+        strict_dofe_routing = is_dofe_enabled()
 
         # Setup output directory
         if inputs.get("output_dir"):
@@ -189,6 +199,7 @@ class VideoAnalyzer(BaseTool):
         # Track what succeeded and what failed
         steps_completed = []
         steps_failed = []
+        billing_records = []
 
         # ─── STEP 1: Get metadata + download (if URL) ───
         video_path = None
@@ -212,7 +223,8 @@ class VideoAnalyzer(BaseTool):
                         "url": source,
                         "output_dir": str(output_dir),
                         "format": "video",
-                        "max_resolution": "720p",
+                        "max_resolution": max_resolution,
+                        "cookie_file": inputs.get("cookie_file", ""),
                     })
 
                 if dl_result.success:
@@ -300,7 +312,13 @@ class VideoAnalyzer(BaseTool):
 
         # Fallback: If transcript failed and we don't have audio yet,
         # download the video to get audio for Whisper transcription
-        if transcript_data is None and audio_path is None and video_path is None and is_url:
+        if (
+            transcript_data is None
+            and audio_path is None
+            and video_path is None
+            and is_url
+            and not strict_dofe_routing
+        ):
             try:
                 from tools.analysis.video_downloader import VideoDownloader
                 downloader = VideoDownloader()
@@ -323,8 +341,51 @@ class VideoAnalyzer(BaseTool):
             except Exception as e:
                 steps_failed.append(f"download_for_whisper: {e}")
 
-        # Fallback: Whisper transcription on audio
-        if transcript_data is None and audio_path:
+        # Strict AIRouter transcription. The gateway requires a provider-visible
+        # URL; Douyin's public extractor supplies play_url for this path.
+        if transcript_data is None and strict_dofe_routing:
+            try:
+                from tools.analysis.dofe_stt import DofeSpeechToText
+
+                audio_input = (
+                    {"audio_url": inputs["audio_url"]}
+                    if inputs.get("audio_url")
+                    else {"audio_path": audio_path}
+                    if audio_path
+                    else {}
+                )
+                if not audio_input:
+                    raise ValueError(
+                        "no extracted audio path or provider-accessible audio URL is available"
+                    )
+                stt_result = DofeSpeechToText().execute({
+                    **audio_input,
+                    "duration_seconds": brief["source"].get("duration_seconds", 0),
+                    "language": inputs.get("language", "zh-CN"),
+                    "asr_mode": inputs.get("asr_mode", "fast"),
+                    "output_path": str(output_dir / "transcript_airouter.json"),
+                    "project_dir": str(output_dir),
+                })
+                if stt_result.success:
+                    if stt_result.data.get("source_asset"):
+                        steps_completed.append("audio_upload_airouter_tos")
+                    full_text = stt_result.data.get("full_text", "")
+                    brief["narration_transcript"] = {
+                        "full_text": full_text,
+                        "segments": stt_result.data.get("segments", []),
+                        "language": stt_result.data.get("language", "zh-CN"),
+                        "word_count": stt_result.data.get("word_count", len(full_text.split())),
+                    }
+                    transcript_data = brief["narration_transcript"]
+                    billing_records.append(stt_result.data.get("billing", {}))
+                    steps_completed.append("transcript_airouter_openspeech_auc")
+                else:
+                    steps_failed.append(f"transcript_airouter: {stt_result.error}")
+            except Exception as e:
+                steps_failed.append(f"transcript_airouter: {e}")
+
+        # Fallback: Whisper transcription on audio when unified routing is disabled.
+        if transcript_data is None and audio_path and not strict_dofe_routing:
             try:
                 from tools.analysis.transcriber import Transcriber
                 transcriber = Transcriber()
@@ -369,6 +430,7 @@ class VideoAnalyzer(BaseTool):
                 "steps_completed": steps_completed,
                 "steps_failed": steps_failed,
                 "duration_seconds": round(time.time() - start, 2),
+                "billing": billing_records,
             }
             self._save_brief(brief, output_dir)
             return ToolResult(
@@ -569,6 +631,7 @@ class VideoAnalyzer(BaseTool):
             "scene_count": len(scenes),
             "has_transcript": transcript_data is not None,
             "duration_seconds": round(time.time() - start, 2),
+            "billing": billing_records,
         }
 
         self._save_brief(brief, output_dir)
@@ -658,7 +721,7 @@ class VideoAnalyzer(BaseTool):
         platform = brief["source"]["type"]
         pacing = brief["structure_analysis"].get("pacing_profile", {}).get("pacing_style", "")
 
-        if platform in ("shorts", "tiktok", "instagram"):
+        if platform in ("shorts", "tiktok", "douyin", "instagram"):
             return "animation"  # Short-form → animation pipeline works well
         if pacing in ("slow_contemplative",):
             return "cinematic"

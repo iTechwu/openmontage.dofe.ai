@@ -692,6 +692,7 @@ class TestCapabilityMetadata:
         providers = {item["provider"] for item in catalog["tts"] if item["provider"] != "selector"}
         assert providers == {
             "dashscope",
+            "dofe",
             "doubao",
             "elevenlabs",
             "google_tts",
