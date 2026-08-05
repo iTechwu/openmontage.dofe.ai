@@ -87,3 +87,46 @@ def test_full_mix_multi_narration_plus_music_with_ducking(tmp_path):
 
     assert result.success is True, result.error
     assert out.exists() and _has_audio(out)
+
+
+def test_full_mix_disables_amix_normalization_for_scheduled_dialogue(tmp_path, monkeypatch):
+    """Non-overlapping dialogue tracks must not be divided by the track count."""
+    speech_paths = [tmp_path / f"speech_{index}.wav" for index in range(3)]
+    music = tmp_path / "music.wav"
+    for path in [*speech_paths, music]:
+        path.write_bytes(b"stub")
+
+    captured = []
+
+    def fake_run(self, cmd, **kwargs):
+        captured.append(list(cmd))
+
+        class _R:
+            stdout = "10.0\n"
+            stderr = ""
+
+        return _R()
+
+    monkeypatch.setattr(AudioMixer, "run_command", fake_run)
+
+    tracks = [
+        {"path": str(path), "role": "speech", "start_seconds": index * 2}
+        for index, path in enumerate(speech_paths)
+    ]
+    tracks.append({"path": str(music), "role": "music", "volume": 0.1})
+
+    result = AudioMixer().execute(
+        {
+            "operation": "full_mix",
+            "tracks": tracks,
+            "ducking": {"enabled": True},
+            "normalize": False,
+            "output_path": str(tmp_path / "out.wav"),
+        }
+    )
+
+    assert result.success is True, result.error
+    ffmpeg_cmd = next(command for command in captured if command[0] == "ffmpeg")
+    filtergraph = ffmpeg_cmd[ffmpeg_cmd.index("-filter_complex") + 1]
+    assert "amix=inputs=3:duration=longest:normalize=0[speech_all]" in filtergraph
+    assert "amix=inputs=2:duration=longest:normalize=0[premix]" in filtergraph
