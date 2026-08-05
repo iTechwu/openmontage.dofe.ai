@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="openmontage",
-    version="0.1.0",
+    version="0.2.0",
     description="AI-Orchestrated Video Production Platform",
     packages=find_packages(),
     python_requires=">=3.10",
@@ -15,5 +15,13 @@ setup(
         "requests>=2.31",
         "google-genai>=1.0.0",
         "openai>=2.44.0",
+        "mcp>=2,<3",
+        "yt-dlp>=2026.7.4",
     ],
+    entry_points={
+        "console_scripts": [
+            "openmontage=openmontage.cli:main",
+            "openmontage-mcp=openmontage.mcp_server:main",
+        ],
+    },
 )
