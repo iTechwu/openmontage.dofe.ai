@@ -64,6 +64,16 @@ event bridge. The defaults target AgentSpace on the Docker host at port `1455`.
 Override the endpoint with an internal service URL when both applications share
 a Docker network. Do not reuse either secret as a model-provider credential.
 
+`OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL` is the AgentSpace internal origin used
+for Job-scoped media transfer. `ArtifactBridgeClient.download_input()` obtains
+a one-time READ grant and verifies the downloaded size and SHA-256 before an
+atomic local publish. `upload_output()` hashes the file without buffering it,
+obtains a metadata-bound WRITE grant, streams the file to AgentSpace, and
+verifies the returned employee Artifact manifest. After upload, persist that
+manifest with `JobService.publish_artifact()` so the ordered
+`openmontage.artifact.published` event, REST query, and MCP query remain
+recoverable across restarts. Media bytes never belong in MCP JSON.
+
 The publisher reads the same SQLite outbox as the MCP server. A successful 2xx
 response marks an event delivered; network and non-2xx failures remain durable
 and retry with bounded exponential backoff. Operators can perform one flush and
@@ -187,6 +197,7 @@ Use /recreate-video on this Douyin link: <url>. Create an original 9:16 version.
 - `submit_video_job`: create an asynchronous, attributable video Job.
 - `get_video_job`: return the durable Job and manifest-derived stage snapshot.
 - `list_video_job_events`: replay ordered events after a sequence cursor.
+- `list_video_artifacts`: list durable AgentSpace-backed outputs for a Job.
 - `cancel_video_job`: request cooperative cancellation.
 - `approve_video_stage`: approve or reject a pending human gate.
 - `openmontage://reference-clone-guide`: shared agent workflow resource.
