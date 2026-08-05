@@ -20,12 +20,17 @@ from lib.checkpoint import (
 from openmontage.artifact_bridge import ArtifactBridgeClient, ArtifactBridgeError
 from openmontage.contracts import ApprovalStatus, JobSnapshot, JobStatus, StageSnapshot, StageStatus
 from openmontage.job_service import JobLease, JobLeaseError, JobService
+from openmontage.model_credential_bridge import (
+    ModelCredentialBridgeClient,
+    ModelCredentialBridgeError,
+)
 from openmontage.pipeline_executor import (
     PipelineExecutionError,
     PipelineExecutionResult,
     PipelineExecutor,
     StageAssignment,
 )
+from tools.dofe.delegation import DelegatedModelCredential
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -55,6 +60,7 @@ class JobWorker:
         retry_delay: timedelta = timedelta(seconds=15),
         max_executor_attempts: int = 3,
         artifact_bridge: ArtifactBridgeClient | None = None,
+        model_credential_bridge: ModelCredentialBridgeClient | None = None,
     ) -> None:
         if lease_duration <= timedelta(0):
             raise ValueError("lease_duration must be greater than zero")
@@ -73,6 +79,7 @@ class JobWorker:
         self.retry_delay = retry_delay
         self.max_executor_attempts = max_executor_attempts
         self.artifact_bridge = artifact_bridge
+        self.model_credential_bridge = model_credential_bridge
 
     def run_once(self, *, now: datetime | None = None) -> JobWorkerResult | None:
         lease = self.service.claim_job(
@@ -244,8 +251,37 @@ class JobWorker:
             projects_dir=self.projects_dir,
             local_inputs=local_inputs,
         )
+        credential: DelegatedModelCredential | None = None
+        if self.model_credential_bridge is not None:
+            try:
+                credential = self.model_credential_bridge.issue(
+                    job_id=latest.job_id,
+                    stage=stage.code,
+                    attribution=latest.attribution,
+                )
+            except ModelCredentialBridgeError:
+                if lease.attempt >= self.max_executor_attempts:
+                    self._fail_job(
+                        lease,
+                        code="OPENMONTAGE_MODEL_CREDENTIAL_UNAVAILABLE",
+                        message="Job-scoped model credential was unavailable after bounded retries",
+                        now=now,
+                    )
+                    return JobWorkerResult(snapshot.job_id, stage.code, "job_failed")
+                self._release(
+                    lease,
+                    now=now,
+                    retry_at=self._clock(now) + self.retry_delay,
+                    error="Job-scoped model credential was unavailable",
+                )
+                return JobWorkerResult(snapshot.job_id, stage.code, "credential_retry_scheduled")
         try:
-            execution, lease = self._execute_with_heartbeat(assignment, lease, now=now)
+            execution, lease = self._execute_with_heartbeat(
+                assignment,
+                lease,
+                credential=credential,
+                now=now,
+            )
         except PipelineExecutionError:
             if lease.attempt >= self.max_executor_attempts:
                 self._fail_job(
@@ -349,10 +385,11 @@ class JobWorker:
         assignment: StageAssignment,
         lease: JobLease,
         *,
+        credential: DelegatedModelCredential | None,
         now: datetime | None,
     ) -> tuple[PipelineExecutionResult, JobLease]:
         if now is not None:
-            return self.executor.execute(assignment), lease
+            return self.executor.execute(assignment, credential=credential), lease
 
         stop = Event()
         state: dict[str, JobLease | BaseException] = {"lease": lease}
@@ -373,7 +410,7 @@ class JobWorker:
         thread = Thread(target=heartbeat, name=f"openmontage-heartbeat-{lease.job_id}", daemon=True)
         thread.start()
         try:
-            result = self.executor.execute(assignment)
+            result = self.executor.execute(assignment, credential=credential)
         finally:
             stop.set()
             thread.join(timeout=self.heartbeat_interval.total_seconds() + 1)

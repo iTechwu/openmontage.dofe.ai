@@ -37,6 +37,7 @@ from .errors import (
     DofeTaskTimeoutError,
 )
 from .media import is_https_url, sanitize_for_log
+from .delegation import delegated_credential_from_environment
 
 # Terminal task statuses — polling stops here.
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled", "expired"}
@@ -69,6 +70,17 @@ class DofeClient:
     ) -> None:
         self.api_key = api_key if api_key is not None else cfg.dofe_api_key()
         self.base_url = (base_url or cfg.dofe_base_url()).rstrip("/")
+        try:
+            self.delegation = (
+                delegated_credential_from_environment(
+                    api_key=self.api_key,
+                    models_base_url=self.base_url,
+                )
+                if self.api_key
+                else None
+            )
+        except ValueError as exc:
+            raise DofeAuthError(str(exc)) from exc
         self.session = session if session is not None else requests.Session()
         if session is None:
             self.session.verify = cfg.dofe_ca_bundle()
@@ -82,14 +94,19 @@ class DofeClient:
 
     # ------------------------------------------------------------------ headers
 
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, *, model_invocation_id: str | None = None) -> dict[str, str]:
         if not self.api_key:
             raise DofeAuthError("DOFE_MODEL_API_KEY / DOFE_API_KEY is not set.")
-        return {
+        headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
+        if self.delegation is not None:
+            headers.update(
+                self.delegation.signed_headers(model_invocation_id=model_invocation_id)
+            )
+        return headers
 
     # -------------------------------------------------------------------- URLs
 
@@ -204,11 +221,12 @@ class DofeClient:
         rate_attempts = 0
         server_attempts = 0
         network_attempts = 0
+        request_headers = self._headers()
 
         while True:
             try:
                 response = self.session.request(
-                    method, url, headers=self._headers(), timeout=timeout, json=json, params=params,
+                    method, url, headers=request_headers, timeout=timeout, json=json, params=params,
                 )
             except requests.RequestException as exc:
                 if allow_retry and network_attempts < self._max_network_retries:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -15,10 +16,12 @@ from openmontage.pipeline_executor import (
     PipelineExecutionIncomplete,
     StageAssignment,
 )
+from tools.dofe.delegation import DelegatedModelCredential
 
 
 WRITE_CHECKPOINT_SCRIPT = r"""
 import json
+import os
 import pathlib
 import sys
 from datetime import datetime, timezone
@@ -29,6 +32,13 @@ assignment_line = next(line for line in prompt.splitlines() if line.startswith(p
 assignment_path = pathlib.Path(json.loads(assignment_line[len(prefix):]))
 assignment = json.loads(assignment_path.read_text(encoding="utf-8"))
 pathlib.Path(sys.argv[1]).write_text(prompt, encoding="utf-8")
+if len(sys.argv) > 2:
+    pathlib.Path(sys.argv[2]).write_text(json.dumps({
+        key: os.environ.get(key)
+        for key in ["DOFE_MODEL_API_KEY", "DOFE_DELEGATION_ID", "DOFE_EXTERNAL_JOB_ID", "DOFE_PIPELINE_STAGE", "OPENAI_BASE_URL", "OPENMONTAGE_SERVICE_TOKEN", "OPENMONTAGE_EVENT_SIGNING_SECRET", "FAL_KEY"]
+    }), encoding="utf-8")
+if len(sys.argv) > 4:
+    pathlib.Path(sys.argv[3]).write_text(sys.argv[4], encoding="utf-8")
 checkpoint = {
     "version": "1.0",
     "project_id": assignment["projectId"],
@@ -111,6 +121,60 @@ def test_executor_writes_assignment_invokes_real_argv_and_reads_checkpoint(
         "total_units": 3,
     }
     assert "Execute exactly one OpenMontage pipeline stage" in prompt_capture.read_text()
+
+
+def test_executor_injects_delegation_only_into_the_stage_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENMONTAGE_SERVICE_TOKEN", "must-not-reach-agent")
+    monkeypatch.setenv("OPENMONTAGE_EVENT_SIGNING_SECRET", "must-not-reach-agent")
+    monkeypatch.setenv("FAL_KEY", "must-not-reach-agent")
+    job, projects_dir, project_dir = _job(tmp_path)
+    environment_capture = tmp_path / "environment.json"
+    project_argument_capture = tmp_path / "project-argument.txt"
+    executor = AgentCommandPipelineExecutor(
+        [
+            sys.executable,
+            "-c",
+            WRITE_CHECKPOINT_SCRIPT,
+            str(tmp_path / "prompt.txt"),
+            str(environment_capture),
+            str(project_argument_capture),
+            "{project_dir}",
+        ],
+        timeout_seconds=5,
+    )
+    assignment = StageAssignment.from_job(
+        job,
+        stage="research",
+        stage_attempt=1,
+        projects_dir=projects_dir,
+    )
+    credential = DelegatedModelCredential(
+        api_key="delegated-api-key",
+        models_base_url="https://models.test/api",
+        delegation_id="delegation-1",
+        external_job_id=job.job_id,
+        pipeline_stage="research",
+        runtime_credential_id="runtime-credential-1",
+        expires_at="2099-08-06T09:00:01Z",
+    )
+
+    result = executor.execute(assignment, credential=credential)
+
+    environment = json.loads(environment_capture.read_text())
+    assert environment["DOFE_MODEL_API_KEY"] == "delegated-api-key"
+    assert environment["DOFE_DELEGATION_ID"] == "delegation-1"
+    assert environment["DOFE_PIPELINE_STAGE"] == "research"
+    assert environment["OPENAI_BASE_URL"].startswith("http://127.0.0.1:")
+    assert environment["OPENAI_BASE_URL"].endswith("/api/v1")
+    assert environment["OPENMONTAGE_SERVICE_TOKEN"] is None
+    assert environment["OPENMONTAGE_EVENT_SIGNING_SECRET"] is None
+    assert environment["FAL_KEY"] is None
+    assert project_argument_capture.read_text() == str(project_dir)
+    assert "delegated-api-key" not in result.assignment_path.read_text()
+    assert os.environ.get("DOFE_MODEL_API_KEY") != "delegated-api-key"
 
 
 @pytest.mark.parametrize(

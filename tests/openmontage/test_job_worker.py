@@ -23,6 +23,7 @@ from openmontage.pipeline_executor import (
     PipelineExecutionResult,
     StageAssignment,
 )
+from tools.dofe.delegation import DelegatedModelCredential
 from tests.contracts.test_phase0_contracts import sample_artifact
 
 
@@ -56,9 +57,16 @@ class FakeExecutor:
     def __init__(self, outcomes: list[str | Exception]):
         self.outcomes = deque(outcomes)
         self.assignments: list[StageAssignment] = []
+        self.credentials: list[DelegatedModelCredential | None] = []
 
-    def execute(self, assignment: StageAssignment) -> PipelineExecutionResult:
+    def execute(
+        self,
+        assignment: StageAssignment,
+        *,
+        credential: DelegatedModelCredential | None = None,
+    ) -> PipelineExecutionResult:
         self.assignments.append(assignment)
+        self.credentials.append(credential)
         if not self.outcomes:
             raise AssertionError("executor should not have been called")
         outcome = self.outcomes.popleft()
@@ -134,6 +142,22 @@ class FakeArtifactBridge:
         )
 
 
+class FakeModelCredentialBridge:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def issue(self, **kwargs) -> DelegatedModelCredential:
+        self.calls.append(kwargs)
+        return DelegatedModelCredential(
+            api_key="delegated-api-key",
+            models_base_url="https://models.test/api",
+            delegation_id="delegation-1",
+            external_job_id=kwargs["job_id"],
+            pipeline_stage=kwargs["stage"],
+            runtime_credential_id="runtime-credential-1",
+            expires_at="2026-08-06T09:00:01Z",
+        )
+
 def _worker(
     service: JobService,
     executor: FakeExecutor,
@@ -141,6 +165,7 @@ def _worker(
     *,
     max_executor_attempts: int = 3,
     artifact_bridge: FakeArtifactBridge | None = None,
+    model_credential_bridge: FakeModelCredentialBridge | None = None,
 ) -> JobWorker:
     return JobWorker(
         service,
@@ -151,6 +176,7 @@ def _worker(
         retry_delay=timedelta(0),
         max_executor_attempts=max_executor_attempts,
         artifact_bridge=artifact_bridge,
+        model_credential_bridge=model_credential_bridge,
     )
 
 
@@ -169,6 +195,28 @@ def test_worker_executes_one_stage_and_updates_job_state(tmp_path: Path) -> None
     assert restored.stages[0].status == StageStatus.SUCCEEDED
     assert restored.stages[0].attempt == 1
     assert len(executor.assignments) == 1
+
+
+def test_worker_fetches_and_scopes_a_delegated_model_credential_per_stage(tmp_path: Path) -> None:
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="delegated-stage"), _attribution())
+    executor = FakeExecutor(["completed"])
+    credentials = FakeModelCredentialBridge()
+
+    _worker(
+        service,
+        executor,
+        tmp_path / "projects",
+        model_credential_bridge=credentials,
+    ).run_once(now=NOW)
+
+    assert credentials.calls == [{
+        "job_id": job.job_id,
+        "stage": "research",
+        "attribution": job.attribution,
+    }]
+    assert executor.credentials[0] is not None
+    assert executor.credentials[0].pipeline_stage == "research"
 
 
 def test_worker_reconciles_completed_checkpoint_without_repeating_executor(

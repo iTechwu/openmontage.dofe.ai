@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,9 +14,22 @@ from typing import Any, Protocol, Sequence
 from lib.checkpoint import CheckpointValidationError, read_checkpoint
 from lib.pipeline_loader import get_stage_skill, load_pipeline_readonly
 from openmontage.contracts import JobSnapshot
+from openmontage.delegation_proxy import DelegationSigningProxy
+from tools.dofe.delegation import DelegatedModelCredential
 
 
 ROOT = Path(__file__).resolve().parent.parent
+_CONTROL_PLANE_SECRET_ENV = {
+    "INTERNAL_API_SECRET",
+    "MODELS_INTERNAL_API_SECRET",
+    "OPENMONTAGE_EVENT_SIGNING_SECRET",
+    "OPENMONTAGE_SERVICE_TOKEN",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "FAL_KEY",
+}
+_SECRET_ENV_SUFFIX = re.compile(
+    r"(?:_API_KEY|_ACCESS_KEY|_ACCESSKEY|_PASSWORD|_SECRET|_SECRET_KEY|_SECRETKEY|_TOKEN)$"
+)
 
 
 class PipelineExecutionError(RuntimeError):
@@ -104,7 +118,12 @@ class PipelineExecutionResult:
 
 
 class PipelineExecutor(Protocol):
-    def execute(self, assignment: StageAssignment) -> PipelineExecutionResult:
+    def execute(
+        self,
+        assignment: StageAssignment,
+        *,
+        credential: DelegatedModelCredential | None = None,
+    ) -> PipelineExecutionResult:
         """Execute one stage and return the checkpoint-backed outcome."""
 
 
@@ -144,7 +163,12 @@ class AgentCommandPipelineExecutor:
             ) from exc
         return cls(command, timeout_seconds=timeout_seconds)
 
-    def execute(self, assignment: StageAssignment) -> PipelineExecutionResult:
+    def execute(
+        self,
+        assignment: StageAssignment,
+        *,
+        credential: DelegatedModelCredential | None = None,
+    ) -> PipelineExecutionResult:
         assignment.project_dir.mkdir(parents=True, exist_ok=True)
         assignment_dir = assignment.project_dir / ".openmontage" / "assignments"
         assignment_dir.mkdir(parents=True, exist_ok=True)
@@ -153,18 +177,26 @@ class AgentCommandPipelineExecutor:
         )
         _atomic_write_json(assignment_path, assignment.to_wire())
         prompt = _stage_prompt(assignment, assignment_path)
+        command = tuple(
+            str(assignment.project_dir) if value == "{project_dir}" else value
+            for value in self.command
+        )
 
         try:
-            completed = subprocess.run(
-                self.command,
-                input=prompt,
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_seconds,
-                check=False,
-                shell=False,
-            )
+            if credential is None:
+                completed = self._run(command, prompt, environment=None)
+            else:
+                with DelegationSigningProxy(credential) as proxy:
+                    environment = {
+                        key: value
+                        for key, value in os.environ.items()
+                        if key not in _CONTROL_PLANE_SECRET_ENV
+                        and not _SECRET_ENV_SUFFIX.search(key)
+                    }
+                    environment.update(
+                        credential.agent_environment(openai_base_url=f"{proxy.base_url}/v1")
+                    )
+                    completed = self._run(command, prompt, environment=environment)
         except subprocess.TimeoutExpired as exc:
             raise PipelineExecutionError(
                 f"External Agent executor timed out after {self.timeout_seconds:g} seconds"
@@ -209,6 +241,25 @@ class AgentCommandPipelineExecutor:
             status=str(checkpoint["status"]),
             checkpoint=checkpoint,
             assignment_path=assignment_path,
+        )
+
+    def _run(
+        self,
+        command: tuple[str, ...],
+        prompt: str,
+        *,
+        environment: dict[str, str] | None,
+    ):
+        return subprocess.run(
+            command,
+            input=prompt,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=self.timeout_seconds,
+            check=False,
+            shell=False,
+            env=environment,
         )
 
 

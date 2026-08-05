@@ -84,7 +84,7 @@ result as a validated checkpoint. Configure the process as a JSON argv array;
 shell strings are intentionally rejected:
 
 ```bash
-export OPENMONTAGE_AGENT_EXECUTOR_JSON='["codex","exec","-C","/absolute/path/to/OpenMontage","-"]'
+export OPENMONTAGE_AGENT_EXECUTOR_JSON='["codex","exec","--skip-git-repo-check","--ephemeral","--ignore-user-config","-s","workspace-write","-C","/absolute/path/to/OpenMontage","--add-dir","{project_dir}","-"]'
 export OPENMONTAGE_AGENT_TIMEOUT_SECONDS=3600
 openmontage worker run --once --json
 openmontage worker run --interval 2 --json
@@ -94,24 +94,38 @@ The command must read the assignment prompt from stdin. Its first line points
 to the durable assignment JSON. The process must write `in_progress`,
 `awaiting_human`, `completed`, or `failed` through the normal checkpoint
 protocol; stdout is not treated as success and is not persisted. Use only flags
-approved for the selected Agent CLI. Do not put API keys, delegation secrets,
-or user input in the argv value.
+approved for the selected Agent CLI. The exact `{project_dir}` argv item is
+replaced with the trusted current Job directory; no other interpolation is
+performed. Do not put API keys, delegation secrets, or user input in argv.
 
-For Docker, the configured executable must exist inside the Linux image. Build
-an approved derived image containing the Agent CLI, or use an internal Agent
-executor binary supplied by the runtime platform. A Codex executable installed
-on a macOS host cannot be bind-mounted as a Linux executable. Supply Agent
-authentication through the platform's secret mechanism, not through Compose
-source or argv. Then start all three long-lived processes:
+For Docker, the image pins the approved `@openai/codex` CLI version and verifies
+the executable during the build. A Codex executable installed on a macOS host
+cannot be bind-mounted as a Linux executable. The Worker obtains a short-lived
+Job delegation from AgentSpace for every stage, starts a loopback signing proxy,
+and injects the key only into that stage process. The key is not stored in the
+assignment, checkpoint, Compose source, argv, or executor log. The Docker
+default also uses an ephemeral Codex session, ignores user configuration,
+skips the absent image Git metadata check, keeps `/app` read-only at the OS
+layer, and grants sandbox write access only to the current Job project. Codex
+authenticates with the delegated models key; no interactive Codex account is
+required. HyperFrames also runs without an account, and its anonymous telemetry
+is disabled during the image build. It reuses Remotion's pinned Chrome Headless
+Shell so the image does not download a second competing browser build. The image
+includes the browser's Debian shared libraries, skips HyperFrames' optional CUDA
+payload in favor of the bundled CPU runtime, and allocates 512 MB of shared
+memory for render processes. The pinned Remotion fonts are included explicitly
+in the build context, while its Webpack cache is redirected to the writable
+`/data/cache` volume. Then start all three long-lived processes:
 
 ```bash
 docker compose --profile agentspace up --build -d \
   openmontage-mcp openmontage-events openmontage-worker
 ```
 
-`openmontage-worker` fails closed when `OPENMONTAGE_AGENT_EXECUTOR_JSON` or the
-Artifact Bridge configuration is absent. This is deliberate: the service does
-not fall back to a Python creative orchestrator or a shared provider key.
+`openmontage-worker` fails closed when the Agent executor, Artifact Bridge, or
+AgentSpace model credential bridge configuration is absent. This is deliberate:
+the service does not fall back to a Python creative orchestrator, a shared
+provider key, or a Runtime's parent credential.
 
 ### Recovery and publication semantics
 
@@ -135,10 +149,12 @@ not fall back to a Python creative orchestrator or a shared provider key.
   same employee Artifact on retry.
 
 The Worker carries trusted employee, Runtime Task, Job, stage, invocation, and
-trace identifiers in each assignment. It does not yet receive a delegated
-models credential. Per-Job models delegation, authoritative usage links, and
-the billing E2E remain the next implementation gate; until then, do not claim
-that Worker model calls are fully attributed to an AI employee bill.
+trace identifiers in each assignment. Before each Agent stage it retrieves the
+matching active delegation from AgentSpace. Native OpenMontage tools sign their
+models requests directly; Codex OpenAI-compatible traffic passes through the
+loopback signing proxy. Both paths use a stable model invocation identifier for
+retries, allowing models to reject replays and preserve authoritative Job and
+employee attribution.
 
 The publisher reads the same SQLite outbox as the MCP server. A successful 2xx
 response marks an event delivered; network and non-2xx failures remain durable
@@ -149,13 +165,14 @@ receive a non-zero exit code on delivery failure:
 docker compose run --rm openmontage-cli events publish --once --json
 ```
 
-By default, Compose joins the existing `modelsdofeai_default` network and uses
-the Airouter API service directly at `http://api:3101`. Override these names when
-the models deployment uses a different Compose project or service address:
+By default, Compose joins the existing `modelsdofeai_default` network. The
+Worker does not receive a static models URL or parent credential: AgentSpace
+returns the approved models base URL with each stage delegation. Override the
+network and AgentSpace bridge origin when deployments use different names:
 
 ```bash
 DOFE_DOCKER_NETWORK=my-models-network \
-DOFE_INTERNAL_BASE_URL=http://models-api:3101 \
+OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL=http://agentspace-web:1455 \
 docker compose up -d openmontage-mcp
 ```
 

@@ -8,6 +8,8 @@ poll failed/timeout+cancel, envelope anomaly, download success/non-https/failure
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import sys
 from pathlib import Path
 
@@ -107,6 +109,30 @@ def test_list_models_returns_tenant_visible_aliases():
         result = _client().list_models()
 
     assert [item["id"] for item in result] == ["seedream-5.0"]
+
+
+def test_delegated_requests_sign_job_stage_and_one_invocation_id_across_retries(monkeypatch):
+    monkeypatch.setenv("DOFE_DELEGATION_ID", "delegation-1")
+    monkeypatch.setenv("DOFE_EXTERNAL_JOB_ID", "job-1")
+    monkeypatch.setenv("DOFE_PIPELINE_STAGE", "research")
+    with _rm.Mocker() as m:
+        m.get(f"{BASE}/v1/models", [
+            {"status_code": 503, "json": _err(503, "retry")},
+            {"json": {"object": "list", "data": []}},
+        ])
+        _client(max_5xx_retries=1).list_models()
+
+    first, second = m.request_history
+    invocation_id = first.headers["X-Dofe-Model-Invocation-Id"]
+    assert second.headers["X-Dofe-Model-Invocation-Id"] == invocation_id
+    assert first.headers["X-Dofe-Pipeline-Stage"] == "research"
+    timestamp = first.headers["X-Dofe-Attribution-Timestamp"]
+    expected = hmac.new(
+        b"test-key",
+        f"delegation-1\njob-1\nresearch\n{invocation_id}\n{timestamp}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    assert first.headers["X-Dofe-Attribution-Signature"] == expected
 
 
 def test_create_then_poll_then_artifacts():

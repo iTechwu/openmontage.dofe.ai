@@ -16,6 +16,8 @@ remotion-composer/node_modules
 remotion-composer/out
 remotion-composer/projects
 remotion-composer/public/*
+!remotion-composer/public/fonts/
+!remotion-composer/public/fonts/**
 tests/qa/output
 .backlot
 .DS_Store

@@ -37,7 +37,9 @@ def test_docker_contract_exposes_mcp_and_persists_projects():
     assert "/healthz" in dockerfile
     assert "./projects:/data/projects" in compose
     assert "DOFE_ENABLED: \"true\"" in compose
-    assert "http://api:3101" in compose
+    assert "OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL" in compose
+    assert "DOFE_MODEL_API_KEY:" not in compose
+    assert "INTERNAL_API_SECRET:" not in compose
     assert "modelsdofeai_default" in compose
 
 

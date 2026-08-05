@@ -101,6 +101,7 @@ def _build_job_worker(args: argparse.Namespace):
     from openmontage.artifact_bridge import ArtifactBridgeClient
     from openmontage.job_api import default_job_service
     from openmontage.job_worker import JobWorker
+    from openmontage.model_credential_bridge import ModelCredentialBridgeClient
     from openmontage.pipeline_executor import AgentCommandPipelineExecutor
 
     worker_id = os.environ.get("OPENMONTAGE_WORKER_ID", "").strip()
@@ -116,6 +117,7 @@ def _build_job_worker(args: argparse.Namespace):
         retry_delay=timedelta(seconds=args.retry_seconds),
         max_executor_attempts=args.max_attempts,
         artifact_bridge=ArtifactBridgeClient.from_environment(),
+        model_credential_bridge=ModelCredentialBridgeClient.from_environment(),
     )
 
 
