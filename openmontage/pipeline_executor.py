@@ -40,6 +40,7 @@ class StageAssignment:
     request: dict[str, Any]
     attribution: dict[str, Any]
     job_snapshot: dict[str, Any]
+    local_inputs: tuple[dict[str, Any], ...]
 
     @classmethod
     def from_job(
@@ -49,6 +50,7 @@ class StageAssignment:
         stage: str,
         stage_attempt: int,
         projects_dir: str | Path,
+        local_inputs: Sequence[dict[str, Any]] = (),
     ) -> "StageAssignment":
         if stage_attempt < 1:
             raise PipelineExecutionError("stage_attempt must be greater than zero")
@@ -72,6 +74,7 @@ class StageAssignment:
             request=job.request.to_wire(),
             attribution=job.attribution.to_wire(),
             job_snapshot=job.to_wire(),
+            local_inputs=tuple(dict(item) for item in local_inputs),
         )
 
     def to_wire(self) -> dict[str, Any]:
@@ -89,6 +92,7 @@ class StageAssignment:
             "request": self.request,
             "attribution": self.attribution,
             "jobSnapshot": self.job_snapshot,
+            "localInputs": list(self.local_inputs),
         }
 
 

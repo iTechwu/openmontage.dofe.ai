@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, Thread
+from typing import Any
 
 from lib.checkpoint import (
     CheckpointValidationError,
@@ -13,6 +17,7 @@ from lib.checkpoint import (
     init_project,
     read_checkpoint,
 )
+from openmontage.artifact_bridge import ArtifactBridgeClient, ArtifactBridgeError
 from openmontage.contracts import ApprovalStatus, JobSnapshot, JobStatus, StageSnapshot, StageStatus
 from openmontage.job_service import JobLease, JobLeaseError, JobService
 from openmontage.pipeline_executor import (
@@ -23,11 +28,18 @@ from openmontage.pipeline_executor import (
 )
 
 
+ROOT = Path(__file__).resolve().parent.parent
+
+
 @dataclass(frozen=True)
 class JobWorkerResult:
     job_id: str
     stage: str | None
     outcome: str
+
+
+class FinalArtifactError(RuntimeError):
+    """Raised when a completed pipeline has no safe final MP4."""
 
 
 class JobWorker:
@@ -42,6 +54,7 @@ class JobWorker:
         heartbeat_interval: timedelta = timedelta(seconds=30),
         retry_delay: timedelta = timedelta(seconds=15),
         max_executor_attempts: int = 3,
+        artifact_bridge: ArtifactBridgeClient | None = None,
     ) -> None:
         if lease_duration <= timedelta(0):
             raise ValueError("lease_duration must be greater than zero")
@@ -59,6 +72,7 @@ class JobWorker:
         self.heartbeat_interval = heartbeat_interval
         self.retry_delay = retry_delay
         self.max_executor_attempts = max_executor_attempts
+        self.artifact_bridge = artifact_bridge
 
     def run_once(self, *, now: datetime | None = None) -> JobWorkerResult | None:
         lease = self.service.claim_job(
@@ -81,6 +95,54 @@ class JobWorker:
         self._ensure_project(snapshot)
         stage = self._next_stage(snapshot)
         if stage is None:
+            if not any(artifact.role == "final_video" for artifact in snapshot.artifacts):
+                if self.artifact_bridge is None:
+                    self._fail_job(
+                        lease,
+                        code="OPENMONTAGE_ARTIFACT_BRIDGE_UNAVAILABLE",
+                        message="Artifact Bridge is required to publish the final video",
+                        now=now,
+                    )
+                    return JobWorkerResult(snapshot.job_id, None, "job_failed")
+                try:
+                    final_video = self._resolve_final_video(snapshot)
+                    published = self.artifact_bridge.upload_output(
+                        job_id=snapshot.job_id,
+                        attribution=snapshot.attribution,
+                        path=final_video,
+                        role="final_video",
+                        media_type="video/mp4",
+                    )
+                    self.service.publish_artifact(
+                        snapshot.job_id,
+                        published,
+                        lease_token=lease.lease_token,
+                        lease_now=self._clock(now),
+                    )
+                except FinalArtifactError:
+                    self._fail_job(
+                        lease,
+                        code="OPENMONTAGE_RENDER_FAILED",
+                        message="Pipeline did not produce a safe final MP4",
+                        now=now,
+                    )
+                    return JobWorkerResult(snapshot.job_id, None, "job_failed")
+                except (ArtifactBridgeError, OSError):
+                    if lease.attempt >= self.max_executor_attempts:
+                        self._fail_job(
+                            lease,
+                            code="OPENMONTAGE_ARTIFACT_UPLOAD_FAILED",
+                            message="Final video upload failed after bounded retries",
+                            now=now,
+                        )
+                        return JobWorkerResult(snapshot.job_id, None, "job_failed")
+                    self._release(
+                        lease,
+                        now=now,
+                        retry_at=self._clock(now) + self.retry_delay,
+                        error="Final video upload failed",
+                    )
+                    return JobWorkerResult(snapshot.job_id, None, "artifact_retry_scheduled")
             self.service.complete_job(
                 snapshot.job_id,
                 lease_token=lease.lease_token,
@@ -165,11 +227,22 @@ class JobWorker:
             return JobWorkerResult(snapshot.job_id, stage.code, "job_failed")
 
         latest = self.service.get_job(snapshot.job_id)
+        try:
+            local_inputs = self._prepare_inputs(latest)
+        except (ArtifactBridgeError, OSError, ValueError):
+            self._fail_job(
+                lease,
+                code="OPENMONTAGE_ARTIFACT_INPUT_FAILED",
+                message="Job input Artifact could not be prepared safely",
+                now=now,
+            )
+            return JobWorkerResult(snapshot.job_id, stage.code, "job_failed")
         assignment = StageAssignment.from_job(
             latest,
             stage=stage.code,
             stage_attempt=self._stage(latest, stage.code).attempt,
             projects_dir=self.projects_dir,
+            local_inputs=local_inputs,
         )
         try:
             execution, lease = self._execute_with_heartbeat(assignment, lease, now=now)
@@ -321,6 +394,135 @@ class JobWorker:
             pipeline_type=snapshot.workflow.name,
             pipeline_dir=self.projects_dir,
         )
+
+    def _prepare_inputs(self, snapshot: JobSnapshot) -> tuple[dict[str, Any], ...]:
+        request_input = snapshot.request.input
+        if request_input.get("type") != "artifact":
+            return ()
+        artifact_id = request_input.get("artifactId")
+        if not isinstance(artifact_id, str) or not artifact_id.strip():
+            raise ValueError("Artifact input requires artifactId")
+        if self.artifact_bridge is None:
+            raise ArtifactBridgeError("Artifact Bridge is required for Artifact input")
+
+        project_dir = (self.projects_dir / snapshot.job_id).resolve()
+        receipt_path = project_dir / ".openmontage" / "input-artifact.json"
+        receipt = self._read_verified_input_receipt(
+            receipt_path,
+            project_dir=project_dir,
+            artifact_id=artifact_id,
+        )
+        if receipt is not None:
+            return (receipt,)
+
+        downloaded = self.artifact_bridge.download_input(
+            job_id=snapshot.job_id,
+            attribution=snapshot.attribution,
+            artifact_id=artifact_id,
+            destination_dir=project_dir / "inputs",
+        )
+        resolved = downloaded.path.resolve()
+        if not resolved.is_relative_to(project_dir):
+            raise ArtifactBridgeError("Downloaded Artifact escaped the Job workspace")
+        receipt = {
+            "artifactId": downloaded.artifact.artifact_id,
+            "path": str(resolved.relative_to(project_dir)),
+            "fileName": downloaded.artifact.file_name,
+            "mediaType": downloaded.artifact.media_type,
+            "sizeBytes": downloaded.artifact.size_bytes,
+            "sha256": downloaded.artifact.sha256,
+        }
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        self._atomic_json(receipt_path, receipt)
+        return (receipt,)
+
+    @staticmethod
+    def _read_verified_input_receipt(
+        receipt_path: Path,
+        *,
+        project_dir: Path,
+        artifact_id: str,
+    ) -> dict[str, Any] | None:
+        if not receipt_path.is_file():
+            return None
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            if not isinstance(receipt, dict) or receipt.get("artifactId") != artifact_id:
+                return None
+            relative_path = receipt.get("path")
+            expected_size = receipt.get("sizeBytes")
+            expected_sha256 = receipt.get("sha256")
+            if (
+                not isinstance(relative_path, str)
+                or not isinstance(expected_size, int)
+                or isinstance(expected_size, bool)
+                or expected_size < 1
+                or not isinstance(expected_sha256, str)
+            ):
+                return None
+            path = (project_dir / relative_path).resolve()
+            if not path.is_relative_to(project_dir) or not path.is_file():
+                return None
+            size, sha256 = JobWorker._hash_file(path)
+            if size != expected_size or sha256 != expected_sha256:
+                return None
+            return receipt
+        except (json.JSONDecodeError, OSError, ValueError):
+            return None
+
+    def _resolve_final_video(self, snapshot: JobSnapshot) -> Path:
+        project_dir = (self.projects_dir / snapshot.job_id).resolve()
+        raw_paths: list[str] = []
+        publish = read_checkpoint(self.projects_dir, snapshot.job_id, "publish")
+        if publish is not None:
+            publish_log = publish.get("artifacts", {}).get("publish_log")
+            entries = publish_log.get("entries") if isinstance(publish_log, dict) else None
+            if isinstance(entries, list):
+                for entry in reversed(entries):
+                    if isinstance(entry, dict) and entry.get("status") in {"exported", "published"}:
+                        export_path = entry.get("export_path")
+                        if isinstance(export_path, str):
+                            raw_paths.append(export_path)
+        compose = read_checkpoint(self.projects_dir, snapshot.job_id, "compose")
+        if compose is not None:
+            render_report = compose.get("artifacts", {}).get("render_report")
+            outputs = render_report.get("outputs") if isinstance(render_report, dict) else None
+            if isinstance(outputs, list):
+                for output in outputs:
+                    if isinstance(output, dict) and isinstance(output.get("path"), str):
+                        raw_paths.append(output["path"])
+
+        for raw_path in raw_paths:
+            value = Path(raw_path).expanduser()
+            candidates = [value] if value.is_absolute() else [project_dir / value, ROOT / value]
+            for candidate in candidates:
+                resolved = candidate.resolve()
+                if (
+                    resolved.is_relative_to(project_dir)
+                    and resolved.is_file()
+                    and resolved.suffix.lower() == ".mp4"
+                ):
+                    return resolved
+        raise FinalArtifactError("No safe final MP4 was declared by the pipeline")
+
+    @staticmethod
+    def _hash_file(path: Path) -> tuple[int, str]:
+        digest = hashlib.sha256()
+        size = 0
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                size += len(chunk)
+                digest.update(chunk)
+        return size, digest.hexdigest()
+
+    @staticmethod
+    def _atomic_json(path: Path, value: dict[str, Any]) -> None:
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(value, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
 
     @staticmethod
     def _next_stage(snapshot: JobSnapshot) -> StageSnapshot | None:
