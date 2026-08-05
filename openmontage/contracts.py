@@ -197,6 +197,24 @@ class OutboxRecord(WireModel):
     last_error: str | None = None
 
 
+class ArtifactMetadata(WireModel):
+    artifact_id: str = Field(min_length=1, max_length=256)
+    file_name: str = Field(min_length=1, max_length=255)
+    media_type: str = Field(min_length=1, max_length=255)
+    size_bytes: int = Field(gt=0)
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class ArtifactReadGrant(WireModel):
+    schema_version: Literal[1] = 1
+    grant_id: str = Field(pattern=r"^om_ag_[A-Za-z0-9_-]{1,256}$")
+    operation: Literal["READ"]
+    download_url: str = Field(min_length=1, max_length=2048)
+    token: str = Field(min_length=32, max_length=512)
+    expires_at: datetime
+    artifact: ArtifactMetadata
+
+
 _STAGE_TRANSITIONS: dict[StageStatus, frozenset[StageStatus]] = {
     StageStatus.PENDING: frozenset(
         {StageStatus.RUNNING, StageStatus.SKIPPED, StageStatus.CANCELLED}
