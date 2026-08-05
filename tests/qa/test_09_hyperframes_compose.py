@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """QA Test 09: HyperFrames end-to-end — scaffold + lint + validate + render.
 
-This test hits the real HyperFrames CLI via `npx @hyperframes/cli`. On first
-run, npm fetches the package (slow — ~30-90s) and then Chrome downloads its
-browser for validation (~30s extra, cached thereafter). Skip unless
+This test hits the project-local HyperFrames CLI installed from the npm
+lockfile. Chrome may download its browser for validation on first run. Skip unless
 HYPERFRAMES_QA=1 is set so CI doesn't pay the cost on every run.
 
 The test is still valuable even without `--render`:
@@ -106,7 +105,7 @@ def _minimal_scenario(workspace: Path, asset: Path) -> dict:
 @pytest.mark.skipif(not os.environ.get("HYPERFRAMES_QA"), reason=_SKIP_REASON)
 def test_hyperframes_scaffold_lint_validate(tmp_path: Path):
     if not _runtime_ready():
-        pytest.skip("HyperFrames runtime floor not met (node>=22 + ffmpeg + npx).")
+        pytest.skip("HyperFrames runtime floor not met (node>=22 + ffmpeg + local CLI).")
 
     asset = _make_fixture_asset(tmp_path / "assets_src")
     workspace = tmp_path / "hyperframes"
@@ -121,7 +120,7 @@ def test_hyperframes_scaffold_lint_validate(tmp_path: Path):
     assert (workspace / "assets" / "hero.png").is_file()
     assert (workspace / "hyperframes.json").is_file()
 
-    # 2. Lint — the CLI fetch happens here on cold cache. Allow plenty of time.
+    # 2. Lint — the installed CLI runs static contract validation here.
     lint = HyperFramesCompose().execute(
         {"operation": "lint", "workspace_path": str(workspace)}
     )

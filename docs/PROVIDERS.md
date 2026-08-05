@@ -785,7 +785,7 @@ These providers run entirely on your machine. No network, no API key, no cost. S
 
 ```bash
 # Included in make setup, or install manually:
-cd remotion-composer && npm install && cd ..
+make install-runtimes
 ```
 
 Requires **Node.js 18+** and `npx`. The `remotion-composer/` project is included in the repo.
@@ -832,7 +832,7 @@ ffmpeg -version
 npx --yes hyperframes doctor
 ```
 
-The CLI is consumed as `npx hyperframes`. Do not use `npx @hyperframes/cli`; that package name is not the OpenMontage runtime path.
+The CLI is pinned in `remotion-composer/package-lock.json` and invoked from the project-local `node_modules/.bin`. Install both local composition runtimes with `make install-runtimes`, then verify them with `make runtimes-doctor`. `npx hyperframes` remains a compatibility fallback; do not use `npx @hyperframes/cli`, because that is not the published package name.
 
 #### What HyperFrames Renders
 

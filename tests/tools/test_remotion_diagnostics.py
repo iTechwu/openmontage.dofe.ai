@@ -25,6 +25,24 @@ def tool(monkeypatch):
     return VideoCompose()
 
 
+def test_remotion_fonts_are_vendored_for_offline_rendering():
+    composer = PROJECT_ROOT / "remotion-composer"
+    fonts = composer / "public" / "fonts"
+    expected = {
+        "space-grotesk-latin.woff2",
+        "playfair-display-latin.woff2",
+        "playfair-display-latin-italic.woff2",
+        "SPACE_GROTESK_OFL.txt",
+        "PLAYFAIR_DISPLAY_OFL.txt",
+    }
+    assert expected <= {path.name for path in fonts.iterdir()}
+
+    package = (composer / "package.json").read_text(encoding="utf-8")
+    assert '"@remotion/fonts": "4.0.484"' in package
+    for source in (composer / "src").glob("*.tsx"):
+        assert "@remotion/google-fonts" not in source.read_text(encoding="utf-8")
+
+
 def test_render_failure_surfaces_remotion_stderr_tail(tool, tmp_path, monkeypatch):
     stderr = "some npm noise\nError: Delayed render timed out\nRemotion actual cause here"
 

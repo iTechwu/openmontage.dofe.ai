@@ -58,15 +58,16 @@ class HyperFramesCompose(BaseTool):
     determinism = Determinism.DETERMINISTIC
     runtime = ToolRuntime.LOCAL
 
-    dependencies = ["cmd:npx", "cmd:ffmpeg"]
+    dependencies = ["cmd:node", "cmd:ffmpeg"]
     install_instructions = (
         "Requires Node.js >= 22 (https://nodejs.org/) and FFmpeg "
-        "(https://ffmpeg.org/download.html). The HyperFrames CLI is fetched "
-        "on first use via `npx hyperframes` (npm package: `hyperframes`). "
+        "(https://ffmpeg.org/download.html). Run `make install-runtimes` from "
+        "the OpenMontage root to install the pinned project-local HyperFrames "
+        "CLI (npm package: `hyperframes`). `npx hyperframes` remains a fallback. "
         "Note: the upstream monorepo develops the package as `@hyperframes/cli`, "
         "but it publishes to npm as `hyperframes`. `npx @hyperframes/cli` "
         "returns 404 -- do NOT use that form. Verify setup with "
-        "`npx hyperframes doctor` or run the `doctor` operation on this tool."
+        "`make runtimes-doctor` or run the `doctor` operation on this tool."
     )
     agent_skills = [
         "hyperframes",
@@ -220,6 +221,8 @@ class HyperFramesCompose(BaseTool):
 
     _NODE_FLOOR_MAJOR = 22
     _NPM_PACKAGE = "hyperframes"  # published npm name (NOT @hyperframes/cli — that's 404)
+    _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+    _COMPOSER_DIR = _PROJECT_ROOT / "remotion-composer"
     # Process-level cache for the npm resolve check. Shape:
     #   {"version": "0.4.5"}   → package resolves
     #   {"error": "<short>"}   → resolution failed (offline, unpublished, etc.)
@@ -227,6 +230,38 @@ class HyperFramesCompose(BaseTool):
     # (get_info spam from the registry) are free.
     _npm_resolve_cache: Optional[dict[str, str]] = None
     _cli_probe_cache: Optional[dict[str, str]] = None
+
+    @classmethod
+    def _local_cli_path(cls) -> Optional[Path]:
+        """Return the pinned project-local CLI, including Windows' .cmd shim."""
+        override = os.environ.get("OPENMONTAGE_HYPERFRAMES_BIN")
+        candidates = [Path(override).expanduser()] if override else []
+        bin_dir = cls._COMPOSER_DIR / "node_modules" / ".bin"
+        candidates.extend([bin_dir / "hyperframes", bin_dir / "hyperframes.cmd"])
+        return next((path.resolve() for path in candidates if path.is_file()), None)
+
+    @classmethod
+    def _local_package(cls) -> dict[str, str]:
+        """Describe the installed package without consulting the network."""
+        manifest = cls._COMPOSER_DIR / "node_modules" / cls._NPM_PACKAGE / "package.json"
+        if not manifest.is_file():
+            return {}
+        try:
+            version = str(json.loads(manifest.read_text(encoding="utf-8"))["version"])
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            return {"error": f"local package manifest is invalid: {type(exc).__name__}"}
+        cli = cls._local_cli_path()
+        if cli is None:
+            return {"error": "local package is installed but its CLI shim is missing"}
+        return {"version": version, "cli_path": str(cli)}
+
+    @classmethod
+    def _cli_command(cls, args: list[str]) -> list[str]:
+        """Prefer the lockfile-installed CLI and use npx only as a fallback."""
+        local_cli = cls._local_cli_path()
+        if local_cli is not None:
+            return [str(local_cli), *args]
+        return ["npx", "--yes", cls._NPM_PACKAGE, *args]
 
     @classmethod
     def _node_major_version(cls) -> Optional[int]:
@@ -314,14 +349,14 @@ class HyperFramesCompose(BaseTool):
         if cls._cli_probe_cache is not None:
             return cls._cli_probe_cache
 
-        npx = shutil.which("npx")
-        if not npx:
-            cls._cli_probe_cache = {"error": "npx not on PATH"}
+        cmd = cls._cli_command(["doctor", "--json"])
+        if cmd[0] == "npx" and not shutil.which("npx"):
+            cls._cli_probe_cache = {"error": "local CLI missing and npx not on PATH"}
             return cls._cli_probe_cache
 
         try:
             proc = subprocess.run(
-                [npx, "--yes", cls._NPM_PACKAGE, "doctor", "--json"],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=20,
@@ -344,14 +379,14 @@ class HyperFramesCompose(BaseTool):
     def _runtime_check(self) -> dict[str, Any]:
         """Return availability state for the HyperFrames runtime.
 
-        Checks BOTH local binaries (node >= 22, ffmpeg, npx) AND that the
-        `hyperframes` npm package actually resolves. A missing/404 package
-        counts as unavailable — `runtime_available: True` means the runtime
-        can genuinely run end-to-end, not just that the local tooling exists.
+        The lockfile-installed CLI is the primary runtime and works offline.
+        `npx` plus an npm registry resolve is retained only for compatibility
+        with older installations that have not run `make install-runtimes`.
         """
         node_major = self._node_major_version()
         ffmpeg_ok = shutil.which("ffmpeg") is not None
         npx_ok = shutil.which("npx") is not None
+        local_package = self._local_package()
 
         reasons: list[str] = []
         if node_major is None:
@@ -360,15 +395,18 @@ class HyperFramesCompose(BaseTool):
             reasons.append(
                 f"node major version {node_major} < required {self._NODE_FLOOR_MAJOR}"
             )
-        if not npx_ok:
-            reasons.append("npx not found on PATH")
         if not ffmpeg_ok:
             reasons.append("ffmpeg not found on PATH")
+
+        if "error" in local_package:
+            reasons.append(local_package["error"])
+        elif not local_package and not npx_ok:
+            reasons.append("project-local HyperFrames CLI missing and npx not found on PATH")
 
         # Only probe npm if the local tooling is actually usable — otherwise
         # a missing-node run would also show a confusing npm error.
         npm_resolve: dict[str, str] = {}
-        if not reasons:
+        if not reasons and not local_package:
             npm_resolve = self._resolve_npm_package()
             if "error" in npm_resolve:
                 reasons.append(
@@ -387,8 +425,10 @@ class HyperFramesCompose(BaseTool):
             "node_major": node_major,
             "ffmpeg_available": ffmpeg_ok,
             "npx_available": npx_ok,
+            "installation_source": "project-local" if local_package else "npx",
+            "cli_path": local_package.get("cli_path"),
             "npm_package": self._NPM_PACKAGE,
-            "npm_package_version": npm_resolve.get("version"),
+            "npm_package_version": local_package.get("version") or npm_resolve.get("version"),
             "npm_resolve_error": npm_resolve.get("error"),
             "cli_probe_status": cli_probe.get("status"),
             "cli_probe_error": cli_probe.get("error"),
@@ -1172,13 +1212,13 @@ class HyperFramesCompose(BaseTool):
         timeout: int,
         check: bool,
     ) -> subprocess.CompletedProcess:
-        """Invoke `npx hyperframes <args>` with the right Windows quirks.
+        """Invoke the project-local HyperFrames CLI, falling back to npx.
 
         We intentionally bypass `self.run_command` here because we do NOT
         want to raise CalledProcessError on non-zero exits — the caller
         parses lint/validate/render exit codes itself.
         """
-        cmd = ["npx", "--yes", "hyperframes", *args]
+        cmd = self._cli_command(args)
         # On Windows, resolve the .cmd wrapper so subprocess can find it
         # without shell=True.
         if os.name == "nt":
@@ -1186,12 +1226,19 @@ class HyperFramesCompose(BaseTool):
             if resolved:
                 cmd[0] = resolved
         try:
+            env = os.environ.copy()
+            # HyperFrames 0.7.x enables an experimental parallel drawElement
+            # router that can terminate with exit 13 while compiling otherwise
+            # valid projects. Keep OpenMontage on the deterministic capture path
+            # unless the caller explicitly opts back in.
+            env.setdefault("HF_DE_PARALLEL_ROUTER", "false")
             return subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
                 cwd=str(cwd) if cwd else None,
+                env=env,
                 check=False,
             )
         except subprocess.TimeoutExpired as e:

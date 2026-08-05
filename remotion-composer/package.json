@@ -3,19 +3,24 @@
   "version": "1.0.0",
   "description": "Remotion composition renderer for OpenMontage animated explainer videos",
   "scripts": {
-    "start": "npx remotion studio",
-    "build": "npx remotion render src/index.tsx Explainer out/video.mp4",
-    "upgrade": "npx remotion upgrade"
+    "start": "remotion studio",
+    "build": "remotion render src/index.tsx Explainer out/video.mp4",
+    "runtime:remotion": "remotion versions",
+    "runtime:browser": "remotion browser ensure",
+    "runtime:hyperframes-browser": "hyperframes browser ensure",
+    "runtime:hyperframes": "hyperframes doctor --json",
+    "upgrade": "remotion upgrade"
   },
   "dependencies": {
     "@remotion/captions": "^4.0.484",
     "@remotion/cli": "^4.0.484",
-    "@remotion/google-fonts": "^4.0.484",
+    "@remotion/fonts": "4.0.484",
     "@remotion/media": "^4.0.484",
     "@remotion/player": "^4.0.484",
     "@remotion/transitions": "^4.0.484",
     "d3-geo": "^3.1.1",
     "fast-uri": "^3.1.5",
+    "hyperframes": "0.7.92",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "remotion": "^4.0.484",

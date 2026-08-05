@@ -38,7 +38,12 @@ RUN python3 -m venv /opt/venv \
 COPY remotion-composer/package.json remotion-composer/package-lock.json ./remotion-composer/
 RUN cd remotion-composer \
     && npm config set registry "${NPM_REGISTRY}" \
-    && npm ci --no-audit --no-fund
+    && npm ci --no-audit --no-fund \
+    && npm run runtime:browser \
+    && mkdir -p "/home/${RUNTIME_USER}/.cache" \
+    && HOME="/home/${RUNTIME_USER}" npm run runtime:hyperframes-browser \
+    && HOME="/home/${RUNTIME_USER}" npm run runtime:hyperframes >/dev/null \
+    && chown -R ${RUNTIME_USER}:${RUNTIME_GROUP} "/home/${RUNTIME_USER}/.cache"
 
 COPY --chown=${RUNTIME_USER}:${RUNTIME_GROUP} . .
 RUN pip install --no-cache-dir --no-deps -e . \
