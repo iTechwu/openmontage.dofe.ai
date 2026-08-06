@@ -386,7 +386,8 @@
         "identity_registry_consistency": {"status": "pass", "evidence": "Both scenes and takes resolve vehicle-white-suv to one canonical registry entry."},
         "prompt_compilation_trace": {"status": "pass", "evidence": "Both assets record provider surface, section order, honest input bindings, carrier coverage, compression, and endpoint."},
         "temporal_structure": {"status": "pass", "evidence": "Each clip has unique ascending beat orders; clip-02 begins after the accepted clip-01 endpoint."},
-        "reference_binding_matches_preflight": {"status": "pass", "evidence": "Both input_parameter bindings are declared by their stored provider preflight."}
+        "reference_binding_matches_preflight": {"status": "pass", "evidence": "Both input_parameter bindings are declared by their stored provider preflight."},
+        "contract_version_consistency": {"status": "pass", "evidence": "Both Seedance assets and the lineage review carry contract version 2.0."}
       },
       "findings": []
     }

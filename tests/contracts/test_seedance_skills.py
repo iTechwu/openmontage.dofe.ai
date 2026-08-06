@@ -673,6 +673,10 @@ def _standalone_lineage_review(asset_id: str) -> dict:
                 "status": "pass",
                 "evidence": f"{asset_id} uses the preflight-declared input_parameter binding.",
             },
+            "contract_version_consistency": {
+                "status": "pass",
+                "evidence": f"{asset_id} shares the manifest's Seedance contract version.",
+            },
         },
         "findings": [],
     }
@@ -1161,6 +1165,90 @@ def test_lineage_review_critical_finding_requires_proposed_fix():
     )
     errors = list(Draft202012Validator(schema).iter_errors(manifest))
     assert any("proposed_fix" in e.message for e in errors)
+
+
+def _minimal_seedance_asset(asset_id: str, version: str = "2.0") -> dict:
+    """Minimal but valid Seedance asset for v1/v2 mixing and compile_spec tests."""
+    asset = {
+        "id": asset_id,
+        "type": "video",
+        "path": f"assets/video/{asset_id}.mp4",
+        "source_tool": "seedance_video",
+        "scene_id": "clip-01",
+        "model_family": "seedance",
+        "provider": "fal",
+        "model": "seedance-2.0",
+        "prompt_review": {
+            "draft": "draft",
+            "final": "final",
+            "skills_applied": list(SKILL_NAMES),
+            "continuity_checked": True,
+            "reference_roles_checked": True,
+            "provider_preflight": _provider_preflight_report(),
+        },
+        "take_review": {
+            "decision": "keep",
+            "issues": [],
+            "accepted_as_canon": True,
+            "canon_status": "accepted",
+            "observed_end_state": "The shot reaches its endpoint.",
+            "extension_depth": 0,
+            "observation_confidence": "high",
+            "uncertainties": [],
+            "next_action": "continue",
+        },
+    }
+    if version == "2.0":
+        asset["seedance_contract_version"] = "2.0"
+        asset["prompt_review"]["compile_spec"] = _prompt_compile_spec()
+        asset["take_review"]["observed_state"] = _observed_state()
+        asset["take_review"]["identity_observations"] = _identity_observations()
+    return asset
+
+
+def test_seedance_scene_plan_rejects_mixed_contract_versions():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "scene_plan.schema.json").read_text()
+    )
+    v2_contract = _minimal_seedance_scene_contract()
+    v1_contract = _minimal_seedance_scene_contract()
+    del v1_contract["seedance_contract_version"]
+    del v1_contract["identity_ids"]
+    del v1_contract["seedance_contract"]["temporal_beats"]
+    for field in ("lens", "blocking", "camera_axis", "screen_direction"):
+        del v1_contract["seedance_contract"]["shot_design"][field]
+
+    plan = _scene_artifact(v2_contract)
+    plan["scenes"].append(
+        {
+            "id": "clip-v1",
+            "type": "generated",
+            "description": "Legacy v1 Seedance scene.",
+            "start_seconds": 5,
+            "end_seconds": 10,
+            "generation_contract": v1_contract,
+        }
+    )
+    errors = list(Draft202012Validator(schema).iter_errors(plan))
+    assert any("scenes" in ".".join(map(str, e.absolute_path)) for e in errors)
+
+
+def test_seedance_asset_manifest_rejects_mixed_contract_versions():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "asset_manifest.schema.json").read_text()
+    )
+    review = _standalone_lineage_review("v2-take")
+    review["reviewed_asset_ids"] = ["v2-take", "v1-take"]
+    manifest = {
+        "version": "1.0",
+        "assets": [
+            _minimal_seedance_asset("v2-take", "2.0"),
+            _minimal_seedance_asset("v1-take", "1.0"),
+        ],
+        "lineage_review": review,
+    }
+    errors = list(Draft202012Validator(schema).iter_errors(manifest))
+    assert any("assets" in ".".join(map(str, e.absolute_path)) for e in errors)
 
 
 def test_v2_seedance_authoring_lanes_are_exclusive():

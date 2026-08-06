@@ -620,6 +620,51 @@
         "required": ["scenes"]
       },
       "then": { "required": ["identity_registry"] }
+    },
+    {
+      "if": {
+        "properties": {
+          "scenes": {
+            "contains": {
+              "type": "object",
+              "properties": {
+                "generation_contract": {
+                  "type": "object",
+                  "properties": {
+                    "model_family": { "const": "seedance" },
+                    "seedance_contract_version": { "const": "2.0" }
+                  },
+                  "required": ["model_family", "seedance_contract_version"]
+                }
+              },
+              "required": ["generation_contract"]
+            }
+          }
+        },
+        "required": ["scenes"]
+      },
+      "then": {
+        "properties": {
+          "scenes": {
+            "not": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "generation_contract": {
+                    "type": "object",
+                    "properties": {
+                      "model_family": { "const": "seedance" },
+                      "seedance_contract_version": { "enum": ["1.0"] }
+                    },
+                    "required": ["model_family"]
+                  }
+                },
+                "required": ["generation_contract"]
+              }
+            }
+          }
+        }
+      }
     }
   ],
   "additionalProperties": false

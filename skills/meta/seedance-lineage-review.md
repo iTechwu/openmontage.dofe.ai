@@ -60,6 +60,10 @@ Record a concrete asset/scene-ID-based evidence sentence for every check:
 - `reference_binding_matches_preflight`: every scene reference role uses a mode
   supported by its stored provider preflight. Prompt tokens require an exact
   declared provider syntax; otherwise the binding must be an input parameter.
+- `contract_version_consistency`: every active Seedance record in the reviewed
+  set carries the same `seedance_contract_version`, matching
+  `lineage_review.seedance_contract_version`. When any record is v2, all active
+  Seedance records must be v2; a mixed set is `critical` and blocks `pass`.
 
 Use `not_applicable` only when the graph genuinely has no relevant edge or
 reference. The evidence must say why.
