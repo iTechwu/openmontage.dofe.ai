@@ -291,15 +291,22 @@ class DofeClient:
         """POST /v1/generation/tasks. Not retried (avoid double charge)."""
 
         metadata = payload.get("metadata")
-        logical_call_id = (
+        metadata_call_id = (
             str(metadata.get("openmontage_idempotency_key") or "").strip()
             if isinstance(metadata, dict)
             else ""
         )
+        payload_call_id = str(payload.get("idempotencyKey") or "").strip()
+        if payload_call_id and metadata_call_id and payload_call_id != metadata_call_id:
+            raise DofeAPIError("dofe generation idempotency keys do not match")
+        logical_call_id = payload_call_id or metadata_call_id
+        request_payload = dict(payload)
+        if logical_call_id:
+            request_payload["idempotencyKey"] = logical_call_id
         body = self._request(
             "post",
             "/v1/generation/tasks",
-            json=payload,
+            json=request_payload,
             read_timeout=self._create_read_timeout,
             allow_retry=False,
             logical_call_id=logical_call_id or None,
