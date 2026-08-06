@@ -172,18 +172,47 @@ def test_rest_job_creation_reports_manifest_name_mismatch_as_unavailable(
     }
 
 
+def test_rest_job_creation_reports_duplicate_manifest_stages_as_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = _client(tmp_path)
+    monkeypatch.setattr(
+        "openmontage.contracts.load_pipeline_readonly",
+        lambda _workflow: {
+            "name": "framework-smoke",
+            "version": "1",
+            "stages": [
+                {"name": "research", "human_approval_default": False},
+                {"name": "research", "human_approval_default": True},
+            ],
+        },
+    )
+
+    response = client.post("/api/v1/jobs", json=_request(), headers=_headers())
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "OPENMONTAGE_WORKFLOW_UNAVAILABLE"
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message_fragment"),
     [
         ("schemaVersion", True, "schemaVersion"),
         ("schemaVersion", 1.0, "schemaVersion"),
         ("clientRequestId", "   ", "clientRequestId"),
+        ("clientRequestId", "r" * 257, "clientRequestId"),
+        ("workflow", "w" * 129, "workflow"),
         ("input", {"type": "artifact"}, "artifactId"),
         ("input", {"type": "artifact", "artifactId": "   "}, "artifactId"),
+        ("input", {"type": "artifact", "artifactId": "a" * 257}, "artifactId"),
         ("input", {"type": "text"}, "inlineText"),
         ("input", {"type": "text", "inlineText": "   "}, "inlineText"),
+        ("input", {"type": "text", "inlineText": "t" * 100_001}, "inlineText"),
         ("brief", {}, "title"),
         ("brief", {"title": "   "}, "title"),
+        ("brief", {"title": "t" * 513}, "title"),
+        ("brief", {"title": "Smoke", "audience": "a" * 2_001}, "audience"),
         ("brief", {"title": "Smoke", "durationSeconds": 86401}, "durationSeconds"),
         ("brief", {"title": "Smoke", "durationSeconds": True}, "durationSeconds"),
         ("output", {}, "container"),
@@ -193,10 +222,10 @@ def test_rest_job_creation_reports_manifest_name_mismatch_as_unavailable(
         ("budget", {"maxAmount": "1.00"}, "currency"),
     ],
 )
-def test_rest_job_creation_rejects_incomplete_nested_contracts(
+def test_rest_job_creation_rejects_invalid_request_contracts(
     tmp_path: Path,
     field: str,
-    value: dict[str, object],
+    value: object,
     message_fragment: str,
 ) -> None:
     client, _ = _client(tmp_path)
@@ -435,17 +464,19 @@ async def test_mcp_job_creation_reports_invalid_manifest_without_internal_detail
         ("schemaVersion", True, "schemaVersion"),
         ("schemaVersion", 1.0, "schemaVersion"),
         ("clientRequestId", "   ", "clientRequestId"),
+        ("clientRequestId", "r" * 257, "clientRequestId"),
         ("input", {"type": "artifact"}, "artifactId"),
         ("input", {"type": "text", "inlineText": "   "}, "inlineText"),
+        ("input", {"type": "text", "inlineText": "t" * 100_001}, "inlineText"),
         ("brief", {"title": "Smoke", "durationSeconds": True}, "durationSeconds"),
         ("output", {"container": "mp4", "fps": True}, "fps"),
         ("budget", {}, "maxAmount"),
     ],
 )
-async def test_mcp_job_creation_rejects_invalid_nested_contracts(
+async def test_mcp_job_creation_rejects_invalid_request_contracts(
     tmp_path: Path,
     field: str,
-    value: dict[str, object],
+    value: object,
     message_fragment: str,
 ) -> None:
     from mcp import Client

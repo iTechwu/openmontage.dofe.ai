@@ -172,3 +172,25 @@ def test_job_submission_preflight_omits_example_when_no_workflow_is_available(mo
 
     assert contract["supported_workflows"] == []
     assert contract["request_example"] is None
+
+
+def test_job_submission_preflight_excludes_workflow_with_duplicate_stages(monkeypatch):
+    import openmontage.capabilities as capabilities
+    import openmontage.contracts as contracts
+
+    monkeypatch.setattr(capabilities, "list_pipelines", lambda: ["duplicate-stages"])
+    monkeypatch.setattr(contracts, "list_pipelines", lambda: ["duplicate-stages"])
+    monkeypatch.setattr(
+        contracts,
+        "load_pipeline_readonly",
+        lambda _workflow: {
+            "name": "duplicate-stages",
+            "version": "1",
+            "stages": [{"name": "compose"}, {"name": "compose"}],
+        },
+    )
+
+    contract = job_submission_capability()
+
+    assert contract["supported_workflows"] == []
+    assert contract["unavailable_workflows"][0]["workflow"] == "duplicate-stages"

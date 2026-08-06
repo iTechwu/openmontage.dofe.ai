@@ -84,35 +84,68 @@ class JobAttribution(WireModel):
     trace_id: str = Field(min_length=1)
 
 
-NonBlankString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+ClientRequestId = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=256),
+]
+WorkflowName = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=128),
+]
+InlineJobText = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=100_000),
+]
+ArtifactId = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=256),
+]
+JobTitle = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=512),
+]
+AudienceDescription = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=2_000),
+]
 
 
 class WorkflowConfigurationError(RuntimeError):
     """Raised when a listed workflow cannot be loaded from its manifest."""
 
 
+def _invalid_workflow_manifest(workflow: str) -> WorkflowConfigurationError:
+    return WorkflowConfigurationError(
+        f"Workflow {workflow!r} is unavailable because its manifest is invalid"
+    )
+
+
 class TextJobInput(WireModel):
     type: Literal["text"]
-    inline_text: NonBlankString
+    inline_text: InlineJobText
 
 
 class ArtifactJobInput(WireModel):
     type: Literal["artifact"]
-    artifact_id: NonBlankString
+    artifact_id: ArtifactId
 
 
 JobInput = Annotated[TextJobInput | ArtifactJobInput, Field(discriminator="type")]
 
 
 class JobBrief(WireModel):
-    title: NonBlankString
+    title: JobTitle
     duration_seconds: int | None = Field(default=None, gt=0, le=86_400, strict=True)
-    audience: NonBlankString | None = None
+    audience: AudienceDescription | None = None
 
 
 class JobOutput(WireModel):
     container: Literal["mp4"]
-    resolution: str | None = Field(default=None, pattern=r"^[1-9][0-9]*x[1-9][0-9]*$")
+    resolution: str | None = Field(
+        default=None,
+        max_length=20,
+        pattern=r"^[1-9][0-9]*x[1-9][0-9]*$",
+    )
     fps: int | None = Field(default=None, gt=0, le=240, strict=True)
 
     @field_validator("resolution")
@@ -133,14 +166,13 @@ class JobBudget(WireModel):
 
 class JobCreateRequest(WireModel):
     schema_version: Literal[1] = 1
-    client_request_id: NonBlankString = Field(
+    client_request_id: ClientRequestId = Field(
         description=(
             "Idempotency key for one business submission; reuse it for retries and change it "
             "for a new Job."
         ),
     )
-    workflow: str = Field(
-        min_length=1,
+    workflow: WorkflowName = Field(
         description=(
             "Pipeline manifest name from pipeline_defs; stage names such as compose are invalid."
         ),
@@ -201,9 +233,10 @@ class WorkflowDefinition(WireModel):
         try:
             manifest = load_pipeline_readonly(pipeline_type)
             if manifest["name"] != pipeline_type:
-                raise WorkflowConfigurationError(
-                    f"Workflow {pipeline_type!r} is unavailable because its manifest is invalid"
-                )
+                raise _invalid_workflow_manifest(pipeline_type)
+            stage_order = get_stage_order(manifest)
+            if len(stage_order) != len(set(stage_order)):
+                raise _invalid_workflow_manifest(pipeline_type)
             approval_by_stage = {
                 stage["name"]: bool(stage.get("human_approval_default", False))
                 for stage in manifest["stages"]
@@ -217,7 +250,7 @@ class WorkflowDefinition(WireModel):
                         label_code=f"openmontage.stage.{stage}",
                         approval_required=approval_by_stage[stage],
                     )
-                    for stage in get_stage_order(manifest)
+                    for stage in stage_order
                 ),
             )
         except WorkflowConfigurationError:
@@ -233,9 +266,7 @@ class WorkflowDefinition(WireModel):
             KeyError,
             TypeError,
         ) as exc:
-            raise WorkflowConfigurationError(
-                f"Workflow {pipeline_type!r} is unavailable because its manifest is invalid"
-            ) from exc
+            raise _invalid_workflow_manifest(pipeline_type) from exc
 
 
 class StageSnapshot(WireModel):
