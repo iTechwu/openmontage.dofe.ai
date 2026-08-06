@@ -477,6 +477,7 @@
             "beat_and_identity_continuity": { "$ref": "#/$defs/lineageCheck" },
             "identity_registry_consistency": { "$ref": "#/$defs/lineageCheck" },
             "prompt_compilation_trace": { "$ref": "#/$defs/lineageCheck" },
+            "temporal_structure": { "$ref": "#/$defs/lineageCheck" },
             "reference_binding_matches_preflight": { "$ref": "#/$defs/lineageCheck" }
           },
           "additionalProperties": false
@@ -505,7 +506,13 @@
           },
           "then": {
             "properties": {
-              "checks": { "required": ["identity_registry_consistency", "prompt_compilation_trace"] }
+              "checks": {
+                "required": [
+                  "identity_registry_consistency",
+                  "prompt_compilation_trace",
+                  "temporal_structure"
+                ]
+              }
             }
           }
         },
@@ -525,6 +532,7 @@
                   "beat_and_identity_continuity": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
                   "identity_registry_consistency": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
                   "prompt_compilation_trace": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
+                  "temporal_structure": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
                   "reference_binding_matches_preflight": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } }
                 }
               }

@@ -1,0 +1,394 @@
+{
+  "scene_plan": {
+    "version": "1.0",
+    "style_playbook": "controlled-vehicle-thriller",
+    "identity_registry": [
+      {
+        "id": "vehicle-white-suv",
+        "kind": "vehicle",
+        "role": "recurring vehicle protagonist",
+        "canonical_anchor": "white compact SUV with split lamps and five-spoke wheels",
+        "immutable_traits": {
+          "silhouette": "compact two-box SUV",
+          "proportions": "short overhangs and tall cabin",
+          "palette": ["white paint", "black glass"],
+          "materials": ["painted metal", "clear lamp lenses"],
+          "signature_features": ["split lamps", "five-spoke wheels"]
+        },
+        "allowed_changes": ["wheel rotation", "suspension compression", "water on body"],
+        "reference_tags": ["vehicle-identity-reference"],
+        "postproduction_zones": ["license plate overlay"]
+      }
+    ],
+    "scenes": [
+      {
+        "id": "clip-01",
+        "type": "generated",
+        "description": "The white SUV enters a wet service tunnel and brakes before the red gate.",
+        "start_seconds": 0,
+        "end_seconds": 6,
+        "framing": "low medium-wide",
+        "movement": "lateral track that settles into a lock",
+        "narrative_role": "introduce_subject",
+        "generation_contract": {
+          "model_family": "seedance",
+          "seedance_contract_version": "2.0",
+          "mode": "reference_to_video",
+          "shot_structure": "single_take",
+          "continuation_type": "sequence_first_clip",
+          "felt_intent": "Make the SUV's controlled weight readable before the threat is revealed.",
+          "planned_start_state": "The wet tunnel is empty and the red gate is closed.",
+          "planned_end_state": "The SUV is stopped square to the red gate with its lamps steady.",
+          "identity_anchors": ["white compact SUV with split lamps and five-spoke wheels"],
+          "identity_ids": ["vehicle-white-suv"],
+          "reference_roles": [
+            {
+              "tag": "vehicle-identity-reference",
+              "binding_mode": "input_parameter",
+              "role": "identity",
+              "transfers": ["body silhouette", "paint", "lamp shape", "wheel design"],
+              "must_not_transfer": ["background", "readable text"]
+            }
+          ],
+          "continuity_locks": ["vehicle identity", "lane geography", "red gate position"],
+          "allowed_changes": ["wheel rotation", "water spray", "suspension compression"],
+          "completed_beats": [],
+          "reserved_beats": ["gate opens", "headlamps switch to warning flash"],
+          "prompt_budget": {
+            "primary_spend": "motion",
+            "secondary_spend": "identity",
+            "economized": ["background pipes", "unreadable plate details"]
+          },
+          "seedance_contract": {
+            "lane": "narrative",
+            "authoring_state": {
+              "dramatic_function": "controlled arrival",
+              "turn": "ordinary arrival becomes a deliberate stop",
+              "pov": "the unseen observer behind the gate",
+              "power_shift": "the SUV takes the center of the lane",
+              "objective": "reach the closed gate without losing control",
+              "obstacle_and_tactic": "standing water; brake once before the gate",
+              "subtext": "the precise stop feels rehearsed",
+              "suppressed_behavior": "the lamps hold steady instead of flashing",
+              "specific_detail": "the right front tire clips one broken reflector",
+              "specific_detail_provenance": "authored_choice",
+              "specific_detail_source": null,
+              "stock_solution_refused": "no drifting hero entrance or decorative lens flare",
+              "value_before": "the tunnel reads as an empty route",
+              "value_after": "the SUV controls the only exit"
+            },
+            "primary_action": "The SUV crosses the wet lane and brakes once at the red gate.",
+            "shot_design": {
+              "framing": "low medium-wide, vehicle enters frame left",
+              "lens": "35mm natural perspective",
+              "blocking": "vehicle stays on lane center and stops square to gate",
+              "camera": "lateral tracking move, then locked endpoint",
+              "camera_axis": "observer side of the lane axis",
+              "screen_direction": "left-to-right, then stationary",
+              "lighting": "cold overhead practicals reflected in wet paint",
+              "behavior": "tires throw one spray and suspension compresses once"
+            },
+            "temporal_beats": [
+              {
+                "beat_id": "arrival",
+                "order": 1,
+                "duration_hint_seconds": 3.5,
+                "action": "SUV enters from frame left and crosses the wet lane",
+                "camera_phase": "lateral track at wheel height",
+                "sound_phase": "tire water rises under a low engine load",
+                "completed_end_state": "SUV aligns with the red gate"
+              },
+              {
+                "beat_id": "controlled-stop",
+                "order": 2,
+                "duration_hint_seconds": 2.5,
+                "action": "SUV brakes once and settles square to the gate",
+                "camera_phase": "track decelerates into a locked medium-wide",
+                "sound_phase": "tire spray ends and engine settles to idle",
+                "completed_end_state": "SUV is stationary with lamps steady"
+              }
+            ],
+            "sound_intent": "tire water, one brake load, engine idle, no music",
+            "prompt_carriers": ["right front tire clips one broken reflector", "lamps hold steady"],
+            "exclusions": ["no readable plate text", "no extra vehicles", "no gate opening"],
+            "continuity_state": {
+              "source_status": "canonical_reference",
+              "extension_depth": 0,
+              "reanchor_required": false,
+              "observation_confidence": "high",
+              "uncertainties": []
+            }
+          },
+          "generate_audio": false
+        }
+      },
+      {
+        "id": "clip-02",
+        "type": "generated",
+        "description": "From the accepted stop, the gate opens and the SUV chooses the darker passage.",
+        "start_seconds": 6,
+        "end_seconds": 12,
+        "framing": "medium-wide rear three-quarter",
+        "movement": "short dolly back as the gate rises",
+        "narrative_role": "build_tension",
+        "generation_contract": {
+          "model_family": "seedance",
+          "seedance_contract_version": "2.0",
+          "mode": "image_to_video",
+          "shot_structure": "single_take",
+          "continuation_type": "seamless_continuation",
+          "parent_scene_id": "clip-01",
+          "felt_intent": "Turn the accepted stillness into an informed, threatening choice.",
+          "planned_start_state": "The accepted SUV is stationary square to the red gate, engine at idle.",
+          "planned_end_state": "The SUV disappears into the unlit passage while the gate remains half open.",
+          "identity_anchors": ["white compact SUV with split lamps and five-spoke wheels"],
+          "identity_ids": ["vehicle-white-suv"],
+          "reference_roles": [
+            {
+              "tag": "clip-01-accepted-state",
+              "binding_mode": "input_parameter",
+              "role": "continuity_source",
+              "transfers": ["stopped position", "wet body reflections", "red gate geography", "engine idle"],
+              "must_not_transfer": ["new background text", "unplanned damage"]
+            }
+          ],
+          "continuity_locks": ["vehicle identity", "gate geography", "wet reflections", "screen direction"],
+          "allowed_changes": ["gate rises", "vehicle rolls forward", "headlamps dim in darkness"],
+          "completed_beats": ["arrival", "controlled-stop"],
+          "reserved_beats": ["reveal what is beyond the passage"],
+          "prompt_budget": {
+            "primary_spend": "motion",
+            "secondary_spend": "scene_density",
+            "economized": ["distant tunnel detail", "unreadable plate details"]
+          },
+          "seedance_contract": {
+            "lane": "narrative",
+            "authoring_state": {
+              "dramatic_function": "choice under pressure",
+              "turn": "the safe gate becomes an invitation into darkness",
+              "pov": "the observer who expected the SUV to wait",
+              "power_shift": "the SUV chooses the unknown passage",
+              "objective": "cross before the gate closes",
+              "obstacle_and_tactic": "half-open gate; roll forward without a second brake",
+              "subtext": "the vehicle knows more than the observer",
+              "suppressed_behavior": "the SUV never looks back",
+              "specific_detail": "the left lamp briefly catches a hanging chain",
+              "specific_detail_provenance": "authored_choice",
+              "specific_detail_source": null,
+              "stock_solution_refused": "no sudden acceleration or jump scare",
+              "value_before": "the gate appears to offer safety",
+              "value_after": "the SUV has chosen the dangerous route"
+            },
+            "primary_action": "The gate rises halfway and the SUV rolls into the unlit passage.",
+            "shot_design": {
+              "framing": "medium-wide rear three-quarter",
+              "lens": "50mm compressed perspective",
+              "blocking": "SUV holds the right side and passes beneath the half-open gate",
+              "camera": "short dolly back, no pan after the gate starts",
+              "camera_axis": "behind and slightly driver-side of the SUV",
+              "screen_direction": "forward into depth, never reverses",
+              "lighting": "red gate practical fades while darkness swallows the tail",
+              "behavior": "gate chain trembles once and the SUV rolls without wheel spin"
+            },
+            "temporal_beats": [
+              {
+                "beat_id": "gate-rise",
+                "order": 1,
+                "duration_hint_seconds": 2.5,
+                "action": "The red gate rises halfway and its chain trembles",
+                "camera_phase": "dolly back begins from the accepted stop",
+                "sound_phase": "motor hum replaces the idle emphasis",
+                "completed_end_state": "A dark passage is open at vehicle height"
+              },
+              {
+                "beat_id": "dark-choice",
+                "order": 2,
+                "duration_hint_seconds": 3.5,
+                "action": "SUV rolls forward beneath the gate into darkness",
+                "camera_phase": "dolly settles as the tail leaves frame",
+                "sound_phase": "tire contact fades, one chain tick remains",
+                "completed_end_state": "SUV is mostly hidden and gate stays half open"
+              }
+            ],
+            "sound_intent": "gate motor, chain tick, quiet tire roll, no music",
+            "prompt_carriers": ["left lamp catches a hanging chain", "gate remains half open"],
+            "exclusions": ["no new vehicle damage", "no readable text", "no jump scare"],
+            "continuity_state": {
+              "parent_asset_id": "clip-01-take-01",
+              "source_status": "accepted",
+              "observed_start_state": "SUV is stationary square to the red gate; engine at idle; wet reflections intact.",
+              "handoff_state": {
+                "subjects": "The white compact SUV is stationary square to the red gate.",
+                "props": "The red gate is closed; no controlled prop has changed.",
+                "environment": "Wet service tunnel with the same lane marker and overhead practicals.",
+                "camera": "Locked low medium-wide view from the observer side of the lane.",
+                "lighting": "Cold overhead practicals reflect across the white paint.",
+                "audio": "Tire spray has ended; engine is at idle; no music.",
+                "open_motion": "No subject motion remains; the next action may begin with the gate motor."
+              },
+              "extension_depth": 1,
+              "reanchor_required": false,
+              "observation_confidence": "high",
+              "uncertainties": []
+            }
+          },
+          "generate_audio": false
+        }
+      }
+    ]
+  },
+  "asset_manifest": {
+    "version": "1.0",
+    "assets": [
+      {
+        "id": "clip-01-take-01",
+        "type": "video",
+        "path": "assets/video/clip-01-take-01.mp4",
+        "source_tool": "dofe_video",
+        "scene_id": "clip-01",
+        "model_family": "seedance",
+        "seedance_contract_version": "2.0",
+        "provider": "dofe",
+        "model": "seedance-2.0-fast",
+        "prompt_review": {
+          "draft": "A white compact SUV arrives at a red gate.",
+          "critique": ["Keep the stop singular and preserve the empty gate."],
+          "final": "Single continuous take. The input identity reference controls vehicle geometry only. ... Stop when the SUV is stationary with lamps steady.",
+          "skills_applied": ["seedance-provider", "seedance-directing", "seedance-continuity", "seedance-prompting", "seedance-quality"],
+          "continuity_checked": true,
+          "reference_roles_checked": true,
+          "compile_spec": {
+            "language": "en-US",
+            "structure": "continuous_take",
+            "source_state_policy": "first_clip_planned_opening",
+            "surface_profile": {"name": "dofe-reference-to-video", "verification": "provider_preflight", "constraints": ["input_parameter references only"]},
+            "ordered_sections": ["reference_roles", "opening_delta", "identity_locks", "action_beats", "camera", "environment_light", "dialogue_audio", "exclusions", "endpoint"],
+            "reference_emissions": [{"tag": "vehicle-identity-reference", "binding_mode": "input_parameter", "emitted": false}],
+            "carrier_coverage": [{"carrier": "right front tire clips one broken reflector", "emitted_as": "the right front tire clips one broken reflector"}],
+            "compression_decisions": ["omit background pipes"],
+            "endpoint_clause": "Stop when the SUV is stationary with lamps steady."
+          },
+          "provider_preflight": {
+            "status": "passed",
+            "verification_level": "declared_tool_contract",
+            "tool": "dofe_video",
+            "provider": "dofe",
+            "tool_version": "0.1.0",
+            "tool_status": "available",
+            "operation": "reference_to_video",
+            "execution_scope": "sample",
+            "degraded_preflight_approved": false,
+            "model_selection": {"field": "model_name", "value": "seedance-2.0-fast"},
+            "input_schema_fingerprint": "0123456789abcdef",
+            "declared_input_fields": ["model_name", "operation", "prompt"],
+            "resolved_input_fields": ["model_name", "operation", "prompt"],
+            "reference_binding": {"requested_modes": ["input_parameter"], "supported_modes": ["input_parameter"], "input_fields": ["reference_image_urls"], "prompt_token_syntax": null},
+            "live_probe": {"status": "not_requested", "verification_scope": [], "warnings": [], "errors": []},
+            "errors": [],
+            "warnings": [],
+            "would_execute": true
+          }
+        },
+        "take_review": {
+          "decision": "keep",
+          "issues": [],
+          "accepted_as_canon": true,
+          "canon_status": "accepted",
+          "observed_end_state": "SUV is stationary square to the red gate with lamps steady.",
+          "observed_state": {"subjects": "White compact SUV is stationary square to the red gate.", "props": "Red gate is closed and no prop changed.", "environment": "Wet service tunnel remains fixed.", "camera": "Low medium-wide view is locked.", "lighting": "Cold overhead practicals remain.", "audio": "Tire spray ended and engine is at idle.", "open_motion": "No subject or camera motion remains."},
+          "identity_observations": [{"identity_id": "vehicle-white-suv", "status": "preserved", "evidence": "Silhouette, paint, lamps, and wheels match the registry."}],
+          "extension_depth": 0,
+          "observation_confidence": "high",
+          "uncertainties": [],
+          "next_action": "Compile clip-02 from this observed handoff."
+        }
+      },
+      {
+        "id": "clip-02-take-01",
+        "type": "video",
+        "path": "assets/video/clip-02-take-01.mp4",
+        "source_tool": "dofe_video",
+        "scene_id": "clip-02",
+        "model_family": "seedance",
+        "seedance_contract_version": "2.0",
+        "provider": "dofe",
+        "model": "seedance-2.0-fast",
+        "prompt_review": {
+          "draft": "Continue from the accepted stop; the gate rises and the SUV enters darkness.",
+          "critique": ["Carry only the accepted state and the current two beats."],
+          "final": "Single continuous take from the accepted stopped state. ... Stop when the SUV is mostly hidden and the gate stays half open.",
+          "skills_applied": ["seedance-provider", "seedance-directing", "seedance-continuity", "seedance-prompting", "seedance-quality"],
+          "continuity_checked": true,
+          "reference_roles_checked": true,
+          "compile_spec": {
+            "language": "en-US",
+            "structure": "continuous_take",
+            "source_state_policy": "accepted_source_carries_state",
+            "surface_profile": {"name": "dofe-image-to-video", "verification": "provider_preflight", "constraints": ["accepted source state carried by input parameter"]},
+            "ordered_sections": ["reference_roles", "opening_delta", "identity_locks", "action_beats", "camera", "environment_light", "dialogue_audio", "exclusions", "endpoint"],
+            "reference_emissions": [{"tag": "clip-01-accepted-state", "binding_mode": "input_parameter", "emitted": false}],
+            "carrier_coverage": [{"carrier": "gate remains half open", "emitted_as": "the gate remains half open at the endpoint"}],
+            "compression_decisions": ["omit distant tunnel detail"],
+            "endpoint_clause": "Stop when the SUV is mostly hidden and the gate stays half open."
+          },
+          "provider_preflight": {
+            "status": "passed",
+            "verification_level": "declared_tool_contract",
+            "tool": "dofe_video",
+            "provider": "dofe",
+            "tool_version": "0.1.0",
+            "tool_status": "available",
+            "operation": "image_to_video",
+            "execution_scope": "sample",
+            "degraded_preflight_approved": false,
+            "model_selection": {"field": "model_name", "value": "seedance-2.0-fast"},
+            "input_schema_fingerprint": "0123456789abcdef",
+            "declared_input_fields": ["model_name", "operation", "prompt"],
+            "resolved_input_fields": ["model_name", "operation", "prompt"],
+            "reference_binding": {"requested_modes": ["input_parameter"], "supported_modes": ["input_parameter"], "input_fields": ["reference_image_urls"], "prompt_token_syntax": null},
+            "live_probe": {"status": "not_requested", "verification_scope": [], "warnings": [], "errors": []},
+            "errors": [],
+            "warnings": [],
+            "would_execute": true
+          }
+        },
+        "take_review": {
+          "decision": "keep",
+          "issues": [],
+          "accepted_as_canon": true,
+          "canon_status": "accepted",
+          "observed_end_state": "SUV is mostly hidden in the dark passage and gate remains half open.",
+          "observed_state": {"subjects": "White compact SUV is mostly hidden beneath the gate.", "props": "Gate remains half open and chain is still.", "environment": "Wet service tunnel continues into an unlit passage.", "camera": "Rear three-quarter view settles after a short dolly back.", "lighting": "Red practical fades as darkness covers the tail.", "audio": "Tire contact fades and one chain tick remains.", "open_motion": "Gate remains half open; vehicle motion is complete."},
+          "identity_observations": [{"identity_id": "vehicle-white-suv", "status": "preserved", "evidence": "Visible tail silhouette and wheel design remain consistent."}],
+          "parent_asset_id": "clip-01-take-01",
+          "extension_depth": 1,
+          "observation_confidence": "high",
+          "uncertainties": [],
+          "next_action": "Review the next scene before extending again."
+        }
+      }
+    ],
+    "lineage_review": {
+      "seedance_contract_version": "2.0",
+      "decision": "pass",
+      "reviewed_asset_ids": ["clip-01-take-01", "clip-02-take-01"],
+      "roots": ["clip-01-take-01"],
+      "edges": [{"parent_asset_id": "clip-01-take-01", "child_asset_id": "clip-02-take-01", "parent_scene_id": "clip-01", "child_scene_id": "clip-02", "relationship": "seamless_continuation"}],
+      "checks": {
+        "unique_ids": {"status": "pass", "evidence": "The two reviewed asset IDs are distinct and each has one take authority."},
+        "parent_exists": {"status": "pass", "evidence": "clip-02-take-01 resolves to clip-01-take-01 and is not self-parented."},
+        "parent_precedes_child": {"status": "pass", "evidence": "clip-01 precedes clip-02 in scene order."},
+        "acyclic": {"status": "pass", "evidence": "The only edge walks from the root to clip-02 without revisiting an asset."},
+        "accepted_parent_authority": {"status": "pass", "evidence": "clip-01-take-01 is kept, accepted_as_canon, and has observed state."},
+        "observed_state_handoff": {"status": "pass", "evidence": "clip-02 observed_start_state and handoff_state match clip-01 observed state across seven dimensions."},
+        "extension_depth_and_reanchor": {"status": "pass", "evidence": "The root is depth zero and clip-02 advances to depth one without re-anchor need."},
+        "beat_and_identity_continuity": {"status": "pass", "evidence": "clip-02 completes only new beats and preserves the registered vehicle identity."},
+        "identity_registry_consistency": {"status": "pass", "evidence": "Both scenes and takes resolve vehicle-white-suv to one canonical registry entry."},
+        "prompt_compilation_trace": {"status": "pass", "evidence": "Both assets record provider surface, section order, honest input bindings, carrier coverage, compression, and endpoint."},
+        "temporal_structure": {"status": "pass", "evidence": "Each clip has unique ascending beat orders; clip-02 begins after the accepted clip-01 endpoint."},
+        "reference_binding_matches_preflight": {"status": "pass", "evidence": "Both input_parameter bindings are declared by their stored provider preflight."}
+      },
+      "findings": []
+    }
+  }
+}

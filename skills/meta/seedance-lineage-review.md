@@ -46,6 +46,10 @@ Record a concrete asset/scene-ID-based evidence sentence for every check:
 - `beat_and_identity_continuity`: completed beats do not replay, reserved beats
   do not leak, and identity/geography/prop ownership changes are either locked
   or explicitly approved. This is a reviewer judgment, not a Python rule.
+- `temporal_structure`: temporal beat IDs are unique, orders are contiguous and
+  ascending within each clip, and the child starts after the accepted parent
+  endpoint. Compare distinct beat objects too; JSON `uniqueItems` alone is not
+  enough. This remains reviewer-owned global semantics.
 - `identity_registry_consistency`: every scene and take identity ID resolves to
   exactly one registry entry; canonical anchors, immutable traits, reference
   tags, allowed changes, and reported deviations agree across the sequence.

@@ -159,7 +159,7 @@ stages:
     success_criteria:
       - Schema-valid scene_plan artifact
       - Every beat has a scene treatment and asset path
-      - Every selected Seedance scene has a complete seedance_contract; connected scenes use accepted observed state
+      - Every selected Seedance scene has seedance_contract_version 2.0, exclusive lane state, ordered temporal beats, and a concrete endpoint; connected scenes use accepted observed state
 
   - name: assets
     skill: pipelines/cinematic/asset-director
@@ -199,7 +199,7 @@ stages:
     success_criteria:
       - Schema-valid asset_manifest artifact
       - All referenced asset files exist on disk
-      - Every selected Seedance video records model_family, full prompt_review, and a consistent take_review canon decision
+      - Every selected Seedance video records model_family, seedance_contract_version 2.0, full prompt_review.compile_spec, and a consistent take_review canon decision
       - Every Seedance run records a complete lineage_review with no unresolved critical graph finding before checkpoint approval
 
   - name: edit

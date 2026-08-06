@@ -143,6 +143,13 @@ Structure your review as:
 
 ## Seedance Cross-Asset Lineage Review
 
+At the `scene_plan` stage, if any scene selects Seedance, run a scene-contract
+review before checkpointing. Verify every v2 scene declares
+`seedance_contract_version="2.0"`, has one exclusive narrative/utility lane,
+ascending unique temporal beats with completed states, and a concrete endpoint.
+For connected scenes, compare the declared handoff with the accepted source
+record; do not infer it from planned prose.
+
 At the `assets` stage, if any asset has `model_family="seedance"`, read and run
 [`seedance-lineage-review.md`](seedance-lineage-review.md). This review is
 mandatory even for a standalone clip: standalone graphs record their root and
@@ -152,7 +159,8 @@ mark edge-only checks not applicable with evidence. Persist the result in
 The Schema proves only that this review record is complete. The reviewer must
 inspect the cross-artifact graph for duplicate IDs, missing/future parents,
 cycles, accepted observed-state authority, depth/re-anchor consistency, beat or
-identity drift, and reference binding against the stored provider preflight.
+identity drift, temporal structure, and reference binding against the stored
+provider preflight.
 
 ## Reference Alignment Review
 

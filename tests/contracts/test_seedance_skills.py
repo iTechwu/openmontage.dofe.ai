@@ -83,6 +83,7 @@ def test_reviewer_owns_seedance_cross_asset_graph_semantics():
         "beat_and_identity_continuity",
         "identity_registry_consistency",
         "prompt_compilation_trace",
+        "temporal_structure",
         "reference_binding_matches_preflight",
     ):
         assert f"`{required_check}`" in lineage
@@ -135,8 +136,11 @@ def test_video_pipeline_manifests_enforce_seedance_stage_facts(pipeline_name: st
 
     assert "Seedance" in scene_text
     assert "seedance_contract" in scene_text
+    assert "seedance_contract_version" in scene_text
+    assert "temporal" in scene_text
     assert "Seedance" in asset_text
     assert "prompt_review" in asset_text
+    assert "compile_spec" in asset_text
     assert "take_review" in asset_text
     assert "lineage_review" in asset_text
 
@@ -661,6 +665,10 @@ def _standalone_lineage_review(asset_id: str) -> dict:
                 "status": "pass",
                 "evidence": f"{asset_id} records surface constraints, carrier coverage, compression, and endpoint before generation.",
             },
+            "temporal_structure": {
+                "status": "pass",
+                "evidence": f"{asset_id} uses unique, ascending temporal beat IDs and order values.",
+            },
             "reference_binding_matches_preflight": {
                 "status": "pass",
                 "evidence": f"{asset_id} uses the preflight-declared input_parameter binding.",
@@ -1054,6 +1062,7 @@ def test_legacy_seedance_asset_contract_remains_readable():
     del lineage_review["seedance_contract_version"]
     del lineage_review["checks"]["identity_registry_consistency"]
     del lineage_review["checks"]["prompt_compilation_trace"]
+    del lineage_review["checks"]["temporal_structure"]
     artifact = {
         "version": "1.0",
         "assets": [
@@ -1200,6 +1209,41 @@ def test_prompt_compile_spec_requires_action_endpoint_and_truthful_emission():
     false_emission = _prompt_compile_spec()
     false_emission["reference_emissions"][0]["emitted"] = True
     assert list(validator.iter_errors(false_emission))
+
+
+def test_two_clip_seedance_golden_trace_validates_scene_asset_and_handoff():
+    fixture = json.loads(
+        (ROOT / "tests/fixtures/seedance/two_clip_sequence.json").read_text()
+    )
+    scene_schema = json.loads(
+        (ROOT / "schemas/artifacts/scene_plan.schema.json").read_text()
+    )
+    asset_schema = json.loads(
+        (ROOT / "schemas/artifacts/asset_manifest.schema.json").read_text()
+    )
+
+    Draft202012Validator(scene_schema).validate(fixture["scene_plan"])
+    Draft202012Validator(asset_schema).validate(fixture["asset_manifest"])
+
+    scenes = {scene["id"]: scene for scene in fixture["scene_plan"]["scenes"]}
+    assets = {asset["id"]: asset for asset in fixture["asset_manifest"]["assets"]}
+    first_beats = scenes["clip-01"]["generation_contract"]["seedance_contract"]["temporal_beats"]
+    second_contract = scenes["clip-02"]["generation_contract"]
+    second_beats = second_contract["seedance_contract"]["temporal_beats"]
+
+    assert [beat["order"] for beat in first_beats] == [1, 2]
+    assert [beat["order"] for beat in second_beats] == [1, 2]
+    assert assets["clip-02-take-01"]["take_review"]["parent_asset_id"] == "clip-01-take-01"
+    assert second_contract["seedance_contract"]["continuity_state"]["handoff_state"] == {
+        "subjects": "The white compact SUV is stationary square to the red gate.",
+        "props": "The red gate is closed; no controlled prop has changed.",
+        "environment": "Wet service tunnel with the same lane marker and overhead practicals.",
+        "camera": "Locked low medium-wide view from the observer side of the lane.",
+        "lighting": "Cold overhead practicals reflect across the white paint.",
+        "audio": "Tire spray has ended; engine is at idle; no music.",
+        "open_motion": "No subject motion remains; the next action may begin with the gate motor.",
+    }
+    assert fixture["asset_manifest"]["lineage_review"]["checks"]["temporal_structure"]["status"] == "pass"
 
 
 def test_generation_contract_requires_explicit_model_family():
