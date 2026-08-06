@@ -60,11 +60,16 @@ class DelegatedModelCredential:
             "X-Dofe-Attribution-Signature": signature,
         }
 
-    def agent_environment(self, *, openai_base_url: str) -> dict[str, str]:
+    def agent_environment(
+        self,
+        *,
+        openai_base_url: str,
+        dofe_base_url: str | None = None,
+    ) -> dict[str, str]:
         return {
             "DOFE_ENABLED": "true",
             "DOFE_MODEL_API_KEY": self.api_key,
-            "DOFE_MODEL_BASE_URL": self.models_base_url,
+            "DOFE_MODEL_BASE_URL": dofe_base_url or self.models_base_url,
             "DOFE_DELEGATION_ID": self.delegation_id,
             "DOFE_EXTERNAL_JOB_ID": self.external_job_id,
             "DOFE_PIPELINE_STAGE": self.pipeline_stage,

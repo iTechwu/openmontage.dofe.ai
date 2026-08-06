@@ -207,7 +207,10 @@ class AgentCommandPipelineExecutor:
                         and not _SECRET_ENV_SUFFIX.search(key)
                     }
                     environment.update(
-                        credential.agent_environment(openai_base_url=f"{proxy.base_url}/v1")
+                        credential.agent_environment(
+                            openai_base_url=f"{proxy.base_url}/v1",
+                            dofe_base_url=proxy.base_url,
+                        )
                     )
                     completed = self._run(command, prompt, environment=environment)
         except subprocess.TimeoutExpired as exc:

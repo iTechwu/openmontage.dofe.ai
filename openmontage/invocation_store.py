@@ -15,6 +15,7 @@ class ModelInvocationRecord:
     stage: str
     attempt: int
     request_id: str
+    request_fingerprint: str
     model_invocation_id: str
     status: str
     updated_at: str
@@ -34,6 +35,7 @@ class ModelInvocationStore:
                     stage TEXT NOT NULL,
                     attempt INTEGER NOT NULL CHECK (attempt > 0),
                     request_id TEXT NOT NULL,
+                    request_fingerprint TEXT NOT NULL DEFAULT '',
                     model_invocation_id TEXT NOT NULL PRIMARY KEY,
                     status TEXT NOT NULL CHECK (status IN ('created', 'in_flight', 'succeeded', 'failed', 'unknown')),
                     created_at TEXT NOT NULL,
@@ -44,6 +46,15 @@ class ModelInvocationStore:
                     ON openmontage_model_invocation(job_id, status, updated_at);
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(openmontage_model_invocation)")
+            }
+            if "request_fingerprint" not in columns:
+                db.execute(
+                    "ALTER TABLE openmontage_model_invocation "
+                    "ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT ''"
+                )
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.database_path, timeout=5)
@@ -51,28 +62,48 @@ class ModelInvocationStore:
         db.execute("PRAGMA busy_timeout = 5000")
         return db
 
-    def get_or_create(self, *, job_id: str, stage: str, attempt: int, request_id: str) -> ModelInvocationRecord:
-        if not job_id or not stage or attempt < 1 or not request_id:
-            raise ValueError("job_id, stage, attempt and request_id are required")
+    def get_or_create(
+        self,
+        *,
+        job_id: str,
+        stage: str,
+        attempt: int,
+        request_id: str,
+        request_fingerprint: str | None = None,
+    ) -> ModelInvocationRecord:
+        fingerprint = request_fingerprint or request_id
+        if not job_id or not stage or attempt < 1 or not request_id or not fingerprint:
+            raise ValueError("job_id, stage, attempt, request_id and request_fingerprint are required")
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as db:
             db.execute(
                 """
                 INSERT INTO openmontage_model_invocation
-                    (job_id, stage, attempt, request_id, model_invocation_id, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 'created', ?, ?)
+                    (job_id, stage, attempt, request_id, request_fingerprint,
+                     model_invocation_id, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'created', ?, ?)
                 ON CONFLICT(job_id, stage, attempt, request_id) DO NOTHING
                 """,
-                (job_id, stage, attempt, request_id, f"om-{uuid4().hex}", now, now),
+                (job_id, stage, attempt, request_id, fingerprint, f"om-{uuid4().hex}", now, now),
+            )
+            db.execute(
+                """UPDATE openmontage_model_invocation
+                   SET request_fingerprint = ?, updated_at = ?
+                   WHERE job_id = ? AND stage = ? AND attempt = ? AND request_id = ?
+                     AND request_fingerprint = ''""",
+                (fingerprint, now, job_id, stage, attempt, request_id),
             )
             row = db.execute(
-                """SELECT job_id, stage, attempt, request_id, model_invocation_id, status, updated_at
+                """SELECT job_id, stage, attempt, request_id, request_fingerprint,
+                          model_invocation_id, status, updated_at
                    FROM openmontage_model_invocation
                    WHERE job_id = ? AND stage = ? AND attempt = ? AND request_id = ?""",
                 (job_id, stage, attempt, request_id),
             ).fetchone()
         if row is None:
             raise RuntimeError("model invocation ledger insert did not return a row")
+        if row["request_fingerprint"] != fingerprint:
+            raise ValueError("model invocation request id was reused for a different request")
         return ModelInvocationRecord(**dict(row))
 
     def mark(self, model_invocation_id: str, status: str) -> ModelInvocationRecord:
@@ -85,7 +116,8 @@ class ModelInvocationStore:
                 (status, now, model_invocation_id),
             )
             row = db.execute(
-                """SELECT job_id, stage, attempt, request_id, model_invocation_id, status, updated_at
+                """SELECT job_id, stage, attempt, request_id, request_fingerprint,
+                          model_invocation_id, status, updated_at
                    FROM openmontage_model_invocation WHERE model_invocation_id = ?""",
                 (model_invocation_id,),
             ).fetchone()
@@ -94,7 +126,8 @@ class ModelInvocationStore:
         return ModelInvocationRecord(**dict(row))
 
     def list_recoverable(self, *, job_id: str | None = None) -> list[ModelInvocationRecord]:
-        query = """SELECT job_id, stage, attempt, request_id, model_invocation_id, status, updated_at
+        query = """SELECT job_id, stage, attempt, request_id, request_fingerprint,
+                          model_invocation_id, status, updated_at
                    FROM openmontage_model_invocation
                    WHERE status IN ('created', 'in_flight', 'unknown')"""
         args: tuple[str, ...] = ()

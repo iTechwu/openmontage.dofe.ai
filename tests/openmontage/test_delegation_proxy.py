@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
 import requests
 
 from openmontage.delegation_proxy import DelegationSigningProxy
-from openmontage.invocation_store import ModelInvocationStore
 from openmontage.invocation_store import ModelInvocationStore
 from tools.dofe.delegation import DelegatedModelCredential
 
@@ -101,6 +101,42 @@ def test_invocation_ledger_recovers_same_id_after_worker_crash(tmp_path) -> None
     ]
 
 
+def test_invocation_ledger_backfills_fingerprint_for_pre_migration_rows(tmp_path) -> None:
+    database_path = tmp_path / "jobs.sqlite3"
+    with sqlite3.connect(database_path) as db:
+        db.execute(
+            """
+            CREATE TABLE openmontage_model_invocation (
+                job_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                attempt INTEGER NOT NULL,
+                request_id TEXT NOT NULL,
+                model_invocation_id TEXT NOT NULL PRIMARY KEY,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (job_id, stage, attempt, request_id)
+            )
+            """
+        )
+        db.execute(
+            """INSERT INTO openmontage_model_invocation VALUES
+               ('job-old', 'assets', 1, 'logical-1', 'om-existing',
+                'unknown', '2026-08-06T00:00:00Z', '2026-08-06T00:00:00Z')"""
+        )
+
+    record = ModelInvocationStore(database_path).get_or_create(
+        job_id="job-old",
+        stage="assets",
+        attempt=1,
+        request_id="logical-1",
+        request_fingerprint="fingerprint-1",
+    )
+
+    assert record.model_invocation_id == "om-existing"
+    assert record.request_fingerprint == "fingerprint-1"
+
+
 def test_proxy_reuses_persisted_invocation_id_after_restart(tmp_path) -> None:
     captured: list[str] = []
 
@@ -153,3 +189,60 @@ def test_proxy_reuses_persisted_invocation_id_after_restart(tmp_path) -> None:
     assert len(captured) == 2
     assert captured[0] == captured[1]
     assert store.list_recoverable(job_id="job-1") == []
+
+
+def test_proxy_rejects_reused_logical_call_id_with_different_request(tmp_path) -> None:
+    forwarded: list[bytes] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            forwarded.append(body)
+            response = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = upstream.server_address
+        credential = DelegatedModelCredential(
+            api_key="delegated-api-key",
+            models_base_url=f"http://{host}:{port}/api",
+            delegation_id="delegation-1",
+            external_job_id="job-1",
+            pipeline_stage="assets",
+            runtime_credential_id="runtime-credential-1",
+            expires_at="2099-08-06T09:00:01Z",
+        )
+        with DelegationSigningProxy(
+            credential,
+            invocation_store=ModelInvocationStore(tmp_path / "jobs.sqlite3"),
+        ) as proxy:
+            headers = {"X-OpenMontage-Logical-Call-Id": "scene-7-image-1"}
+            first = requests.post(
+                f"{proxy.base_url}/v1/generation/tasks",
+                headers=headers,
+                json={"model": "seedream-5.0", "prompt": "first"},
+                timeout=5,
+            )
+            second = requests.post(
+                f"{proxy.base_url}/v1/generation/tasks",
+                headers=headers,
+                json={"model": "seedream-5.0", "prompt": "changed"},
+                timeout=5,
+            )
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert len(forwarded) == 1

@@ -100,6 +100,19 @@ def test_create_sync_terminal_returns_assets():
     assert _count(m, "GET", TASKS) == 0  # no polling needed
 
 
+def test_create_uses_payload_idempotency_key_as_logical_request_id():
+    with _rm.Mocker() as m:
+        m.post(TASKS, json=_ok(_succeeded_task()))
+        _client().create_task(
+            {
+                "model": "seedream-5.0",
+                "metadata": {"openmontage_idempotency_key": "scene-7-image-1"},
+            }
+        )
+
+    assert m.request_history[0].headers["X-OpenMontage-Logical-Call-Id"] == "scene-7-image-1"
+
+
 def test_list_models_returns_tenant_visible_aliases():
     with _rm.Mocker() as m:
         m.get(

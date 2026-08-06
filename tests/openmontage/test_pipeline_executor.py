@@ -35,7 +35,7 @@ pathlib.Path(sys.argv[1]).write_text(prompt, encoding="utf-8")
 if len(sys.argv) > 2:
     pathlib.Path(sys.argv[2]).write_text(json.dumps({
         key: os.environ.get(key)
-        for key in ["DOFE_MODEL_API_KEY", "DOFE_DELEGATION_ID", "DOFE_EXTERNAL_JOB_ID", "DOFE_PIPELINE_STAGE", "OPENAI_BASE_URL", "OPENMONTAGE_SERVICE_TOKEN", "OPENMONTAGE_EVENT_SIGNING_SECRET", "FAL_KEY"]
+        for key in ["DOFE_MODEL_API_KEY", "DOFE_MODEL_BASE_URL", "DOFE_DELEGATION_ID", "DOFE_EXTERNAL_JOB_ID", "DOFE_PIPELINE_STAGE", "OPENAI_BASE_URL", "OPENMONTAGE_SERVICE_TOKEN", "OPENMONTAGE_EVENT_SIGNING_SECRET", "FAL_KEY"]
     }), encoding="utf-8")
 if len(sys.argv) > 4:
     pathlib.Path(sys.argv[3]).write_text(sys.argv[4], encoding="utf-8")
@@ -167,6 +167,8 @@ def test_executor_injects_delegation_only_into_the_stage_process(
     assert environment["DOFE_MODEL_API_KEY"] == "delegated-api-key"
     assert environment["DOFE_DELEGATION_ID"] == "delegation-1"
     assert environment["DOFE_PIPELINE_STAGE"] == "research"
+    assert environment["DOFE_MODEL_BASE_URL"].startswith("http://127.0.0.1:")
+    assert environment["DOFE_MODEL_BASE_URL"].endswith("/api")
     assert environment["OPENAI_BASE_URL"].startswith("http://127.0.0.1:")
     assert environment["OPENAI_BASE_URL"].endswith("/api/v1")
     assert environment["OPENMONTAGE_SERVICE_TOKEN"] is None

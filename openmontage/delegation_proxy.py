@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from typing import Any
@@ -27,6 +28,33 @@ _HOP_HEADERS = {
     "upgrade",
 }
 _MAX_REQUEST_BYTES = 32 * 1024 * 1024
+_LOGICAL_CALL_HEADERS = (
+    "X-OpenMontage-Logical-Call-Id",
+    "Idempotency-Key",
+    "X-Request-Id",
+)
+
+
+def _request_fingerprint(method: str, path: str, body: bytes | None, content_type: str) -> str:
+    normalized_body = body or b""
+    if normalized_body and "json" in content_type.lower():
+        try:
+            parsed = json.loads(normalized_body)
+            normalized_body = json.dumps(
+                parsed,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            pass
+    digest = hashlib.sha256()
+    digest.update(method.upper().encode("ascii"))
+    digest.update(b"\n")
+    digest.update(path.encode("utf-8"))
+    digest.update(b"\n")
+    digest.update(normalized_body)
+    return digest.hexdigest()
 
 
 class DelegationSigningProxy:
@@ -94,8 +122,20 @@ class DelegationSigningProxy:
                 handler.send_error(413)
                 return
             body = handler.rfile.read(length) if length else None
-            incoming_request_id = handler.headers.get("X-Request-Id", "").strip()
-            seed = incoming_request_id or hashlib.sha256(body or b"").hexdigest()
+            fingerprint = _request_fingerprint(
+                handler.command,
+                handler.path,
+                body,
+                handler.headers.get("Content-Type", ""),
+            )
+            seed = next(
+                (
+                    value
+                    for name in _LOGICAL_CALL_HEADERS
+                    if (value := handler.headers.get(name, "").strip())
+                ),
+                fingerprint,
+            )
             if self.invocation_store is None:
                 invocation_id = "om-" + hashlib.sha256(
                     f"{self.credential.external_job_id}\n{self.credential.pipeline_stage}\n{seed}".encode()
@@ -106,6 +146,7 @@ class DelegationSigningProxy:
                     stage=self.stage,
                     attempt=self.stage_attempt,
                     request_id=seed,
+                    request_fingerprint=fingerprint,
                 )
                 invocation_id = record.model_invocation_id
                 self.invocation_store.mark(invocation_id, "in_flight")
@@ -139,6 +180,8 @@ class DelegationSigningProxy:
                     invocation_id,
                     "succeeded" if upstream.status_code < 400 else "failed",
                 )
+        except ValueError as exc:
+            handler.send_error(409, str(exc))
         except Exception:
             if self.invocation_store is not None and "invocation_id" in locals():
                 self.invocation_store.mark(invocation_id, "unknown")
