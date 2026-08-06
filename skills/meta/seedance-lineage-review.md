@@ -38,8 +38,11 @@ Record a concrete asset/scene-ID-based evidence sentence for every check:
 - `observed_state_handoff`: the child's `observed_start_state` and prompt use
   the accepted parent's actual subjects, props, environment, camera, lighting,
   audio, and open motion. Compare the parent's `take_review.observed_state` with
-  the child's `continuity_state.handoff_state` dimension by dimension and record
-  meaningful deviations.
+  the child's `continuity_state.handoff_state` dimension by dimension. Persist
+  `handoff_state` as a verbatim snapshot of the accepted observation so the
+  source fact remains auditable. Put future actions in the planned start or
+  prompt opening delta; record intentional deviations as uncertainties or
+  findings instead of rewriting the handoff snapshot.
 - `extension_depth_and_reanchor`: output-sourced depth advances consistently;
   re-anchor resets to canonical references at depth zero; depth three does not
   silently continue.

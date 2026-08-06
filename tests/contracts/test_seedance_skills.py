@@ -1502,15 +1502,6 @@ def test_two_clip_seedance_golden_trace_validates_scene_asset_and_handoff():
     assert [beat["order"] for beat in first_beats] == [1, 2]
     assert [beat["order"] for beat in second_beats] == [1, 2]
     assert assets["clip-02-take-01"]["take_review"]["parent_asset_id"] == "clip-01-take-01"
-    assert second_contract["seedance_contract"]["continuity_state"]["handoff_state"] == {
-        "subjects": "The white compact SUV is stationary square to the red gate.",
-        "props": "The red gate is closed; no controlled prop has changed.",
-        "environment": "Wet service tunnel with the same lane marker and overhead practicals.",
-        "camera": "Locked low medium-wide view from the observer side of the lane.",
-        "lighting": "Cold overhead practicals reflect across the white paint.",
-        "audio": "Tire spray has ended; engine is at idle; no music.",
-        "open_motion": "No subject motion remains; the next action may begin with the gate motor.",
-    }
     assert fixture["asset_manifest"]["lineage_review"]["checks"]["temporal_structure"]["status"] == "pass"
 
     # Cross-artifact handoff: the child must build on the accepted parent's observed state.
@@ -1525,8 +1516,22 @@ def test_two_clip_seedance_golden_trace_validates_scene_asset_and_handoff():
     assert child_take["parent_asset_id"] == parent["id"] == "clip-01-take-01"
     assert child_continuity["parent_asset_id"] == parent["id"]
     assert child_continuity["extension_depth"] == parent_take["extension_depth"] + 1
-    # Dimension-for-dimension transfer (observation vs handoff phrasing differ, so compare keys).
-    assert set(parent_take["observed_state"]) == set(child_continuity["handoff_state"])
+    assert child_continuity["handoff_state"] == parent_take["observed_state"]
+
+    scene_versions = {
+        scene["generation_contract"]["seedance_contract_version"]
+        for scene in scenes.values()
+        if scene["generation_contract"]["model_family"] == "seedance"
+    }
+    asset_versions = {
+        asset["seedance_contract_version"]
+        for asset in assets.values()
+        if asset["model_family"] == "seedance"
+    }
+    lineage_version = fixture["asset_manifest"]["lineage_review"][
+        "seedance_contract_version"
+    ]
+    assert scene_versions == asset_versions == {lineage_version} == {"2.0"}
 
 
 def test_generation_contract_requires_explicit_model_family():
