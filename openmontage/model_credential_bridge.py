@@ -48,6 +48,7 @@ class ModelCredentialBridgeClient:
         *,
         job_id: str,
         stage: str,
+        stage_attempt: int = 1,
         attribution: JobAttribution,
     ) -> DelegatedModelCredential:
         normalized_job_id = _identifier(job_id, "job_id")
@@ -62,7 +63,7 @@ class ModelCredentialBridgeClient:
                     "Accept": "application/json",
                     "Content-Type": "application/json",
                 },
-                json={"stage": normalized_stage},
+                json={"stage": normalized_stage, "stageAttempt": stage_attempt},
                 timeout=self.timeout,
                 allow_redirects=False,
             )

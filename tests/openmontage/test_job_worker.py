@@ -213,6 +213,7 @@ def test_worker_fetches_and_scopes_a_delegated_model_credential_per_stage(tmp_pa
     assert credentials.calls == [{
         "job_id": job.job_id,
         "stage": "research",
+        "stage_attempt": 1,
         "attribution": job.attribution,
     }]
     assert executor.credentials[0] is not None

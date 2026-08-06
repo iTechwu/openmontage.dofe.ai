@@ -9,6 +9,7 @@ import requests
 
 from openmontage.delegation_proxy import DelegationSigningProxy
 from openmontage.invocation_store import ModelInvocationStore
+from openmontage.invocation_store import ModelInvocationStore
 from tools.dofe.delegation import DelegatedModelCredential
 
 
@@ -76,6 +77,28 @@ def test_loopback_proxy_overwrites_auth_and_signs_each_agent_request() -> None:
         hashlib.sha256,
     ).hexdigest()
     assert captured["X-Dofe-Attribution-Signature"] == expected
+
+
+def test_invocation_ledger_recovers_same_id_after_worker_crash(tmp_path) -> None:
+    store = ModelInvocationStore(tmp_path / "jobs.sqlite3")
+    first = store.get_or_create(
+        job_id="job-crash",
+        stage="render",
+        attempt=1,
+        request_id="request-crash",
+    )
+    store.mark(first.model_invocation_id, "unknown")
+
+    recovered = store.get_or_create(
+        job_id="job-crash",
+        stage="render",
+        attempt=1,
+        request_id="request-crash",
+    )
+    assert recovered.model_invocation_id == first.model_invocation_id
+    assert [item.model_invocation_id for item in store.list_recoverable(job_id="job-crash")] == [
+        first.model_invocation_id,
+    ]
 
 
 def test_proxy_reuses_persisted_invocation_id_after_restart(tmp_path) -> None:

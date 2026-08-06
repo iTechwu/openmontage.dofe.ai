@@ -257,6 +257,7 @@ class JobWorker:
                 credential = self.model_credential_bridge.issue(
                     job_id=latest.job_id,
                     stage=stage.code,
+                    stage_attempt=self._stage(latest, stage.code).attempt,
                     attribution=latest.attribution,
                 )
             except ModelCredentialBridgeError:
