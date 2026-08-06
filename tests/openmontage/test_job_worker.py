@@ -8,6 +8,7 @@ from pathlib import Path
 from lib.checkpoint import init_project, read_checkpoint, write_checkpoint
 from openmontage.artifact_bridge import ArtifactDownload
 from openmontage.contracts import (
+    ArtifactJobInput,
     ArtifactMetadata,
     JobAttribution,
     JobCreateRequest,
@@ -353,7 +354,7 @@ def test_worker_downloads_artifact_input_once_and_reuses_verified_receipt(
 ) -> None:
     service = JobService(tmp_path / "jobs.sqlite3")
     request = _request(request_id="artifact-input").model_copy(
-        update={"input": {"type": "artifact", "artifactId": "attachment-1"}}
+        update={"input": ArtifactJobInput(type="artifact", artifact_id="attachment-1")}
     )
     job = service.create_job(request, _attribution())
     executor = FakeExecutor(

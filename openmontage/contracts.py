@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 from enum import Enum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -73,6 +74,35 @@ class JobAttribution(WireModel):
     trace_id: str = Field(min_length=1)
 
 
+class TextJobInput(WireModel):
+    type: Literal["text"]
+    inline_text: str = Field(min_length=1)
+
+
+class ArtifactJobInput(WireModel):
+    type: Literal["artifact"]
+    artifact_id: str = Field(min_length=1)
+
+
+JobInput = Annotated[TextJobInput | ArtifactJobInput, Field(discriminator="type")]
+
+
+class JobBrief(WireModel):
+    title: str = Field(min_length=1)
+    duration_seconds: int | None = Field(default=None, gt=0)
+
+
+class JobOutput(WireModel):
+    container: Literal["mp4"]
+    resolution: str | None = Field(default=None, pattern=r"^[1-9][0-9]*x[1-9][0-9]*$")
+    fps: int | None = Field(default=None, gt=0, le=240)
+
+
+class JobBudget(WireModel):
+    max_amount: Decimal = Field(ge=0, allow_inf_nan=False)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+
+
 class JobCreateRequest(WireModel):
     schema_version: Literal[1] = 1
     client_request_id: str = Field(
@@ -88,10 +118,10 @@ class JobCreateRequest(WireModel):
             "Pipeline manifest name from pipeline_defs; stage names such as compose are invalid."
         ),
     )
-    input: dict[str, Any]
-    brief: dict[str, Any]
-    output: dict[str, Any]
-    budget: dict[str, Any]
+    input: JobInput
+    brief: JobBrief
+    output: JobOutput
+    budget: JobBudget
 
 
 def job_submission_capability() -> dict[str, Any]:
@@ -137,7 +167,19 @@ class WorkflowDefinition(WireModel):
 
     @classmethod
     def from_pipeline(cls, pipeline_type: str) -> "WorkflowDefinition":
-        manifest = load_pipeline_readonly(pipeline_type)
+        supported = sorted(list_pipelines())
+        if pipeline_type not in supported:
+            choices = ", ".join(supported)
+            raise ValueError(
+                f"Unknown workflow {pipeline_type!r}; supported workflows: {choices}"
+            )
+        try:
+            manifest = load_pipeline_readonly(pipeline_type)
+        except FileNotFoundError as exc:
+            choices = ", ".join(supported)
+            raise ValueError(
+                f"Unknown workflow {pipeline_type!r}; supported workflows: {choices}"
+            ) from exc
         approval_by_stage = {
             stage["name"]: bool(stage.get("human_approval_default", False))
             for stage in manifest["stages"]

@@ -18,7 +18,14 @@ from lib.checkpoint import (
     read_checkpoint,
 )
 from openmontage.artifact_bridge import ArtifactBridgeClient, ArtifactBridgeError
-from openmontage.contracts import ApprovalStatus, JobSnapshot, JobStatus, StageSnapshot, StageStatus
+from openmontage.contracts import (
+    ApprovalStatus,
+    ArtifactJobInput,
+    JobSnapshot,
+    JobStatus,
+    StageSnapshot,
+    StageStatus,
+)
 from openmontage.job_service import JobLease, JobLeaseError, JobService
 from openmontage.model_credential_bridge import (
     ModelCredentialBridgeClient,
@@ -425,21 +432,18 @@ class JobWorker:
         project_dir = self.projects_dir / snapshot.job_id
         if (project_dir / PROJECT_MARKER_FILENAME).is_file():
             return
-        title = snapshot.request.brief.get("title")
         init_project(
             snapshot.job_id,
-            title=title if isinstance(title, str) and title.strip() else snapshot.job_id,
+            title=snapshot.request.brief.title,
             pipeline_type=snapshot.workflow.name,
             pipeline_dir=self.projects_dir,
         )
 
     def _prepare_inputs(self, snapshot: JobSnapshot) -> tuple[dict[str, Any], ...]:
         request_input = snapshot.request.input
-        if request_input.get("type") != "artifact":
+        if not isinstance(request_input, ArtifactJobInput):
             return ()
-        artifact_id = request_input.get("artifactId")
-        if not isinstance(artifact_id, str) or not artifact_id.strip():
-            raise ValueError("Artifact input requires artifactId")
+        artifact_id = request_input.artifact_id
         if self.artifact_bridge is None:
             raise ArtifactBridgeError("Artifact Bridge is required for Artifact input")
 

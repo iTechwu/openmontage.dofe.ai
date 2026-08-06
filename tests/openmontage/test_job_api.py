@@ -68,6 +68,48 @@ def test_rest_job_creation_requires_trusted_service_context(tmp_path: Path) -> N
     assert response.json() == {"error": {"code": "OPENMONTAGE_UNAUTHORIZED"}}
 
 
+def test_rest_job_creation_rejects_unknown_workflow_as_validation_error(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    request = {**_request(), "workflow": "compose"}
+
+    response = client.post("/api/v1/jobs", json=request, headers=_headers())
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "OPENMONTAGE_VALIDATION_FAILED"
+    assert "Unknown workflow 'compose'" in error["message"]
+    assert "framework-smoke" in error["message"]
+    assert "pipeline_defs" not in error["message"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message_fragment"),
+    [
+        ("input", {"type": "artifact"}, "artifactId"),
+        ("input", {"type": "text"}, "inlineText"),
+        ("brief", {}, "title"),
+        ("output", {}, "container"),
+        ("budget", {}, "maxAmount"),
+        ("budget", {"maxAmount": "1.00"}, "currency"),
+    ],
+)
+def test_rest_job_creation_rejects_incomplete_nested_contracts(
+    tmp_path: Path,
+    field: str,
+    value: dict[str, object],
+    message_fragment: str,
+) -> None:
+    client, _ = _client(tmp_path)
+    request = {**_request(), field: value}
+
+    response = client.post("/api/v1/jobs", json=request, headers=_headers())
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "OPENMONTAGE_VALIDATION_FAILED"
+    assert message_fragment in error["message"]
+
+
 def test_rest_job_create_status_and_event_replay(tmp_path: Path) -> None:
     client, service = _client(tmp_path)
 
@@ -218,5 +260,50 @@ async def test_mcp_job_tools_do_not_expose_trusted_attribution_as_model_input(tm
         "description"
     ]
     assert request_schema["additionalProperties"] is False
+    assert "discriminator" in request_schema["properties"]["input"]
+    assert "oneOf" in request_schema["properties"]["input"]
+    for model_name in ("TextJobInput", "ArtifactJobInput", "JobBrief", "JobOutput", "JobBudget"):
+        assert submit_schema["$defs"][model_name]["additionalProperties"] is False
     assert created.structured_content["status"] == "QUEUED"
     assert artifacts.structured_content["artifacts"] == []
+
+
+@pytest.mark.asyncio
+async def test_mcp_job_creation_rejects_unknown_workflow_with_actionable_error(
+    tmp_path: Path,
+) -> None:
+    from mcp import Client
+
+    service = JobService(tmp_path / "jobs.sqlite3")
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
+    ) as client:
+        result = await client.call_tool(
+            "submit_video_job",
+            {"request": {**_request(), "workflow": "compose"}},
+        )
+
+    assert result.is_error is True
+    message = result.content[0].text
+    assert "Unknown workflow 'compose'" in message
+    assert "framework-smoke" in message
+    assert "pipeline_defs" not in message
+
+
+@pytest.mark.asyncio
+async def test_mcp_job_creation_rejects_incomplete_artifact_input(tmp_path: Path) -> None:
+    from mcp import Client
+
+    service = JobService(tmp_path / "jobs.sqlite3")
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
+    ) as client:
+        result = await client.call_tool(
+            "submit_video_job",
+            {"request": {**_request(), "input": {"type": "artifact"}}},
+        )
+
+    assert result.is_error is True
+    assert "artifactId" in result.content[0].text
