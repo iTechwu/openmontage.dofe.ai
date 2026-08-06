@@ -106,9 +106,11 @@ stages:
       - Source content remains visually primary where intended
       - Overlay and support layers do not overload the frame
       - Platform or aspect-ratio variants are planned deliberately
+      - Selected Seedance inserts declare reference binding and cannot override accepted source identity or state
     success_criteria:
       - Schema-valid scene_plan artifact
       - Every scene has a defined source/support treatment
+      - Every selected Seedance scene has a complete seedance_contract; connected scenes use accepted observed state
 
   - name: assets
     skill: pipelines/hybrid/asset-director
@@ -143,9 +145,11 @@ stages:
       - Support assets clearly map to real narrative gaps
       - Shared template assets are reused
       - Optional generated inserts do not eclipse source truth
+      - Selected Seedance assets record all five functional skills, completed prompt checks, and a consistent take/canon review
     success_criteria:
       - Schema-valid asset_manifest artifact
       - All referenced asset files exist on disk
+      - Every selected Seedance video records model_family, full prompt_review, and a consistent take_review canon decision
 
   - name: edit
     skill: pipelines/hybrid/edit-director

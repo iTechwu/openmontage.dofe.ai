@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 
+from lib.pipeline_loader import load_pipeline
 from tools.video.dofe_video import DofeVideo
 from tools.video.higgsfield_video import HiggsFieldVideo
 from tools.video.runway_video import RunwayVideo
@@ -36,6 +37,14 @@ SEEDANCE_PIPELINE_DIRECTORS = (
     "skills/pipelines/avatar-spokesperson/asset-director.md",
 )
 
+SEEDANCE_PIPELINES = (
+    "cinematic",
+    "animation",
+    "animated-explainer",
+    "hybrid",
+    "avatar-spokesperson",
+)
+
 
 @pytest.mark.parametrize("skill_name", SKILL_NAMES)
 def test_seedance_skills_use_functional_names_and_codex_metadata(skill_name: str):
@@ -60,6 +69,25 @@ def test_seedance_derivatives_retain_upstream_mit_license():
 def test_video_pipelines_route_seedance_through_shared_production_contract(director_path: str):
     content = (ROOT / director_path).read_text()
     assert "skills/creative/seedance-production.md" in content
+
+
+@pytest.mark.parametrize("pipeline_name", SEEDANCE_PIPELINES)
+def test_video_pipeline_manifests_enforce_seedance_stage_facts(pipeline_name: str):
+    manifest = load_pipeline(pipeline_name)
+    stages = {stage["name"]: stage for stage in manifest["stages"]}
+
+    scene_text = " ".join(
+        stages["scene_plan"]["review_focus"] + stages["scene_plan"]["success_criteria"]
+    )
+    asset_text = " ".join(
+        stages["assets"]["review_focus"] + stages["assets"]["success_criteria"]
+    )
+
+    assert "Seedance" in scene_text
+    assert "seedance_contract" in scene_text
+    assert "Seedance" in asset_text
+    assert "prompt_review" in asset_text
+    assert "take_review" in asset_text
 
 
 @pytest.mark.parametrize(

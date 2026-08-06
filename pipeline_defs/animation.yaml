@@ -162,9 +162,11 @@ stages:
       - Animation mode specified per scene, consistent with proposal
       - Transition logic is limited and meaningful
       - Every scene has a feasible tool path
+      - Selected Seedance scenes declare model family, complete directing contracts, reference binding, and accepted-source continuity
     success_criteria:
       - Schema-valid scene_plan artifact
       - Every scene includes animation mode and visual treatment
+      - Every selected Seedance scene has a complete seedance_contract; connected scenes use accepted observed state
 
   - name: assets
     skill: pipelines/animation/asset-director
@@ -201,13 +203,15 @@ stages:
       - Narration assets apply the approved voice performance plan and sample settings
       - Total cost within approved budget from proposal_packet
       - "Layer 3 skills read for EVERY generation tool before writing prompts (check agent_skills field)"
-      - "Clip duration maximized (prefer 10s over 5s) to reduce API calls and cost"
+      - "Clip duration follows the shot contract; use 10s only when the selected provider and planned action density support it"
       - "Use selector tools (video_selector, tts_selector, image_selector) — never call provider tools directly"
       - "Read Layer 2 skills for each tool BEFORE reading source code — skills contain usage guidance, source code is implementation detail"
+      - Selected Seedance assets record all five functional skills, completed prompt checks, and a consistent take/canon review
     success_criteria:
       - Schema-valid asset_manifest artifact
       - All referenced asset files exist on disk
       - layer3_skills_read list is present and includes all tools used for generation
+      - Every selected Seedance video records model_family, full prompt_review, and a consistent take_review canon decision
 
   - name: edit
     skill: pipelines/animation/edit-director

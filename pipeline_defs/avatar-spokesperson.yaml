@@ -94,9 +94,11 @@ stages:
       - Speaker layout and background system are coherent
       - Support overlays remain secondary to the presenter
       - Aspect-ratio variants are planned realistically
+      - Selected Seedance support clips use a complete utility or narrative contract and remain secondary to the presenter
     success_criteria:
       - Schema-valid scene_plan artifact
       - Every scene has a defined speaker and support treatment
+      - Every selected Seedance scene has a complete seedance_contract; connected scenes use accepted observed state
 
   - name: assets
     skill: pipelines/avatar-spokesperson/asset-director
@@ -129,9 +131,11 @@ stages:
       - Avatar generation path is explicit and honest (including no-avatar pivot if applicable)
       - Narration, subtitle, and background assets are aligned
       - Blocked paths are recorded instead of hidden
+      - Selected Seedance support assets record all five functional skills, completed prompt checks, and a consistent take/canon review
     success_criteria:
       - Schema-valid asset_manifest artifact
       - All referenced asset files exist on disk
+      - Every selected Seedance video records model_family, full prompt_review, and a consistent take_review canon decision
 
   - name: edit
     skill: pipelines/avatar-spokesperson/edit-director

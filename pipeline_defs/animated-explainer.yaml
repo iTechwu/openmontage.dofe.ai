@@ -153,9 +153,11 @@ stages:
       - "Visual variety: no 3+ consecutive scenes of same type"
       - Asset feasibility - every required_asset uses a tool from the production plan
       - Playbook adherence - transitions, colors, pacing rules
+      - Selected Seedance scenes use the utility or narrative lane deliberately and carry accepted-source continuity when connected
     success_criteria:
       - Schema-valid scene_plan with required_assets per scene
       - At least 3 different scene types used
+      - Every selected Seedance scene has a complete seedance_contract; connected scenes use accepted observed state
 
   - name: assets
     skill: pipelines/explainer/asset-director
@@ -191,9 +193,11 @@ stages:
       - Narration assets apply the approved voice performance plan and sample settings
       - Total cost within approved budget from proposal_packet
       - Image style consistency across all generated visuals
+      - Selected Seedance assets record all five functional skills, completed prompt checks, and a consistent take/canon review
     success_criteria:
       - Schema-valid asset_manifest with all required assets generated
       - All file paths resolve to existing files
+      - Every selected Seedance video records model_family, full prompt_review, and a consistent take_review canon decision
 
   - name: edit
     skill: pipelines/explainer/edit-director
