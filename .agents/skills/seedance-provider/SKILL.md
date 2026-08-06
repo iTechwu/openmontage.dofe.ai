@@ -5,9 +5,11 @@ description: Select and configure Seedance video-generation providers, operation
 
 # Seedance Provider
 
-Use this skill for execution facts. Use `seedance-directing` for shot design,
-`seedance-continuity` for connected clips, `seedance-prompting` for prompt
-compilation, and `seedance-quality` for prompt/take review.
+Use this skill for execution facts. Use
+[seedance-directing](../seedance-directing/SKILL.md) for shot design,
+[seedance-continuity](../seedance-continuity/SKILL.md) for connected clips,
+[seedance-prompting](../seedance-prompting/SKILL.md) for prompt compilation, and
+[seedance-quality](../seedance-quality/SKILL.md) for prompt/take review.
 
 ## Provider Contract
 
@@ -17,8 +19,11 @@ compilation, and `seedance-quality` for prompt/take review.
    call is a sample or batch before spending.
 3. Verify the selected tool's `supports` contract. Do not infer features from
    the Seedance family name or another provider's endpoint.
-4. Pass an explicit `output_path` under the active project workspace.
-5. Preserve the approved provider/model path. Stop for approval before any
+4. Resolve reference-token syntax from the selected provider surface. Treat
+   fal, DoFe, Runway, Higgsfield, and Replicate as separate prompt surfaces;
+   never normalize their tokens to a universal `@Image1` form.
+5. Pass an explicit `output_path` under the active project workspace.
+6. Preserve the approved provider/model path. Stop for approval before any
    fallback changes that path.
 
 ## OpenMontage Routes

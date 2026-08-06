@@ -12,6 +12,7 @@ You are translating the hybrid structure into a visual system that keeps the sou
 | Prior artifacts | `state.artifacts["script"]["script"]`, `state.artifacts["idea"]["brief"]` | Hybrid structure and source truth |
 | Tools | `frame_sampler`, `scene_detect` | Optional source inspection |
 | Playbook | Active style playbook | Layout consistency |
+| Layer 2 | `skills/creative/seedance-production.md` | Contract generated inserts without weakening source authority |
 
 ## Process
 
@@ -48,12 +49,21 @@ Recommended metadata keys:
 - `variant_rules`
 - `overlay_density_limits`
 
+### 4b. Contract Seedance Inserts
+
+For an insert routed to Seedance, follow
+`skills/creative/seedance-production.md` and complete `generation_contract`.
+Treat accepted source footage as the continuity authority, give every reference
+one controlled dimension, and prevent generated inserts from changing source
+identity, geography, wardrobe, product geometry, or completed action.
+
 ### 5. Quality Gate
 
 - the anchor medium stays primary where intended,
 - support layers are limited and purposeful,
 - aspect-ratio planning is explicit,
 - no scene relies on invisible future magic.
+- every Seedance insert has a structured contract and explicit source authority.
 
 ## Common Pitfalls
 

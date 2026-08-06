@@ -59,7 +59,10 @@ observed end state rather than copying the planned endpoint. Preserve the old
 plan in history and use the observed state for the next generation.
 
 Persist the outcome, issues, canon decision, observed end state, and next action
-in `asset_manifest.assets[].take_review`.
+in `asset_manifest.assets[].take_review`. A `keep` decision must set
+`accepted_as_canon=true` and `canon_status=accepted`; reroll, rewrite, re-anchor,
+and reject decisions must remain `not_accepted`. An accepted deviation uses
+`canon_status=accepted_with_deviation` and records the actual endpoint.
 
 Derived from MIT-licensed
 [`Emily2040/seedance-2.0`](https://github.com/Emily2040/seedance-2.0); license is

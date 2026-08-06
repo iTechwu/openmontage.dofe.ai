@@ -11,6 +11,7 @@ You are converting the script into a feasible animation plan. This is the stage 
 | Schema | `schemas/artifacts/scene_plan.schema.json` | Artifact validation |
 | Prior artifacts | `state.artifacts["script"]["script"]`, `state.artifacts["proposal"]["proposal_packet"]` | Beat map and tool path |
 | Playbook | Active style playbook | Palette, typography, motion consistency |
+| Layer 2 | `skills/creative/seedance-production.md` | Seedance contract and continuity route for `clip_video` scenes |
 
 ## Process
 
@@ -85,6 +86,14 @@ Recommended metadata keys:
 - `tool_path_map`
 - `reusable_motifs`
 
+### 4b. Contract Seedance Clip Scenes
+
+When `clip_video` resolves to a Seedance model, follow
+`skills/creative/seedance-production.md`. Populate a schema-valid
+`generation_contract` with the full `seedance_contract`; repeat stable character
+or object identity anchors across cold starts and keep future clips provisional
+until the previous take is accepted.
+
 ### 5. 5-Aspect Scene-Plan Checklist
 
 > Every scene must specify all five aspects, BUT the load shifts with the scene's `animation_mode`. Manim and other diagrammatic/programmatic scenes care most about **Subject** and **Spatial Framing** — Camera and Subject Motion in the cinematographic sense often map to N/A or to abstract equivalents. AI-video / `image_animation` / `anime_scene` scenes care about all five and behave like cinematic shots. Marking an aspect as N/A is allowed but must be explicit per scene; silent omission is forbidden.
@@ -107,6 +116,8 @@ Recommended metadata keys:
 - the transition system is limited and meaningful,
 - the tool path is explicit,
 - the sequence feels like one designed system.
+- every Seedance clip has a complete production contract and accepted-state
+  lineage for connected clips.
 
 ## Common Pitfalls
 

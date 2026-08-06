@@ -34,6 +34,11 @@ Quick routing for common explainer needs:
 | Tools | `tts_selector`, `image_selector`, `video_selector`, `diagram_gen`, `code_snippet`, `music_gen` — selectors auto-discover all available providers from the registry | Generation capabilities |
 | Cost tracker | `tools/cost_tracker.py` | Budget governance |
 
+For any Seedance finalist, follow `skills/creative/seedance-production.md`.
+Call `video_selector` in rank mode before final prompt authoring, read the
+input-aware skill chain, then store the compiled prompt audit and take/canon
+review required by `asset_manifest.schema.json`.
+
 ## Process
 
 ### Step 1: Inventory Required Assets

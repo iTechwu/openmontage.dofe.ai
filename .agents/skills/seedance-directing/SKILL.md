@@ -23,7 +23,8 @@ Turn story intent into a shot that can be seen and heard. Do not use
 6. Translate every abstract idea into a filmable carrier. A hidden conflict may
    become a withheld gesture, interrupted task, eyeline, spatial retreat, or
    contradiction between dialogue and body.
-7. Persist the result in `scene_plan.scenes[].generation_contract`.
+7. Persist the result in `scene_plan.scenes[].generation_contract`, including
+   `provider_family="seedance"` and the structured `seedance_contract`.
 
 ## Shot Contract
 

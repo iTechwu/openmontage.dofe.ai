@@ -12,6 +12,11 @@ This stage prepares the actual spokesperson ingredients: narration, avatar or li
 | Prior artifacts | `state.artifacts["scene_plan"]["scene_plan"]`, `state.artifacts["script"]["script"]`, `state.artifacts["idea"]["brief"]` | Presenter plan and narration needs |
 | Tools | `talking_head`, `lip_sync`, `tts_selector`, `subtitle_gen`, `image_selector`, `audio_enhance` — selectors auto-discover all available providers from the registry | Avatar, narration, and support asset options |
 | Playbook | Active style playbook | Background, type, and subtitle rules |
+| Layer 2 | `skills/creative/seedance-production.md` | Seedance support-visual prompt and take audit route |
+
+When `video_selector` ranks a Seedance model for a support visual, follow the
+Layer 2 route before prompt authoring and persist its prompt/take audit fields in
+the asset manifest.
 
 ## Process
 

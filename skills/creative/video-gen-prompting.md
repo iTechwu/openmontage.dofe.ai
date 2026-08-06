@@ -14,7 +14,7 @@ For model-specific tips, see the linked guides below.
 
 | Model | Guide | Key Insight |
 |-------|-------|-------------|
-| **Seedance 2.0 (standard / fast)** | `creative/prompting/seedance-prompting.md` + Layer 3 `seedance-provider` / `seedance-directing` / `seedance-continuity` / `seedance-prompting` / `seedance-quality` | **Preferred premium default** for controlled cinematic generation when a supporting gateway is configured. |
+| **Seedance family** | `creative/seedance-production.md` + input-aware Layer 3 skills from `video_selector` | Controlled provider routing, structured directing, continuity, prompt compilation, and take review. |
 | **Sora 2 / Sora 2 Pro** | [OpenAI Sora 2 Cookbook](https://developers.openai.com/cookbook/examples/sora/sora2_prompting_guide) | Richest structured template. Advanced fields: lenses, filtration, grade, diegetic sound, wardrobe, finishing. |
 | **VEO 3.1 / VEO 3** | [Vertex AI Prompt Guide](https://cloud.google.com/vertex-ai/generative-ai/docs/video/video-gen-prompt-guide) | Best vocabulary reference tables. 14-component prompt structure. |
 | **Grok Imagine Video** | `creative/prompting/grok-prompting.md` | Best when prompts need reference-image placeholders like `<IMAGE_1>` and identity/product carryover. |
@@ -59,7 +59,7 @@ Empirical sweet spots from the paper's Section 6 findings — different models r
 
 | Model | Sweet Spot | Notes |
 |---|---|---|
-| Seedance 2.0 | 200–400 words for hero shots, 80–150 for inserts | Reward long, structured 5-aspect prompts |
+| Seedance family | Determined by the selected provider/model skill | Preserve exact reference roles, action, carriers, exclusions, and endpoint before adding detail |
 | Wan 2.2 | 200–400 words | Fine-tuned on long captions |
 | Sora 2 / VEO 3.1 | 100–250 words | Plateau past ~250 |
 | LTX-2 | ≤ 80 words | Degrades past that, keep tight |

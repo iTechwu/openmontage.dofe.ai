@@ -33,6 +33,9 @@ Before authoring title cards, name plates, or SVG overlays, read **`skills/meta/
 For a selected Seedance provider, read its declared `agent_skills` plus
 `seedance-directing`, `seedance-continuity` when the scene is connected, and
 `seedance-quality` before the paid call.
+Follow `skills/creative/seedance-production.md`: use `video_selector` rank mode
+before prompt authoring, then preserve its input-aware `required_agent_skills`
+and final model family in the asset audit trail.
 
 ## Process
 

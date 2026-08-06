@@ -34,6 +34,11 @@ Quick routing for common animation-pipeline needs:
 | Tools | `tts_selector`, `image_selector`, `video_selector`, `math_animate`, `diagram_gen`, `code_snippet`, `music_gen` — selectors auto-discover all available providers from the registry | Asset production options |
 | Playbook | Active style playbook | Visual consistency |
 
+For a selected Seedance model, follow
+`skills/creative/seedance-production.md`. Rank before prompt authoring, read the
+input-aware Layer 3 skill list, and persist `model_family`, `prompt_review`, and
+`take_review` for every generated clip.
+
 ## Process
 
 ### 1. Start With Deterministic Assets

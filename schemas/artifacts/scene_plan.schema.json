@@ -73,6 +73,11 @@
             "description": "Provider-neutral control contract for an AI-generated video scene.",
             "required": ["mode", "shot_structure", "felt_intent", "planned_end_state"],
             "properties": {
+              "provider_family": {
+                "type": "string",
+                "enum": ["seedance", "generic"],
+                "description": "Generation family selected by video_selector; seedance enables the structured production contract."
+              },
               "mode": {
                 "type": "string",
                 "enum": ["text_to_video", "image_to_video", "reference_to_video", "first_last_frame", "video_to_video", "edit", "extend"]
@@ -92,7 +97,8 @@
               "identity_anchors": {
                 "type": "array",
                 "items": { "type": "string" },
-                "uniqueItems": true
+                "uniqueItems": true,
+                "minItems": 1
               },
               "reference_roles": {
                 "type": "array",
@@ -125,8 +131,138 @@
                 },
                 "additionalProperties": false
               },
+              "seedance_contract": {
+                "type": "object",
+                "description": "Structured Seedance directing, prompt-carrier, and continuity state. Internal labels are compiled into filmable prose and never sent verbatim.",
+                "required": [
+                  "lane",
+                  "authoring_state",
+                  "primary_action",
+                  "shot_design",
+                  "sound_intent",
+                  "prompt_carriers",
+                  "exclusions",
+                  "continuity_state"
+                ],
+                "properties": {
+                  "lane": { "type": "string", "enum": ["narrative", "utility"] },
+                  "authoring_state": {
+                    "type": "object",
+                    "properties": {
+                      "dramatic_function": { "type": "string", "minLength": 1 },
+                      "turn": { "type": "string", "minLength": 1 },
+                      "pov": { "type": "string", "minLength": 1 },
+                      "power_shift": { "type": "string", "minLength": 1 },
+                      "objective": { "type": "string", "minLength": 1 },
+                      "obstacle_and_tactic": { "type": "string", "minLength": 1 },
+                      "subtext": { "type": "string", "minLength": 1 },
+                      "suppressed_behavior": { "type": "string", "minLength": 1 },
+                      "specific_detail": { "type": "string", "minLength": 1 },
+                      "stock_solution_refused": { "type": "string", "minLength": 1 },
+                      "utility_intent": { "type": "string", "minLength": 1 },
+                      "non_narrative_refusal": { "type": "string", "minLength": 1 }
+                    },
+                    "additionalProperties": false
+                  },
+                  "primary_action": { "type": "string", "minLength": 1 },
+                  "shot_design": {
+                    "type": "object",
+                    "required": ["framing", "camera", "lighting", "behavior"],
+                    "properties": {
+                      "framing": { "type": "string", "minLength": 1 },
+                      "camera": { "type": "string", "minLength": 1 },
+                      "lighting": { "type": "string", "minLength": 1 },
+                      "behavior": { "type": "string", "minLength": 1 }
+                    },
+                    "additionalProperties": false
+                  },
+                  "sound_intent": { "type": "string", "minLength": 1 },
+                  "prompt_carriers": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "minItems": 1,
+                    "uniqueItems": true
+                  },
+                  "exclusions": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "minItems": 1,
+                    "uniqueItems": true
+                  },
+                  "continuity_state": {
+                    "type": "object",
+                    "required": ["source_status", "extension_depth", "observation_confidence", "uncertainties"],
+                    "properties": {
+                      "parent_asset_id": { "type": "string", "minLength": 1 },
+                      "source_status": {
+                        "type": "string",
+                        "enum": ["planned", "canonical_reference", "accepted", "accepted_with_deviation"]
+                      },
+                      "observed_start_state": { "type": "string", "minLength": 1 },
+                      "extension_depth": { "type": "integer", "minimum": 0, "maximum": 3 },
+                      "reanchor_required": { "type": "boolean" },
+                      "observation_confidence": { "type": "string", "enum": ["high", "medium", "low", "unobserved"] },
+                      "uncertainties": {
+                        "type": "array",
+                        "items": { "type": "string", "minLength": 1 },
+                        "uniqueItems": true
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": { "properties": { "lane": { "const": "narrative" } }, "required": ["lane"] },
+                    "then": {
+                      "properties": {
+                        "authoring_state": {
+                          "required": [
+                            "dramatic_function",
+                            "turn",
+                            "pov",
+                            "power_shift",
+                            "objective",
+                            "obstacle_and_tactic",
+                            "subtext",
+                            "suppressed_behavior",
+                            "specific_detail",
+                            "stock_solution_refused"
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "if": { "properties": { "lane": { "const": "utility" } }, "required": ["lane"] },
+                    "then": {
+                      "properties": {
+                        "authoring_state": {
+                          "required": ["utility_intent", "non_narrative_refusal"]
+                        }
+                      }
+                    }
+                  }
+                ],
+                "additionalProperties": false
+              },
               "generate_audio": { "type": "boolean" }
             },
+            "allOf": [
+              {
+                "if": { "properties": { "provider_family": { "const": "seedance" } }, "required": ["provider_family"] },
+                "then": {
+                  "required": [
+                    "provider_family",
+                    "continuation_type",
+                    "planned_start_state",
+                    "identity_anchors",
+                    "prompt_budget",
+                    "seedance_contract"
+                  ]
+                }
+              }
+            ],
             "additionalProperties": false
           },
           "character_actions": {

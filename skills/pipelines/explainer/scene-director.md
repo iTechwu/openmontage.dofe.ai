@@ -13,6 +13,7 @@ This is where words become visuals. A great script with a bad scene plan produce
 | Schema | `schemas/artifacts/scene_plan.schema.json` | Artifact validation |
 | Prior artifacts | `state.artifacts["script"]["script"]`, `state.artifacts["proposal"]["proposal_packet"]` | Script sections and proposal packet |
 | Playbook | Active style playbook | Visual language, transitions, motion rules |
+| Layer 2 | `skills/creative/seedance-production.md` | Seedance contract route for generated video and b-roll |
 | Layer 3 | `.agents/skills/flux-best-practices/`, `.agents/skills/beautiful-mermaid/`, `.agents/skills/manim-composer/` | Image gen, diagram, animation knowledge |
 
 ## Process
@@ -97,6 +98,12 @@ plan `text_card`, `animation`, or `diagram` scenes and name an appropriate
 downstream template (`hero_title`, `stat_card`, charts, `comparison`,
 `callout`, or `progress_bar`) in each description. These render entirely from
 Remotion components with zero external dependencies.
+
+When a `generated` or `broll` scene is assigned to a Seedance model, follow
+`skills/creative/seedance-production.md` and populate its structured
+`generation_contract`. Explainer utility shots use the `utility` lane and must
+not invent character psychology; narrative metaphor shots use the complete
+`narrative` lane.
 
 ### Step 4: Apply the Visual Technique Library
 

@@ -13,6 +13,10 @@ This stage prepares the support kit around the anchor edit: subtitles, diagrams,
 | Tools | `subtitle_gen`, `tts_selector`, `image_selector`, `video_selector`, `diagram_gen`, `code_snippet`, `music_gen`, `audio_enhance` — selectors auto-discover all available providers from the registry | Optional support asset production |
 | Playbook | Active style playbook | Consistency rules |
 
+For Seedance-generated inserts, follow
+`skills/creative/seedance-production.md`. Rank before prompt authoring, preserve
+source/reference authority, and record the required prompt and take reviews.
+
 ## Process
 
 ### 1. Build Shared Support Assets First

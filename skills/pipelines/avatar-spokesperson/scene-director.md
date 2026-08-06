@@ -8,6 +8,7 @@ Plan the visual system for the presenter-led cut. This stage decides how the spe
 
 - `docs/avatar-spokesperson-best-practices.md`
 - `skills/creative/typography.md`
+- `skills/creative/seedance-production.md` when support visuals use Seedance
 
 ## Process
 
@@ -73,6 +74,9 @@ When the EP triggers a no-avatar pivot (no `talking_head` or `lip_sync` availabl
 - No presenter framing decisions (center, left-third, etc.) — replaced with full-frame visual compositions.
 - Each scene needs a **primary visual** that reinforces the spoken content, since there's no face to anchor attention.
 - Plan more visual variety per scene — without a presenter, static backgrounds feel empty.
+- When a primary visual is a Seedance clip, complete the structured generation
+  contract; use the utility lane unless the support clip contains an actual
+  narrative performance beat.
 
 ## Common Pitfalls
 

@@ -12,6 +12,7 @@ You are deciding how each cinematic beat will look and transition. This is where
 | Prior artifacts | `state.artifacts["script"]["script"]`, `state.artifacts["proposal"]["proposal_packet"]` | Beat map and source truth |
 | Tools | `frame_sampler`, `scene_detect` | Source inspection and reframing checks |
 | Playbook | Active style playbook | Color and typography consistency |
+| Layer 2 | `skills/creative/seedance-production.md` | Cross-pipeline Seedance rank, contract, generation, and canon route |
 | Layer 3 | `.agents/skills/seedance-directing/SKILL.md` | Motivated shot contracts for generated scenes |
 | Layer 3 | `.agents/skills/seedance-continuity/SKILL.md` | Identity, references, accepted-state handoffs, and re-anchors |
 
@@ -53,7 +54,8 @@ Recommended metadata keys:
 
 ### 4b. Create A Generation Contract
 
-For every Seedance-generated scene, populate `scene.generation_contract` rather
+For every Seedance-generated scene, follow `skills/creative/seedance-production.md`
+and populate `scene.generation_contract` rather
 than leaving control decisions in prose. At minimum lock:
 
 - generation mode and single-take/multi-shot structure,

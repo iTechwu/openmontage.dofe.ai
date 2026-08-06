@@ -97,7 +97,7 @@ Key capability families to look for in the output:
 | Data Visualization | `creative/data-visualization.md` | Chart type selection, animation, label placement | `d3-viz`, `remotion-best-practices` |
 | Video Stitching | `creative/video-stitching.md` | Multi-clip assembly, AI clip chaining, spatial composition | `ffmpeg`, `video-toolkit` |
 | Video Gen Prompting | `creative/video-gen-prompting.md` | Universal video generation prompt vocabulary; **canonical 5-aspect spec** (Subject / Motion / Scene / Spatial / Camera); ~200 cinematography primitives | `ai-video-gen`, `ltx2`, `create-video` |
-| â†³ Seedance Production | `creative/prompting/seedance-prompting.md` | Controlled directing, connected-clip continuity, prompt compilation, and take review | `seedance-provider`, `seedance-directing`, `seedance-continuity`, `seedance-prompting`, `seedance-quality`, `ai-video-gen` |
+| â†³ Seedance Production | `creative/seedance-production.md` | Model-aware routing, structured directing, connected-clip continuity, prompt compilation, and take review | `seedance-provider`, `seedance-directing`, `seedance-continuity`, `seedance-prompting`, `seedance-quality`, `ai-video-gen` |
 | â†³ Grok Prompting | `creative/prompting/grok-prompting.md` | Grok image/video prompting, edit flows, reference-image video | `grok-media` |
 | â†³ Sora Prompting | `creative/prompting/sora-prompting.md` | Sora 2 structured template, advanced fields | `ai-video-gen` |
 | â†³ VEO Prompting | `creative/prompting/veo-prompting.md` | VEO 3.1 14-component structure, art movements | `ai-video-gen` |

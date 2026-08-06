@@ -350,6 +350,7 @@ class BaseTool(ABC):
     def get_info(self) -> dict[str, Any]:
         """Return full tool contract info for registry/discovery."""
         usage_location = inspect.getfile(self.__class__)
+        default_agent_skills = self.agent_skills_for()
         return {
             "name": self.name,
             "version": self.version,
@@ -384,8 +385,8 @@ class BaseTool(ABC):
             "side_effects": self.side_effects,
             "fallback": self.fallback,
             "fallback_tools": self.fallback_tools or ([self.fallback] if self.fallback else []),
-            "agent_skills": self.agent_skills,
-            "related_skills": self.agent_skills,
+            "agent_skills": default_agent_skills,
+            "related_skills": default_agent_skills,
             "user_visible_verification": self.user_visible_verification,
             "quality_score": self.quality_score,
             "historical_success_rate": self.historical_success_rate,

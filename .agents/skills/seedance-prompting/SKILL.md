@@ -5,9 +5,11 @@ description: Compile OpenMontage shot and continuity contracts into concise, pro
 
 # Seedance Prompting
 
-Read `seedance-provider` and `seedance-directing` first. Also read
-`seedance-continuity` for connected clips and `seedance-quality` before a paid
-call or after a failed take.
+Read [seedance-provider](../seedance-provider/SKILL.md) and
+[seedance-directing](../seedance-directing/SKILL.md) first. Also read
+[seedance-continuity](../seedance-continuity/SKILL.md) for connected clips and
+[seedance-quality](../seedance-quality/SKILL.md) before a paid call or after a
+failed take.
 
 ## Compile Order
 
@@ -42,7 +44,8 @@ Do not mix both structures.
 - Repeat immutable identity anchors verbatim across independent shot blocks.
 - Keep dialogue short, assign every line to a visible speaker, and specify the
   reaction/pause that makes the exchange readable.
-- Preserve exact reference tags and explicitly block unwanted transfer.
+- Preserve the selected surface's exact reference tags and explicitly block
+  unwanted transfer. Never assume `@Image1` syntax works on another route.
 - If a source clip is attached, let it carry visible state; text describes the
   delta, open motion, endpoint, and known drift risks.
 - Move plates, logos, subtitles, HUDs, and required text to post.

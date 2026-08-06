@@ -16,8 +16,9 @@ Accepted footage is canon; the original plan is not.
    continuation only inside a scene.
 3. Give each clip one narrative job, one felt intent, one planned start, and one
    completed endpoint. Mark completed and reserved beats separately.
-4. Attach `seedance-directing` shot contracts to the current clip. Future clips
-   remain provisional intent cards until their predecessor is accepted.
+4. Attach [seedance-directing](../seedance-directing/SKILL.md) shot contracts to
+   the current clip. Future clips remain provisional intent cards until their
+   predecessor is accepted.
 5. After generation, inspect the clip or its final frame, record the observed
    end state, and update canon before compiling the next prompt.
 6. Re-anchor from canonical references after two consecutive output-sourced
@@ -65,7 +66,9 @@ state. If the media cannot be inspected, mark the state as user-reported and
 low-confidence; never invent observations.
 
 Persist per-scene controls in `scene_plan.scenes[].generation_contract` and
-persist accepted-take review in `asset_manifest.assets[].take_review`.
+persist accepted-take review in `asset_manifest.assets[].take_review`. Keep
+`extension_depth`, source status, observation confidence, uncertainties, and
+re-anchor decisions synchronized across both artifacts.
 
 Derived from MIT-licensed
 [`Emily2040/seedance-2.0`](https://github.com/Emily2040/seedance-2.0); license is
