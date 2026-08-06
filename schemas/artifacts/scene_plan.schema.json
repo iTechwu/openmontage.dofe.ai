@@ -282,8 +282,7 @@
                   "temporal_beats": {
                     "type": "array",
                     "items": { "$ref": "#/$defs/temporalBeat" },
-                    "minItems": 1,
-                    "uniqueItems": true
+                    "minItems": 1
                   },
                   "dialogue_beats": {
                     "type": "array",
@@ -413,7 +412,8 @@
                       "properties": {
                         "shot_design": {
                           "required": ["lens", "blocking", "camera_axis", "screen_direction"]
-                        }
+                        },
+                        "temporal_beats": { "uniqueItems": true }
                       },
                       "allOf": [
                         {

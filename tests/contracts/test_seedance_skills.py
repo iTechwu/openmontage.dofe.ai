@@ -1345,19 +1345,70 @@ def test_prompt_compile_spec_requires_action_endpoint_and_truthful_emission():
     schema = json.loads(
         (ROOT / "schemas" / "artifacts" / "asset_manifest.schema.json").read_text()
     )
-    validator = Draft202012Validator(schema["$defs"]["promptCompileSpec"])
+
+    def manifest_with(compile_spec):
+        asset = _minimal_seedance_asset("take-01", "2.0")
+        asset["prompt_review"]["compile_spec"] = compile_spec
+        return {
+            "version": "1.0",
+            "assets": [asset],
+            "lineage_review": _standalone_lineage_review("take-01"),
+        }
 
     missing_endpoint = _prompt_compile_spec()
     missing_endpoint["ordered_sections"].remove("endpoint")
-    assert list(validator.iter_errors(missing_endpoint))
+    assert list(Draft202012Validator(schema).iter_errors(manifest_with(missing_endpoint)))
 
     missing_action = _prompt_compile_spec()
     missing_action["ordered_sections"].remove("action_beats")
-    assert list(validator.iter_errors(missing_action))
+    assert list(Draft202012Validator(schema).iter_errors(manifest_with(missing_action)))
 
     false_emission = _prompt_compile_spec()
     false_emission["reference_emissions"][0]["emitted"] = True
-    assert list(validator.iter_errors(false_emission))
+    assert list(Draft202012Validator(schema).iter_errors(manifest_with(false_emission)))
+
+
+def test_legacy_seedance_artifacts_keep_wearing_v2_field_shapes():
+    """v1 Seedance records that historically carried v2-shaped fields
+    (duplicate temporal beats, endpoint-less ordered sections, truthful
+    input_parameter emission) must stay readable now that those constraints
+    live behind the v2 version gate."""
+    scene_schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "scene_plan.schema.json").read_text()
+    )
+    asset_schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "asset_manifest.schema.json").read_text()
+    )
+
+    # v1 scene with a duplicate temporal beat (same beat_id) — uniqueItems is v2-only now
+    contract = _minimal_seedance_scene_contract()
+    del contract["seedance_contract_version"]
+    del contract["identity_ids"]
+    beat = contract["seedance_contract"]["temporal_beats"][0]
+    contract["seedance_contract"]["temporal_beats"].append({**beat})
+    for field in ("lens", "blocking", "camera_axis", "screen_direction"):
+        del contract["seedance_contract"]["shot_design"][field]
+    scene_plan = _scene_artifact(contract)
+    del scene_plan["identity_registry"]
+    assert not list(Draft202012Validator(scene_schema).iter_errors(scene_plan))
+
+    # v1 asset carrying an endpoint-less compile_spec and a truthful input_parameter emission
+    asset = _minimal_seedance_asset("legacy-take-01", "1.0")
+    legacy_spec = _prompt_compile_spec()
+    legacy_spec["ordered_sections"].remove("endpoint")
+    legacy_spec["reference_emissions"][0]["emitted"] = True
+    asset["prompt_review"]["compile_spec"] = legacy_spec
+    review = _standalone_lineage_review("legacy-take-01")
+    del review["seedance_contract_version"]
+    for check in (
+        "identity_registry_consistency",
+        "prompt_compilation_trace",
+        "temporal_structure",
+        "contract_version_consistency",
+    ):
+        review["checks"].pop(check, None)
+    manifest = {"version": "1.0", "assets": [asset], "lineage_review": review}
+    assert not list(Draft202012Validator(asset_schema).iter_errors(manifest))
 
 
 def test_two_clip_seedance_golden_trace_validates_scene_asset_and_handoff():

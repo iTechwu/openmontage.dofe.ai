@@ -152,11 +152,7 @@
           "type": "array",
           "items": { "type": "string", "enum": ["reference_roles", "opening_delta", "identity_locks", "action_beats", "camera", "environment_light", "dialogue_audio", "exclusions", "endpoint"] },
           "minItems": 5,
-          "uniqueItems": true,
-          "allOf": [
-            { "contains": { "const": "action_beats" } },
-            { "contains": { "const": "endpoint" } }
-          ]
+          "uniqueItems": true
         },
         "reference_emissions": {
           "type": "array",
@@ -168,15 +164,6 @@
               "binding_mode": { "type": "string", "enum": ["prompt_token", "input_parameter", "internal_only"] },
               "emitted": { "type": "boolean" }
             },
-            "allOf": [
-              {
-                "if": {
-                  "properties": { "binding_mode": { "enum": ["input_parameter", "internal_only"] } },
-                  "required": ["binding_mode"]
-                },
-                "then": { "properties": { "emitted": { "const": false } } }
-              }
-            ],
             "additionalProperties": false
           },
           "uniqueItems": true
@@ -398,7 +385,34 @@
             },
             "then": {
               "properties": {
-                "prompt_review": { "required": ["compile_spec"] },
+                "prompt_review": {
+                  "required": ["compile_spec"],
+                  "properties": {
+                    "compile_spec": {
+                      "properties": {
+                        "ordered_sections": {
+                          "allOf": [
+                            { "contains": { "const": "action_beats" } },
+                            { "contains": { "const": "endpoint" } }
+                          ]
+                        },
+                        "reference_emissions": {
+                          "items": {
+                            "allOf": [
+                              {
+                                "if": {
+                                  "properties": { "binding_mode": { "enum": ["input_parameter", "internal_only"] } },
+                                  "required": ["binding_mode"]
+                                },
+                                "then": { "properties": { "emitted": { "const": false } } }
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
                 "take_review": {
                   "required": ["identity_observations"],
                   "allOf": [
