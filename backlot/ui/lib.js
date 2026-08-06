@@ -47,7 +47,7 @@ export function fmtAgo(epochSeconds) {
 export function fmtClock(iso) {
   if (!iso) return "";
   try {
-    return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return new Date(iso).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   } catch {
     return "";
   }

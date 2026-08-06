@@ -1,4 +1,5 @@
 import { el, fmtAgo, getJSON, subscribe, thumbURL } from "/ui/lib.js";
+import { label, pipelineLabel } from "/ui/i18n.js";
 
 const grid = document.getElementById("grid");
 const THEME_KEY = "backlot.theme";
@@ -36,7 +37,7 @@ function miniRail(states) {
     const cls = s.status === "completed" ? "d"
       : s.status === "in_progress" ? "a"
       : s.status === "awaiting_human" ? "w" : "";
-    rail.append(el("i", { class: cls, title: `${s.name}: ${s.status}` }));
+    rail.append(el("i", { class: cls, title: `${label(s.name)}：${label(s.status)}` }));
   }
   return rail;
 }
@@ -51,13 +52,13 @@ function card(p) {
   if (p.live && p.active_stage) {
     poster.append(el("span", { class: "lp-live" },
       el("span", { class: "dot" }),
-      p.awaiting_human ? "◈ 等待确认" : `进行中 · ${p.active_stage.toUpperCase()}`));
+      p.awaiting_human ? "◈ 等待确认" : `进行中 · ${label(p.active_stage)}`));
   } else if (p.awaiting_human) {
     poster.append(el("span", { class: "lp-live" }, "◈ 等待确认"));
   }
 
   const meta = el("div", { class: "lb-meta" },
-    el("span", { class: "chip" }, p.pipeline_type || "未知"),
+    el("span", { class: "chip" }, pipelineLabel(p.pipeline_type)),
     p.scene_count ? el("span", { class: "chip" }, `${p.scene_count} 个场景`) : null,
     p.render_count ? el("span", { class: "chip" }, `${p.render_count} 个成片`) : null,
     el("span", { class: "when" }, fmtAgo(p.last_activity)),

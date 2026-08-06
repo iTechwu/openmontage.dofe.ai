@@ -4,6 +4,7 @@ import {
   STAGE_ICONS, el, fmtAgo, fmtClock, fmtDuration, fmtMoney,
   getJSON, mediaURL, subscribe, thumbURL, waveBars,
 } from "/ui/lib.js";
+import { formatToken, label, pipelineLabel, shotLabel, toolLabel } from "/ui/i18n.js";
 
 const rawProjectPath = location.pathname.split("/p/")[1] || "";
 const projectId = decodeURIComponent(rawProjectPath);
@@ -51,7 +52,7 @@ applyTheme(currentTheme);
 function renderSlate(s) {
   const board = s.storyboard;
   const chips = [
-    el("span", { class: "chip" }, `${s.pipeline.pipeline_type} 流水线`),
+    el("span", { class: "chip" }, pipelineLabel(s.pipeline.pipeline_type)),
     board && board.total_duration_seconds
       ? el("span", { class: "chip" }, `${board.scenes.length} 个场景 · ${fmtDuration(board.total_duration_seconds)}`)
       : null,
@@ -139,12 +140,12 @@ function renderRail(s) {
     if (!STAGE_ICONS[st.status]) pendingIndex += 1;
     const node = el("div", {
       class: `stage ${cls}${selectedStage === st.name ? " selected" : ""}${st.undeclared ? " undeclared" : ""}`,
-      title: st.undeclared ? `"${st.name}" 已运行但未被该流水线的 manifest 声明` : null,
+      title: st.undeclared ? "该自定义阶段已运行，但未在流水线清单中声明" : null,
       onclick: () => toggleDrawer(st.name),
     },
       el("span", { class: "line" }),
       el("span", { class: "node" }, icon),
-      el("span", { class: "name" }, humanize(st.name)),
+      el("span", { class: "name" }, label(st.name)),
       el("span", { class: "sub", style: "white-space:pre-line" },
         st.undeclared ? `${stageSub(st)}\n未列入`.trim() : stageSub(st)),
     );
@@ -236,7 +237,7 @@ function renderDrawer(s) {
 
   return el("div", { class: "drawer" },
     el("div", { class: "drawer-head" },
-      el("h3", {}, `${humanize(st.name)} — ${STATUS_LABELS[st.status] || st.status}`),
+      el("h3", {}, `${humanize(st.name)} — ${label(st.status)}`),
       st.gate_skipped ? el("span", { class: "gate-chip" }, "⚑ 已跳过审查门") : null,
       st.versions > 1 ? el("span", { class: "ver-chip" }, `v${st.versions}`) : null,
       st.timestamp ? el("span", { class: "meta", style: "font-family:var(--mono);font-size:calc(10.5px * var(--fs-scale));color:var(--text-3)" }, st.timestamp) : null,
@@ -296,31 +297,8 @@ function renderScriptCard(s) {
   return card;
 }
 
-const GLOSSARY = {
-  research: "调研", research_brief: "研究简报",
-  proposal: "提案", proposal_packet: "制作方案",
-  idea: "构思", brief: "创意简报",
-  script: "脚本", scene_plan: "场景计划",
-  assets: "素材", asset_manifest: "素材清单",
-  edit: "剪辑", edit_decisions: "剪辑决策",
-  compose: "合成", render_report: "渲染报告", final_review: "终审",
-  publish: "发布", publish_log: "发布日志",
-  decision_log: "决策日志",
-  artifact: "产物",
-};
-
-const STATUS_LABELS = {
-  pending: "待运行",
-  in_progress: "进行中",
-  awaiting_human: "等待确认",
-  completed: "已完成",
-  failed: "失败",
-  unknown: "未知",
-};
-
 function humanize(value) {
-  const key = String(value || "artifact");
-  return GLOSSARY[key] || key.replaceAll("_", " ");
+  return label(value || "artifact");
 }
 
 function shortText(value, limit = 180) {
@@ -365,7 +343,7 @@ function genericArtifactSummary(artifact) {
   for (const [key, value] of Object.entries(artifact || {})) {
     if (["version", "decision_log_ref"].includes(key)) continue;
     if (["string", "number", "boolean"].includes(typeof value)) {
-      facts.push(reviewFact(humanize(key), shortText(value, 90)));
+      facts.push(reviewFact(label(key), shortText(value, 90)));
     } else if (Array.isArray(value)) {
       facts.push(reviewFact(humanize(key), `${value.length} 项`));
       if (!items.length && value.length) items.push(titledItems(value));
@@ -446,7 +424,7 @@ function artifactReviewContent(name, artifact) {
     return [
       reviewFacts([
         reviewFact("素材数", assets.length),
-        reviewFact("类型", types.join(", ")),
+        reviewFact("类型", types.map(formatToken).join(", ")),
         reviewFact("生成成本", artifact.total_cost_usd != null ? fmtMoney(artifact.total_cost_usd) : null),
       ]),
       titledItems(assets),
@@ -556,7 +534,7 @@ function openScriptModal() {
   if (!script) return;
   modal.innerHTML = "";
   modal.append(
-    el("span", { class: "modal-close", onclick: closeModal }, "ESC · 关闭"),
+    el("span", { class: "modal-close", onclick: closeModal }, "按 Esc 关闭"),
     el("div", { class: "modal-page" },
       el("div", { class: "script-card", style: "cursor:default" },
         el("div", { class: "sp-title" }, script.title || state.title),
@@ -574,7 +552,7 @@ function openNarrModal(card) {
   const meta = [sceneLabel(card.id), card.section_label, fmtDuration(card.duration_seconds)]
     .filter(Boolean).join(" · ");
   modal.append(
-    el("span", { class: "modal-close", onclick: closeModal }, "ESC · 关闭"),
+    el("span", { class: "modal-close", onclick: closeModal }, "按 Esc 关闭"),
     el("div", { class: "modal-page" },
       el("div", { class: "script-card", style: "cursor:default" },
         el("div", { class: "sp-meta" }, meta),
@@ -618,7 +596,7 @@ function renderDecisions(s) {
     const alts = (d.options_considered || [])
       .filter((o) => (o.option_id ?? o.label) !== d.selected && (o.option_id || o.label));
     body.append(el("div", { class: "decision" },
-      el("div", { class: "d-cat" }, `${d.category || "decision"}${d.confidence ? ` · ${d.confidence}` : ""}`,
+      el("div", { class: "d-cat" }, `${label(d.category || "decision")}${d.confidence ? ` · ${formatToken(d.confidence)}` : ""}`,
         revised ? el("span", { class: "d-revised" }, " · 已修订") : null),
       el("div", { class: "d-pick" }, `${d.subject || ""} `, el("span", { class: "arrow" }, "→"), ` ${selLabel}`),
       d.reason ? el("div", { class: "d-why" }, d.reason) : null,
@@ -671,7 +649,7 @@ function renderActivity(s) {
     }
     body.append(el("div", { class: "act-row" },
       el("span", { class: "t" }, fmtClock(ev.ts)),
-      el("span", { class: "tool" }, ev.tool || ""),
+      el("span", { class: "tool" }, toolLabel(ev.tool)),
       el("span", { class: "target" }, ev.scene_id || ""),
       statusEl,
     ));
@@ -688,8 +666,8 @@ function renderActivity(s) {
 function sceneLabel(id) {
   // "sc4" → "SC 04", "scene-11" → "SC 11", anything else → uppercased id
   const m = String(id).match(/(\d+)\s*$/);
-  if (m) return `SC ${m[1].padStart(2, "0")}`;
-  return String(id).toUpperCase().slice(0, 10);
+  if (m) return `场景 ${m[1].padStart(2, "0")}`;
+  return `场景 ${String(id).toUpperCase().slice(0, 10)}`;
 }
 
 function sceneCard(s, card) {
@@ -716,7 +694,7 @@ function sceneCard(s, card) {
   } else if (card.visual && card.visual.exists) {
     const v = card.visual;
     const badge = [v.model || v.source_tool, v.cost_usd != null ? fmtMoney(v.cost_usd) : null,
-      v.quality_score != null ? `q ${v.quality_score}` : null].filter(Boolean).join(" · ");
+      v.quality_score != null ? `质量 ${v.quality_score}` : null].filter(Boolean).join(" · ");
     if (v.type === "video") {
       thumb = el("div", { class: "thumb approved" },
         el("video", { src: mediaURL(s.project_id, v.path), muted: "", preload: "metadata", playsinline: "" }),
@@ -779,7 +757,7 @@ function sceneCard(s, card) {
     wrap.append(el("div", { class: "shotchips", style: "display:flex;flex-wrap:wrap;gap:4px;padding:7px 2px 0" },
       [sl.shot_size, sl.camera_movement, sl.lens_mm ? `${sl.lens_mm}mm` : null, sl.lighting_key]
         .filter(Boolean)
-        .map((t) => el("span", { style: "font-family:var(--mono);font-size:calc(8.5px * var(--fs-scale));letter-spacing:.04em;color:#62626c;border:1px solid #212129;border-radius:3px;padding:1px 5px" }, String(t).replaceAll("_", " ")))));
+        .map((t) => el("span", { style: "font-family:var(--mono);font-size:calc(8.5px * var(--fs-scale));letter-spacing:.04em;color:#62626c;border:1px solid #212129;border-radius:3px;padding:1px 5px" }, shotLabel(t)))));
   }
 
   // takes drawer
@@ -791,7 +769,7 @@ function sceneCard(s, card) {
         || (t.path && t.path === card.visual.path)
         || (t.id && t.id === card.visual.id)
       );
-      const tk = el("span", { class: `tk${isActive ? " active" : ""}`, title: `take ${i + 1}` });
+      const tk = el("span", { class: `tk${isActive ? " active" : ""}`, title: `第 ${i + 1} 个镜头` });
       if (t.exists && t.type === "image") tk.append(el("img", { src: thumbURL(s.project_id, t.path, 320), loading: "lazy", alt: "" }));
       takes.append(tk);
     });
@@ -1078,7 +1056,7 @@ function tickReplay() {
 function render() {
   if (!state) return;
   const s = replay ? stateAt(state, replay.t) : state;
-  document.title = `Backlot — ${s.title}`;
+  document.title = `Backlot · ${s.title}`;
   document.body.classList.toggle("first", firstPaint);
   firstPaint = false;
   app.innerHTML = "";

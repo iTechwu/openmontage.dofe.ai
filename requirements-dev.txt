@@ -4,3 +4,6 @@ pytest>=8.0
 pytest-asyncio>=0.23
 httpx2>=2.0
 requests_mock>=1.12
+# 运行 backlot UI 冒烟测试（tests/backlot/test_ui_bug_bash.py）需要浏览器，装好后执行：
+#   python -m playwright install chromium
+playwright>=1.40

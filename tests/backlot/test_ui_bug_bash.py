@@ -219,7 +219,7 @@ def test_static_navigation_invalid_route_and_active_takes(staged_backlot_server)
                 wait_until="networkidle",
             )
             assert response and response.status == 200
-            assert "PROJECT NOT FOUND" in page.locator("body").inner_text()
+            assert "未找到项目" in page.locator("body").inner_text()
 
             page.goto(staged_backlot_server + "/p/the-last-lighthouse?static=1", wait_until="networkidle")
             page.wait_for_timeout(300)
@@ -250,13 +250,13 @@ def test_every_canonical_gate_promotes_its_artifact_before_approval(
             )
             review = page.locator(f'.approval-review[data-stage="{stage}"]')
             assert review.is_visible()
-            assert review.get_by_text("PENDING APPROVAL", exact=True).is_visible()
+            assert review.get_by_text("待确认", exact=True).is_visible()
             assert "[object Object]" not in review.inner_text()
             artifact = review.locator(f'[data-artifact="{artifact_name}"]')
             assert artifact.is_visible()
             assert visible_text in artifact.inner_text()
 
-            review.get_by_role("button", name="OPEN FULL ARTIFACT").click()
+            review.get_by_role("button", name="打开完整产物").click()
             assert page.locator(".drawer").is_visible()
             assert visible_text in page.locator(".drawer").inner_text()
         finally:
@@ -270,7 +270,7 @@ def test_script_gate_keeps_script_visible_and_marks_pending_approval(staged_back
         try:
             page.goto(staged_backlot_server + "/p/gate-script?static=1", wait_until="networkidle")
             assert page.locator(".script-card").is_visible()
-            assert page.locator(".script-pending").inner_text() == "PENDING APPROVAL"
+            assert page.locator(".script-pending").inner_text() == "待确认"
         finally:
             browser.close()
 
