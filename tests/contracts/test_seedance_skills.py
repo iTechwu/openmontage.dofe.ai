@@ -81,10 +81,29 @@ def test_reviewer_owns_seedance_cross_asset_graph_semantics():
         "observed_state_handoff",
         "extension_depth_and_reanchor",
         "beat_and_identity_continuity",
+        "identity_registry_consistency",
+        "prompt_compilation_trace",
         "reference_binding_matches_preflight",
     ):
         assert f"`{required_check}`" in lineage
     assert "not a Python rule" in lineage
+
+
+def test_seedance_skill_chain_defines_deep_control_artifacts():
+    directing = (ROOT / ".agents/skills/seedance-directing/SKILL.md").read_text()
+    continuity = (ROOT / ".agents/skills/seedance-continuity/SKILL.md").read_text()
+    prompting = (ROOT / ".agents/skills/seedance-prompting/SKILL.md").read_text()
+    quality = (ROOT / ".agents/skills/seedance-quality/SKILL.md").read_text()
+    production = (ROOT / "skills/creative/seedance-production.md").read_text()
+
+    for token in ("identity_registry", "identity_ids", "temporal_beats", "dialogue_beats"):
+        assert token in directing or token in production
+    for token in ("observed_state", "handoff_state", "identity_observations"):
+        assert token in continuity
+        assert token in quality or token in production
+    for token in ("compile_spec", "carrier_coverage", "compression_decisions"):
+        assert token in prompting
+        assert token in production
 
 
 @pytest.mark.parametrize("director_path", SEEDANCE_PIPELINE_DIRECTORS)

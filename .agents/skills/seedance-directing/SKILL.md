@@ -14,16 +14,20 @@ Turn story intent into a shot that can be seen and heard. Do not use
 2. For narrative work, complete the Director's Read in
    [references/shot-contract.md](references/shot-contract.md). For utility work,
    state the concrete demonstration goal and the drama that must not be added.
-3. Choose one felt intent: what the viewer should notice or feel after this
+3. Resolve every recurring subject through `scene_plan.identity_registry` and
+   reference only its stable ID in the scene. Never rewrite identity from memory.
+4. Choose one felt intent: what the viewer should notice or feel after this
    shot that was not true before it.
-4. Give the shot one primary spend: identity, motion, or scene density. Split
+5. Give the shot one primary spend: identity, motion, or scene density. Split
    the shot if all three are required at maximum fidelity.
-5. Make framing, lens, camera movement, blocking, light, performance, sound,
+6. Make framing, lens, camera movement, blocking, light, performance, sound,
    and endpoint serve the same intent.
-6. Translate every abstract idea into a filmable carrier. A hidden conflict may
+7. Translate every abstract idea into a filmable carrier. A hidden conflict may
    become a withheld gesture, interrupted task, eyeline, spatial retreat, or
    contradiction between dialogue and body.
-7. Persist the result in `scene_plan.scenes[].generation_contract`, including
+8. Break the clip into ordered `temporal_beats`. Give each beat one action, one
+   camera phase, one sound phase when relevant, and a completed end state.
+9. Persist the result in `scene_plan.scenes[].generation_contract`, including
    `model_family="seedance"` and the structured `seedance_contract`.
 
 ## Shot Contract
@@ -31,12 +35,14 @@ Turn story intent into a shot that can be seen and heard. Do not use
 Every generated scene must define:
 
 - felt intent and narrative/utility lane;
-- subject identity anchors and immutable attributes;
+- stable `identity_ids`, exact anchors, immutable attributes, and allowed changes;
 - planned start and completed endpoint;
 - one primary action per shot;
-- shot size, subject position, depth, lens feel, and one motivated camera move;
+- shot size, subject position, depth, lens, blocking, camera axis, screen
+  direction, and one motivated camera move;
 - one physically motivated light source and persistent environment;
 - observable performance or material behavior;
+- ordered temporal beats with completed intermediate states;
 - dialogue, ambience, SFX, and music intent;
 - allowed changes and explicit exclusions;
 - primary prompt spend and intentionally economized detail.
@@ -52,11 +58,12 @@ contract when continuity of motion matters more than coverage.
 ## Dialogue And Characters
 
 - Give each speaker a stable screen position, eyeline, physical objective, and
-  short line. Use reaction shots and pauses so dialogue reads as an exchange.
+  short line. Persist turn order, visible reaction, and pause in
+  `dialogue_beats` so dialogue reads as an exchange rather than adjacent lines.
 - Keep one focal performance beat per short clip. Background characters retain
   simple, persistent behavior.
-- Repeat the exact identity anchor in every cold-start shot. Do not rely on
-  pronouns or `the same character` alone.
+- Resolve every cold-start shot from the registry's canonical anchor. Do not
+  rely on pronouns, `the same character`, or a rewritten approximation.
 - For anthropomorphic vehicles, lock body class, silhouette, paint, face
   placement, lights, wheels, damage state, and any post-production plate zone.
 

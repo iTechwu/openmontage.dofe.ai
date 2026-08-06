@@ -14,8 +14,12 @@ Complete these fields internally before drafting a narrative shot:
 8. `suppressed_behavior`: one small visible impulse that is contained or leaks.
 9. `specific_detail`: one source-bound or deliberately authored detail that a
    generic version of this story could not reuse unchanged.
-10. `stock_solution_refused`: the easiest genre shortcut and the concrete
+10. `specific_detail_provenance` and `specific_detail_source`: distinguish
+    source evidence from an authored choice; never pass invention off as canon.
+11. `stock_solution_refused`: the easiest genre shortcut and the concrete
     replacement used instead.
+12. `value_before` and `value_after`: distinct viewer-legible states that prove
+    the turn happened.
 
 Do not copy these labels into the final generation prompt. Translate them into
 blocking, action, eyeline, prop use, distance, light, dialogue contradiction,
@@ -31,6 +35,13 @@ psychology or conflict.
 
 For each craft choice, finish the sentence: `This choice exists because the
 shot must...`. Replace any choice that cannot be tied to the felt intent.
+
+## Temporal Beat Check
+
+Write ordered beat records before prompt prose. Each beat has one filmable
+action, one camera phase, an optional sound phase, and a completed end state.
+For dialogue, record speaker identity ID, screen position, eyeline, visible
+reaction, and pause. Split the clip when two actions need to own the same time.
 
 ## Allocation Check
 

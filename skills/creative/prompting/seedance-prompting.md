@@ -24,11 +24,15 @@ belong to the selected tool's live registry contract.
 ## Prompt Boundary
 
 Compile from `scene_plan.scenes[].generation_contract`, not from a free-form
-scene description. Keep exact surface-specific reference tokens, one primary
-action and motivated camera move per short shot, concrete light/performance/
-sound carriers, continuity locks, completed/reserved beat exclusions, and a
-completed endpoint. Required text, logos, plates, and subtitles stay in post.
+scene description. Resolve `identity_ids` through the project identity registry,
+compile ordered temporal/dialogue beats, and build `prompt_review.compile_spec`
+before final prose. Keep exact preflight-approved reference emissions, one
+primary action and motivated camera move per short shot, concrete
+light/performance/sound carriers, continuity locks, completed/reserved beat
+exclusions, and a completed endpoint. Required text, logos, plates, and
+subtitles stay in post.
 
-For a connected sequence, only an accepted observed state may open the next
-prompt. Store the preflight in `prompt_review`, inspect the generated media, and
-store the canon decision in `take_review` before compiling another clip.
+For a connected sequence, only an accepted seven-dimensional observed state may
+open the next prompt. Store the preflight and compile trace in `prompt_review`,
+inspect the generated media, then store identity observations, structured state,
+and the canon decision in `take_review` before compiling another clip.

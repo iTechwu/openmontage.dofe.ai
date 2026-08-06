@@ -7,10 +7,10 @@ JSON Schema alone cannot establish these graph-wide facts.
 ## Evidence Set
 
 Load the current `scene_plan`, `asset_manifest`, every Seedance
-`prompt_review.provider_preflight`, every `take_review`, and the current
-checkpoint history. Review only recorded facts. If media or state cannot be
-inspected, record an `investigation` with the uncertainty instead of inventing
-an observation.
+`identity_registry`, every `prompt_review` and provider preflight, every
+`take_review`, and the current checkpoint history. Review only recorded facts.
+If media or state cannot be inspected, record an `investigation` with the
+uncertainty instead of inventing an observation.
 
 ## Build The Graph Inventory
 
@@ -36,14 +36,23 @@ Record a concrete asset/scene-ID-based evidence sentence for every check:
   `accepted_with_deviation`, has `accepted_as_canon=true`, and carries an actual
   observed end state.
 - `observed_state_handoff`: the child's `observed_start_state` and prompt use
-  the accepted parent's actual visual, motion, camera, light, prop, damage, and
-  audio state. Record meaningful deviations.
+  the accepted parent's actual subjects, props, environment, camera, lighting,
+  audio, and open motion. Compare the parent's `take_review.observed_state` with
+  the child's `continuity_state.handoff_state` dimension by dimension and record
+  meaningful deviations.
 - `extension_depth_and_reanchor`: output-sourced depth advances consistently;
   re-anchor resets to canonical references at depth zero; depth three does not
   silently continue.
 - `beat_and_identity_continuity`: completed beats do not replay, reserved beats
   do not leak, and identity/geography/prop ownership changes are either locked
   or explicitly approved. This is a reviewer judgment, not a Python rule.
+- `identity_registry_consistency`: every scene and take identity ID resolves to
+  exactly one registry entry; canonical anchors, immutable traits, reference
+  tags, allowed changes, and reported deviations agree across the sequence.
+- `prompt_compilation_trace`: each Seedance asset records a surface profile,
+  ordered sections, honest reference emissions, coverage for every prompt
+  carrier, compression decisions, and the exact endpoint clause; the final
+  prompt does not claim provider syntax outside preflight.
 - `reference_binding_matches_preflight`: every scene reference role uses a mode
   supported by its stored provider preflight. Prompt tokens require an exact
   declared provider syntax; otherwise the binding must be an input parameter.

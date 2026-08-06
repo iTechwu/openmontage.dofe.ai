@@ -11,17 +11,34 @@ Read [seedance-provider](../seedance-provider/SKILL.md) and
 [seedance-quality](../seedance-quality/SKILL.md) before a paid call or after a
 failed take.
 
+## Compile Contract
+
+Build `asset_manifest.assets[].prompt_review.compile_spec` before prose. Record:
+
+- language and continuous-take or multi-shot structure;
+- whether opening state comes from the first plan, accepted video, accepted
+  final frame, or an observed description without attached media;
+- the preflight-verified surface profile, or a named conservative profile when
+  live verification is unavailable;
+- ordered prompt sections, exact reference emissions, `carrier_coverage`,
+  `compression_decisions`, and the endpoint clause.
+
+The compile spec is provider-neutral. Never invent a model field, reference
+token, or limit in it; provider preflight remains authoritative.
+
 ## Compile Order
 
 1. Reference roles and exact tags.
 2. Opening state that attached media cannot carry.
-3. Current clip action and observable performance.
-4. Framing, lens feel, camera behavior, and screen direction.
-5. Physically motivated light, persistent environment, and style constraints.
-6. Dialogue, ambience, SFX, and approved music intent.
-7. Identity and continuity locks plus allowed changes.
-8. Completed/reserved beat exclusions.
-9. The precise visual endpoint: `Stop when...`.
+3. Stable identity locks resolved from `identity_ids` and the canonical registry.
+4. Current clip `temporal_beats` and observable performance in order.
+5. Framing, lens, blocking, camera axis, camera behavior, and screen direction.
+6. Physically motivated light, persistent environment, and style constraints.
+7. Ordered dialogue turns, visible reactions, pauses, ambience, SFX, and
+   approved music intent.
+8. Continuity locks plus allowed changes.
+9. Completed/reserved beat exclusions.
+10. The precise visual endpoint: `Stop when...`.
 
 Use only the current clip. Do not include the full story or future prompts.
 
@@ -42,6 +59,8 @@ Do not mix both structures.
   mood adjectives.
 - Give each shot one primary action and one camera move.
 - Repeat immutable identity anchors verbatim across independent shot blocks.
+- Do not paraphrase the identity bible differently between clips. Resolve the
+  registry entry once, then reuse its canonical anchor and risk-specific locks.
 - Keep dialogue short, assign every line to a visible speaker, and specify the
   reaction/pause that makes the exchange readable.
 - Preserve the selected surface's exact reference tags and explicitly block
@@ -51,12 +70,16 @@ Do not mix both structures.
 - If a source clip is attached, let it carry visible state; text describes the
   delta, open motion, endpoint, and known drift risks.
 - Move plates, logos, subtitles, HUDs, and required text to post.
+- Ensure every stored prompt carrier has a concrete `emitted_as` entry. Do not
+  claim coverage from comments, labels, metadata, or text omitted by compression.
 
 ## Chinese Prompts
 
 Write compact native Chinese rather than translating English word-for-word.
 Use this order: `镜头结构 -> 参考职责 -> 主体锁定 -> 动作节拍 -> 镜头 -> 光线与环境 -> 声音 -> 约束 -> 结束状态`.
 Keep provider reference tags unchanged even when surrounding prose is Chinese.
+Write dialogue as speaker-owned turns with an observable reaction and pause;
+do not concatenate lines into narration-like prose.
 
 Example shape:
 
