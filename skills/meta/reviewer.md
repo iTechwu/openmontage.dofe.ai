@@ -141,6 +141,19 @@ Structure your review as:
 | compose | Playability, duration accuracy, audio quality, pre-compose validation pass |
 | publish | SEO quality, metadata completeness, export packaging |
 
+## Seedance Cross-Asset Lineage Review
+
+At the `assets` stage, if any asset has `model_family="seedance"`, read and run
+[`seedance-lineage-review.md`](seedance-lineage-review.md). This review is
+mandatory even for a standalone clip: standalone graphs record their root and
+mark edge-only checks not applicable with evidence. Persist the result in
+`asset_manifest.lineage_review` before checkpointing.
+
+The Schema proves only that this review record is complete. The reviewer must
+inspect the cross-artifact graph for duplicate IDs, missing/future parents,
+cycles, accepted observed-state authority, depth/re-anchor consistency, beat or
+identity drift, and reference binding against the stored provider preflight.
+
 ## Reference Alignment Review
 
 Run at **every stage** when a VideoAnalysisBrief exists (reference-driven production).

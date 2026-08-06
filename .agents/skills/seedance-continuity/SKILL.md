@@ -70,6 +70,12 @@ persist accepted-take review in `asset_manifest.assets[].take_review`. Keep
 `extension_depth`, source status, observation confidence, uncertainties, and
 re-anchor decisions synchronized across both artifacts.
 
+Before the assets checkpoint, run the OpenMontage reviewer extension at
+`skills/meta/seedance-lineage-review.md` and persist its graph inventory in
+`asset_manifest.lineage_review`. Schema validation is record-local and never
+replaces the reviewer checks for parent existence/order, cycles, accepted-state
+authority, beat leakage, identity drift, or reference/preflight agreement.
+
 Derived from MIT-licensed
 [`Emily2040/seedance-2.0`](https://github.com/Emily2040/seedance-2.0); license is
 retained at `../seedance-provider/LICENSE`.

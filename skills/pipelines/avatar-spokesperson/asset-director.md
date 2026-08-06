@@ -16,7 +16,9 @@ This stage prepares the actual spokesperson ingredients: narration, avatar or li
 
 When `video_selector` ranks a Seedance model for a support visual, follow the
 Layer 2 route before prompt authoring and persist its prompt/take audit fields in
-the asset manifest.
+the asset manifest. Run selector `preflight` before the paid call, store the
+report in `prompt_review`, and run `skills/meta/seedance-lineage-review.md`
+before checkpointing.
 
 ## Process
 

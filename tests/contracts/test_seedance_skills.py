@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -66,6 +67,26 @@ def test_seedance_derivatives_retain_upstream_mit_license():
     assert "Iamemily2050" in license_text
 
 
+def test_reviewer_owns_seedance_cross_asset_graph_semantics():
+    reviewer = (ROOT / "skills" / "meta" / "reviewer.md").read_text()
+    lineage = (ROOT / "skills" / "meta" / "seedance-lineage-review.md").read_text()
+
+    assert "seedance-lineage-review.md" in reviewer
+    assert "asset_manifest.lineage_review" in lineage
+    for required_check in (
+        "parent_exists",
+        "parent_precedes_child",
+        "acyclic",
+        "accepted_parent_authority",
+        "observed_state_handoff",
+        "extension_depth_and_reanchor",
+        "beat_and_identity_continuity",
+        "reference_binding_matches_preflight",
+    ):
+        assert f"`{required_check}`" in lineage
+    assert "not a Python rule" in lineage
+
+
 @pytest.mark.parametrize("director_path", SEEDANCE_PIPELINE_DIRECTORS)
 def test_video_pipelines_route_seedance_through_shared_production_contract(director_path: str):
     content = (ROOT / director_path).read_text()
@@ -89,6 +110,7 @@ def test_video_pipeline_manifests_enforce_seedance_stage_facts(pipeline_name: st
     assert "Seedance" in asset_text
     assert "prompt_review" in asset_text
     assert "take_review" in asset_text
+    assert "lineage_review" in asset_text
 
 
 @pytest.mark.parametrize(
@@ -204,6 +226,26 @@ def test_provider_preflight_blocks_undeclared_prompt_token_syntax(monkeypatch):
 
     assert report["status"] == "blocked"
     assert any("prompt-token syntax" in error["message"] for error in report["errors"])
+
+
+def test_runtime_provider_preflight_matches_asset_contract(monkeypatch):
+    monkeypatch.setenv("RUNWAY_API_KEY", "test-key")
+    report = RunwayVideo().preflight(
+        {
+            "prompt": "A car enters frame.",
+            "operation": "text_to_video",
+            "model": "seedance_2.0",
+            "duration": 5,
+            "ratio": "16:9",
+            "execution_scope": "sample",
+        },
+        live=False,
+    )
+    asset_schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "asset_manifest.schema.json").read_text()
+    )
+
+    Draft202012Validator(asset_schema["$defs"]["providerPreflight"]).validate(report)
 
 
 def test_selector_preflight_resolves_provider_without_generation(monkeypatch):
@@ -419,6 +461,79 @@ def test_scene_plan_accepts_seedance_generation_contract():
     Draft202012Validator(schema).validate(artifact)
 
 
+def _provider_preflight_report() -> dict:
+    return {
+        "status": "passed",
+        "verification_level": "declared_tool_contract",
+        "tool": "dofe_video",
+        "provider": "dofe",
+        "tool_version": "0.1.0",
+        "tool_status": "available",
+        "operation": "reference_to_video",
+        "execution_scope": "sample",
+        "degraded_preflight_approved": False,
+        "model_selection": {"field": "model_name", "value": "seedance-2.0-fast"},
+        "input_schema_fingerprint": "0123456789abcdef",
+        "declared_input_fields": ["model_name", "operation", "prompt"],
+        "resolved_input_fields": ["model_name", "operation", "prompt"],
+        "reference_binding": {
+            "requested_modes": ["input_parameter"],
+            "supported_modes": ["input_parameter"],
+            "input_fields": ["reference_image_urls"],
+            "prompt_token_syntax": None,
+        },
+        "live_probe": {
+            "status": "not_requested",
+            "verification_scope": [],
+            "warnings": [],
+            "errors": [],
+        },
+        "errors": [],
+        "warnings": [],
+        "would_execute": True,
+    }
+
+
+def _standalone_lineage_review(asset_id: str) -> dict:
+    not_applicable = {
+        "status": "not_applicable",
+        "evidence": f"{asset_id} is a standalone root with no parent edge.",
+    }
+    return {
+        "decision": "pass",
+        "reviewed_asset_ids": [asset_id],
+        "roots": [asset_id],
+        "edges": [],
+        "checks": {
+            "unique_ids": {
+                "status": "pass",
+                "evidence": f"{asset_id} occurs exactly once in the current manifest.",
+            },
+            "parent_exists": dict(not_applicable),
+            "parent_precedes_child": dict(not_applicable),
+            "acyclic": {
+                "status": "pass",
+                "evidence": f"Walking {asset_id} reaches its root without revisiting an asset.",
+            },
+            "accepted_parent_authority": dict(not_applicable),
+            "observed_state_handoff": dict(not_applicable),
+            "extension_depth_and_reanchor": {
+                "status": "pass",
+                "evidence": f"{asset_id} is a root at extension depth zero.",
+            },
+            "beat_and_identity_continuity": {
+                "status": "pass",
+                "evidence": f"{asset_id} establishes canon and does not replay a prior beat.",
+            },
+            "reference_binding_matches_preflight": {
+                "status": "pass",
+                "evidence": f"{asset_id} uses the preflight-declared input_parameter binding.",
+            },
+        },
+        "findings": [],
+    }
+
+
 def test_asset_manifest_accepts_prompt_and_take_reviews():
     schema = json.loads(
         (ROOT / "schemas" / "artifacts" / "asset_manifest.schema.json").read_text()
@@ -448,6 +563,7 @@ def test_asset_manifest_accepts_prompt_and_take_reviews():
                     ],
                     "continuity_checked": True,
                     "reference_roles_checked": True,
+                    "provider_preflight": _provider_preflight_report(),
                 },
                 "take_review": {
                     "decision": "keep",
@@ -462,9 +578,72 @@ def test_asset_manifest_accepts_prompt_and_take_reviews():
                 },
             }
         ],
+        "lineage_review": _standalone_lineage_review("clip-01-take-01"),
     }
 
     Draft202012Validator(schema).validate(artifact)
+
+
+def test_seedance_asset_requires_provider_preflight_and_lineage_review():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "asset_manifest.schema.json").read_text()
+    )
+    asset = {
+        "id": "clip-01-take-01",
+        "type": "video",
+        "path": "assets/video/clip-01-take-01.mp4",
+        "source_tool": "dofe_video",
+        "scene_id": "clip-01",
+        "model_family": "seedance",
+        "provider": "dofe",
+        "model": "seedance-2.0-fast",
+        "prompt_review": {
+            "draft": "draft",
+            "final": "final",
+            "skills_applied": list(SKILL_NAMES),
+            "continuity_checked": True,
+            "reference_roles_checked": True,
+            "provider_preflight": _provider_preflight_report(),
+        },
+        "take_review": {
+            "decision": "keep",
+            "issues": [],
+            "accepted_as_canon": True,
+            "canon_status": "accepted",
+            "observed_end_state": "SUV stops at the tunnel exit.",
+            "extension_depth": 0,
+            "observation_confidence": "high",
+            "uncertainties": [],
+            "next_action": "Review the next scene contract.",
+        },
+    }
+    valid = {
+        "version": "1.0",
+        "assets": [asset],
+        "lineage_review": _standalone_lineage_review(asset["id"]),
+    }
+    Draft202012Validator(schema).validate(valid)
+
+    missing_preflight = deepcopy(valid)
+    del missing_preflight["assets"][0]["prompt_review"]["provider_preflight"]
+    assert any(
+        "provider_preflight" in error.message
+        for error in Draft202012Validator(schema).iter_errors(missing_preflight)
+    )
+
+    missing_lineage = deepcopy(valid)
+    del missing_lineage["lineage_review"]
+    assert any(
+        "lineage_review" in error.message
+        for error in Draft202012Validator(schema).iter_errors(missing_lineage)
+    )
+
+    inconsistent_pass = deepcopy(valid)
+    inconsistent_pass["lineage_review"]["checks"]["acyclic"] = {
+        "status": "fail",
+        "evidence": "clip-01-take-01 points back to itself.",
+    }
+    assert list(Draft202012Validator(schema).iter_errors(inconsistent_pass))
 
 
 def test_seedance_generation_contract_rejects_incomplete_directors_read():
@@ -545,6 +724,7 @@ def test_seedance_keep_decision_must_enter_canon():
                     "skills_applied": list(SKILL_NAMES),
                     "continuity_checked": True,
                     "reference_roles_checked": True,
+                    "provider_preflight": _provider_preflight_report(),
                 },
                 "take_review": {
                     "decision": "keep",
@@ -558,6 +738,7 @@ def test_seedance_keep_decision_must_enter_canon():
                 },
             }
         ],
+        "lineage_review": _standalone_lineage_review("take-01"),
     }
 
     assert list(Draft202012Validator(schema).iter_errors(artifact))
@@ -741,6 +922,7 @@ def test_seedance_asset_requires_full_skill_and_check_audit():
                     "skills_applied": ["seedance-prompting", "seedance-quality"],
                     "continuity_checked": False,
                     "reference_roles_checked": False,
+                    "provider_preflight": _provider_preflight_report(),
                 },
                 "take_review": {
                     "decision": "reject",
@@ -754,6 +936,7 @@ def test_seedance_asset_requires_full_skill_and_check_audit():
                 },
             }
         ],
+        "lineage_review": _standalone_lineage_review("take-01"),
     }
 
     assert list(Draft202012Validator(schema).iter_errors(artifact))

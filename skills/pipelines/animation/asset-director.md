@@ -37,7 +37,9 @@ Quick routing for common animation-pipeline needs:
 For a selected Seedance model, follow
 `skills/creative/seedance-production.md`. Rank before prompt authoring, read the
 input-aware Layer 3 skill list, and persist `model_family`, `prompt_review`, and
-`take_review` for every generated clip.
+`take_review` for every generated clip. Run selector `preflight` before each
+paid call and store it as `prompt_review.provider_preflight`. Before checkpoint,
+run `skills/meta/seedance-lineage-review.md` and persist `lineage_review`.
 
 ## Process
 

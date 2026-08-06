@@ -5,6 +5,100 @@
   "description": "Inventory of generated/sourced assets produced by the Asset Generator.",
   "type": "object",
   "required": ["version", "assets"],
+  "$defs": {
+    "providerPreflight": {
+      "type": "object",
+      "required": [
+        "status",
+        "verification_level",
+        "tool",
+        "provider",
+        "tool_version",
+        "tool_status",
+        "operation",
+        "execution_scope",
+        "degraded_preflight_approved",
+        "input_schema_fingerprint",
+        "reference_binding",
+        "live_probe",
+        "errors",
+        "warnings",
+        "would_execute"
+      ],
+      "properties": {
+        "status": { "type": "string", "enum": ["passed", "degraded", "blocked"] },
+        "verification_level": {
+          "type": "string",
+          "enum": ["declared_tool_contract", "live_provider_contract"]
+        },
+        "tool": { "type": "string", "minLength": 1 },
+        "provider": { "type": "string", "minLength": 1 },
+        "tool_version": { "type": "string", "minLength": 1 },
+        "tool_status": { "type": "string", "enum": ["available", "degraded", "unavailable"] },
+        "operation": { "type": "string", "minLength": 1 },
+        "execution_scope": { "type": "string", "enum": ["sample", "batch"] },
+        "degraded_preflight_approved": { "type": "boolean" },
+        "model_selection": {
+          "type": ["object", "null"],
+          "properties": {
+            "field": { "type": "string", "minLength": 1 },
+            "value": {}
+          },
+          "required": ["field", "value"],
+          "additionalProperties": false
+        },
+        "input_schema_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "declared_input_fields": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "resolved_input_fields": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "reference_binding": {
+          "type": "object",
+          "required": ["requested_modes", "supported_modes", "input_fields", "prompt_token_syntax"],
+          "properties": {
+            "requested_modes": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+            "supported_modes": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+            "input_fields": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+            "prompt_token_syntax": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        },
+        "live_probe": {
+          "type": "object",
+          "required": ["status", "verification_scope", "warnings", "errors"],
+          "properties": {
+            "status": { "type": "string", "enum": ["passed", "blocked", "unverified", "not_supported", "not_requested"] },
+            "verification_scope": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+            "warnings": { "type": "array", "items": { "type": "string" } },
+            "errors": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": true
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "message"],
+            "properties": {
+              "path": { "type": "string" },
+              "message": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "warnings": { "type": "array", "items": { "type": "string" } },
+        "would_execute": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "lineageCheck": {
+      "type": "object",
+      "required": ["status", "evidence"],
+      "properties": {
+        "status": { "type": "string", "enum": ["pass", "fail", "not_applicable"] },
+        "evidence": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    }
+  },
   "properties": {
     "version": { "type": "string", "const": "1.0" },
     "assets": {
@@ -51,7 +145,8 @@
                 "uniqueItems": true
               },
               "continuity_checked": { "type": "boolean" },
-              "reference_roles_checked": { "type": "boolean" }
+              "reference_roles_checked": { "type": "boolean" },
+              "provider_preflight": { "$ref": "#/$defs/providerPreflight" }
             },
             "additionalProperties": false
           },
@@ -146,7 +241,14 @@
               "required": ["provider", "model", "prompt_review", "take_review"],
               "properties": {
                 "prompt_review": {
+                  "required": ["provider_preflight"],
                   "properties": {
+                    "provider_preflight": {
+                      "properties": {
+                        "status": { "enum": ["passed", "degraded"] },
+                        "would_execute": { "const": true }
+                      }
+                    },
                     "skills_applied": {
                       "allOf": [
                         { "contains": { "const": "seedance-provider" } },
@@ -176,7 +278,126 @@
       }
     },
     "total_cost_usd": { "type": "number", "minimum": 0 },
+    "lineage_review": {
+      "type": "object",
+      "description": "Reviewer-authored cross-asset graph inventory and evidence. The schema validates the record shape, not the truth of the graph claims.",
+      "required": ["decision", "reviewed_asset_ids", "roots", "edges", "checks", "findings"],
+      "properties": {
+        "decision": { "type": "string", "enum": ["pass", "revise", "pass_with_warnings"] },
+        "reviewed_asset_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "roots": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["parent_asset_id", "child_asset_id", "parent_scene_id", "child_scene_id"],
+            "properties": {
+              "parent_asset_id": { "type": "string", "minLength": 1 },
+              "child_asset_id": { "type": "string", "minLength": 1 },
+              "parent_scene_id": { "type": "string", "minLength": 1 },
+              "child_scene_id": { "type": "string", "minLength": 1 },
+              "relationship": {
+                "type": "string",
+                "enum": ["seamless_continuation", "intentional_next_shot", "bridge_between_known_states", "repair_tail"]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "checks": {
+          "type": "object",
+          "required": [
+            "unique_ids",
+            "parent_exists",
+            "parent_precedes_child",
+            "acyclic",
+            "accepted_parent_authority",
+            "observed_state_handoff",
+            "extension_depth_and_reanchor",
+            "beat_and_identity_continuity",
+            "reference_binding_matches_preflight"
+          ],
+          "properties": {
+            "unique_ids": { "$ref": "#/$defs/lineageCheck" },
+            "parent_exists": { "$ref": "#/$defs/lineageCheck" },
+            "parent_precedes_child": { "$ref": "#/$defs/lineageCheck" },
+            "acyclic": { "$ref": "#/$defs/lineageCheck" },
+            "accepted_parent_authority": { "$ref": "#/$defs/lineageCheck" },
+            "observed_state_handoff": { "$ref": "#/$defs/lineageCheck" },
+            "extension_depth_and_reanchor": { "$ref": "#/$defs/lineageCheck" },
+            "beat_and_identity_continuity": { "$ref": "#/$defs/lineageCheck" },
+            "reference_binding_matches_preflight": { "$ref": "#/$defs/lineageCheck" }
+          },
+          "additionalProperties": false
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["severity", "asset_ids", "description", "status"],
+            "properties": {
+              "severity": { "type": "string", "enum": ["critical", "suggestion", "nitpick", "investigation"] },
+              "asset_ids": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+              "description": { "type": "string", "minLength": 1 },
+              "proposed_fix": { "type": "string", "minLength": 1 },
+              "status": { "type": "string", "enum": ["pending", "fixed", "accepted", "deferred"] }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "decision": { "const": "pass" } }, "required": ["decision"] },
+          "then": {
+            "properties": {
+              "checks": {
+                "properties": {
+                  "unique_ids": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
+                  "parent_exists": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
+                  "parent_precedes_child": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
+                  "acyclic": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
+                  "accepted_parent_authority": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
+                  "observed_state_handoff": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
+                  "extension_depth_and_reanchor": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
+                  "beat_and_identity_continuity": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
+                  "reference_binding_matches_preflight": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
     "metadata": { "type": "object" }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "assets": {
+            "contains": {
+              "type": "object",
+              "properties": { "model_family": { "const": "seedance" } },
+              "required": ["model_family"]
+            }
+          }
+        },
+        "required": ["assets"]
+      },
+      "then": { "required": ["lineage_review"] }
+    }
+  ],
   "additionalProperties": false
 }

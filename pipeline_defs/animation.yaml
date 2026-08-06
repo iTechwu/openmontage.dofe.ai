@@ -207,11 +207,13 @@ stages:
       - "Use selector tools (video_selector, tts_selector, image_selector) — never call provider tools directly"
       - "Read Layer 2 skills for each tool BEFORE reading source code — skills contain usage guidance, source code is implementation detail"
       - Selected Seedance assets record all five functional skills, completed prompt checks, and a consistent take/canon review
+      - Seedance lineage_review inventories all roots and edges and records evidence for parent order, cycles, accepted-state handoffs, depth, beats, identity, and provider binding
     success_criteria:
       - Schema-valid asset_manifest artifact
       - All referenced asset files exist on disk
       - layer3_skills_read list is present and includes all tools used for generation
       - Every selected Seedance video records model_family, full prompt_review, and a consistent take_review canon decision
+      - Every Seedance run records a complete lineage_review with no unresolved critical graph finding before checkpoint approval
 
   - name: edit
     skill: pipelines/animation/edit-director

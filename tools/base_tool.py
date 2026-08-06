@@ -600,6 +600,10 @@ class BaseTool(ABC):
             "tool_version": self.version,
             "tool_status": tool_status,
             "operation": operation,
+            "execution_scope": str(resolved.get("execution_scope") or "sample"),
+            "degraded_preflight_approved": bool(
+                resolved.get("allow_degraded_preflight", False)
+            ),
             "model_selection": model_selection,
             "input_schema_fingerprint": schema_fingerprint,
             "declared_input_fields": sorted(properties),

@@ -37,7 +37,9 @@ Quick routing for common explainer needs:
 For any Seedance finalist, follow `skills/creative/seedance-production.md`.
 Call `video_selector` in rank mode before final prompt authoring, read the
 input-aware skill chain, then store the compiled prompt audit and take/canon
-review required by `asset_manifest.schema.json`.
+review required by `asset_manifest.schema.json`. Run selector `preflight` before
+each paid call, store the report in `prompt_review`, then run
+`skills/meta/seedance-lineage-review.md` before checkpointing.
 
 ## Process
 

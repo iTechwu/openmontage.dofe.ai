@@ -15,7 +15,9 @@ This stage prepares the support kit around the anchor edit: subtitles, diagrams,
 
 For Seedance-generated inserts, follow
 `skills/creative/seedance-production.md`. Rank before prompt authoring, preserve
-source/reference authority, and record the required prompt and take reviews.
+source/reference authority, run selector `preflight` before spending, and record
+the required prompt and take reviews. Before checkpointing, run
+`skills/meta/seedance-lineage-review.md` and persist `lineage_review`.
 
 ## Process
 

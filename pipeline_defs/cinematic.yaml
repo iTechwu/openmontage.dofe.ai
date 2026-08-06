@@ -195,10 +195,12 @@ stages:
       - Optional generated inserts stay limited and justified
       - Seedance prompts pass provider, continuity, and reference-role preflight
       - Every Seedance take records a keep, post-fix, reroll, rewrite, re-anchor, or reject decision
+      - Seedance lineage_review inventories all roots and edges and records evidence for parent order, cycles, accepted-state handoffs, depth, beats, identity, and provider binding
     success_criteria:
       - Schema-valid asset_manifest artifact
       - All referenced asset files exist on disk
       - Every selected Seedance video records model_family, full prompt_review, and a consistent take_review canon decision
+      - Every Seedance run records a complete lineage_review with no unresolved critical graph finding before checkpoint approval
 
   - name: edit
     skill: pipelines/cinematic/edit-director

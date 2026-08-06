@@ -132,10 +132,12 @@ stages:
       - Narration, subtitle, and background assets are aligned
       - Blocked paths are recorded instead of hidden
       - Selected Seedance support assets record all five functional skills, completed prompt checks, and a consistent take/canon review
+      - Seedance lineage_review inventories all roots and edges and records evidence for parent order, cycles, accepted-state handoffs, depth, beats, identity, and provider binding
     success_criteria:
       - Schema-valid asset_manifest artifact
       - All referenced asset files exist on disk
       - Every selected Seedance video records model_family, full prompt_review, and a consistent take_review canon decision
+      - Every Seedance run records a complete lineage_review with no unresolved critical graph finding before checkpoint approval
 
   - name: edit
     skill: pipelines/avatar-spokesperson/edit-director

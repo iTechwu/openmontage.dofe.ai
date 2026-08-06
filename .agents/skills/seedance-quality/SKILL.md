@@ -64,6 +64,12 @@ in `asset_manifest.assets[].take_review`. A `keep` decision must set
 and reject decisions must remain `not_accepted`. An accepted deviation uses
 `canon_status=accepted_with_deviation` and records the actual endpoint.
 
+After all current takes are recorded, run
+`skills/meta/seedance-lineage-review.md`. Do not infer that individually valid
+take reviews form a valid sequence: the reviewer must inventory roots and edges,
+walk parent chains, compare observed handoffs, and record the result in
+`asset_manifest.lineage_review`.
+
 Derived from MIT-licensed
 [`Emily2040/seedance-2.0`](https://github.com/Emily2040/seedance-2.0); license is
 retained at `../seedance-provider/LICENSE`.
