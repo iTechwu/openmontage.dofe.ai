@@ -75,6 +75,36 @@
         "open_motion": { "type": "string", "minLength": 1 }
       },
       "additionalProperties": false
+    },
+    "narrativeAuthoringState": {
+      "type": "object",
+      "description": "Field whitelist for a narrative-lane authoring_state; mutual exclusion is expressed by additionalProperties, not a field count.",
+      "properties": {
+        "dramatic_function": { "type": "string", "minLength": 1 },
+        "turn": { "type": "string", "minLength": 1 },
+        "pov": { "type": "string", "minLength": 1 },
+        "power_shift": { "type": "string", "minLength": 1 },
+        "objective": { "type": "string", "minLength": 1 },
+        "obstacle_and_tactic": { "type": "string", "minLength": 1 },
+        "subtext": { "type": "string", "minLength": 1 },
+        "suppressed_behavior": { "type": "string", "minLength": 1 },
+        "specific_detail": { "type": "string", "minLength": 1 },
+        "specific_detail_provenance": { "type": "string", "enum": ["source_bound", "authored_choice"] },
+        "specific_detail_source": { "type": ["string", "null"] },
+        "stock_solution_refused": { "type": "string", "minLength": 1 },
+        "value_before": { "type": "string", "minLength": 1 },
+        "value_after": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "utilityAuthoringState": {
+      "type": "object",
+      "description": "Field whitelist for a utility-lane authoring_state.",
+      "properties": {
+        "utility_intent": { "type": "string", "minLength": 1 },
+        "non_narrative_refusal": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
     }
   },
   "properties": {
@@ -351,6 +381,7 @@
                     "then": {
                       "properties": {
                         "authoring_state": {
+                          "$ref": "#/$defs/narrativeAuthoringState",
                           "required": [
                             "dramatic_function",
                             "turn",
@@ -372,6 +403,7 @@
                     "then": {
                       "properties": {
                         "authoring_state": {
+                          "$ref": "#/$defs/utilityAuthoringState",
                           "required": ["utility_intent", "non_narrative_refusal"]
                         }
                       }
@@ -427,7 +459,6 @@
                                   "value_before",
                                   "value_after"
                                 ],
-                                "maxProperties": 14,
                                 "allOf": [
                                   {
                                     "if": {
@@ -451,14 +482,6 @@
                                   }
                                 ]
                               }
-                            }
-                          }
-                        },
-                        {
-                          "if": { "properties": { "lane": { "const": "utility" } }, "required": ["lane"] },
-                          "then": {
-                            "properties": {
-                              "authoring_state": { "maxProperties": 2 }
                             }
                           }
                         }
