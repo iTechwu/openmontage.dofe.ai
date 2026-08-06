@@ -494,7 +494,16 @@
               "proposed_fix": { "type": "string", "minLength": 1 },
               "status": { "type": "string", "enum": ["pending", "fixed", "accepted", "deferred"] }
             },
-            "additionalProperties": false
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": { "severity": { "const": "critical" } },
+                  "required": ["severity"]
+                },
+                "then": { "required": ["proposed_fix"] }
+              }
+            ]
           }
         }
       },
@@ -534,6 +543,18 @@
                   "prompt_compilation_trace": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
                   "temporal_structure": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
                   "reference_binding_matches_preflight": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } }
+                }
+              },
+              "findings": {
+                "not": {
+                  "contains": {
+                    "type": "object",
+                    "properties": {
+                      "severity": { "const": "critical" },
+                      "status": { "const": "pending" }
+                    },
+                    "required": ["severity", "status"]
+                  }
                 }
               }
             }

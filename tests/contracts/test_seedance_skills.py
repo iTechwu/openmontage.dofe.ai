@@ -1102,6 +1102,67 @@ def test_legacy_seedance_asset_contract_remains_readable():
     Draft202012Validator(schema).validate(artifact)
 
 
+def _minimal_generic_manifest(asset_id: str = "generic-01") -> dict:
+    """Generic asset + a passing standalone lineage review.
+
+    The findings/decision constraints live inside ``lineage_review`` and do not
+    depend on the Seedance version, so a generic asset is enough to exercise them
+    while keeping the fixture small.
+    """
+    return {
+        "version": "1.0",
+        "assets": [
+            {
+                "id": asset_id,
+                "type": "video",
+                "path": f"assets/video/{asset_id}.mp4",
+                "source_tool": "veo_video",
+                "scene_id": "scene-01",
+                "model_family": "generic",
+            }
+        ],
+        "lineage_review": _standalone_lineage_review(asset_id),
+    }
+
+
+def test_lineage_review_pass_rejects_pending_critical_finding():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "asset_manifest.schema.json").read_text()
+    )
+    manifest = _minimal_generic_manifest()
+    Draft202012Validator(schema).validate(manifest)  # baseline passes
+
+    manifest["lineage_review"]["findings"].append(
+        {
+            "severity": "critical",
+            "asset_ids": ["generic-01"],
+            "description": "Invented observed state on a claimed parent edge.",
+            "status": "pending",
+            "proposed_fix": "Re-anchor from the accepted parent take.",
+        }
+    )
+    errors = list(Draft202012Validator(schema).iter_errors(manifest))
+    assert any("findings" in ".".join(map(str, e.absolute_path)) for e in errors)
+
+
+def test_lineage_review_critical_finding_requires_proposed_fix():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "asset_manifest.schema.json").read_text()
+    )
+    manifest = _minimal_generic_manifest()
+    manifest["lineage_review"]["decision"] = "revise"  # avoid the pass-gate so we isolate the fix rule
+    manifest["lineage_review"]["findings"].append(
+        {
+            "severity": "critical",
+            "asset_ids": ["generic-01"],
+            "description": "Missing corrective path.",
+            "status": "pending",
+        }
+    )
+    errors = list(Draft202012Validator(schema).iter_errors(manifest))
+    assert any("proposed_fix" in e.message for e in errors)
+
+
 def test_v2_seedance_authoring_lanes_are_exclusive():
     schema = json.loads(
         (ROOT / "schemas" / "artifacts" / "scene_plan.schema.json").read_text()
