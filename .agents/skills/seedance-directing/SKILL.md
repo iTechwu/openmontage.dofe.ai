@@ -11,6 +11,9 @@ Turn story intent into a shot that can be seen and heard. Do not use
 ## Directing Workflow
 
 1. Classify the beat as `narrative` or `utility`.
+   On new or resumed work, set `seedance_contract_version="2.0"`; the two
+   lane authoring states are mutually exclusive. Do not carry narrative fields
+   into a utility contract or invent a source for an authored detail.
 2. For narrative work, complete the Director's Read in
    [references/shot-contract.md](references/shot-contract.md). For utility work,
    state the concrete demonstration goal and the drama that must not be added.

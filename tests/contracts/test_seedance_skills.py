@@ -1093,6 +1093,115 @@ def test_legacy_seedance_asset_contract_remains_readable():
     Draft202012Validator(schema).validate(artifact)
 
 
+def test_v2_seedance_authoring_lanes_are_exclusive():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "scene_plan.schema.json").read_text()
+    )
+
+    utility = _minimal_seedance_scene_contract()
+    utility["seedance_contract"]["authoring_state"]["dramatic_function"] = "reveal"
+    assert list(Draft202012Validator(schema).iter_errors(_scene_artifact(utility)))
+
+    narrative = _minimal_seedance_scene_contract()
+    narrative["seedance_contract"]["lane"] = "narrative"
+    narrative["seedance_contract"]["authoring_state"] = {
+        "dramatic_function": "reveal",
+        "turn": "calm becomes danger",
+        "pov": "the waiting driver",
+        "power_shift": "the SUV controls the lane",
+        "objective": "block the exit",
+        "obstacle_and_tactic": "wet paint; brake across the marker",
+        "subtext": "the stop is deliberate",
+        "suppressed_behavior": "the lamps pause before brightening",
+        "specific_detail": "the right tire clips one reflector",
+        "specific_detail_provenance": "authored_choice",
+        "specific_detail_source": None,
+        "stock_solution_refused": "no generic chase escalation",
+        "value_before": "the SUV appears neutral",
+        "value_after": "the SUV controls the exit",
+        "utility_intent": "this must not coexist with narrative state",
+    }
+    assert list(Draft202012Validator(schema).iter_errors(_scene_artifact(narrative)))
+
+
+def test_v2_seedance_specific_detail_provenance_is_self_consistent():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "scene_plan.schema.json").read_text()
+    )
+    contract = _minimal_seedance_scene_contract()
+    contract["seedance_contract"]["lane"] = "narrative"
+    contract["seedance_contract"]["authoring_state"] = {
+        "dramatic_function": "reveal",
+        "turn": "calm becomes danger",
+        "pov": "the waiting driver",
+        "power_shift": "the SUV controls the lane",
+        "objective": "block the exit",
+        "obstacle_and_tactic": "wet paint; brake across the marker",
+        "subtext": "the stop is deliberate",
+        "suppressed_behavior": "the lamps pause before brightening",
+        "specific_detail": "the right tire clips one reflector",
+        "specific_detail_provenance": "source_bound",
+        "specific_detail_source": None,
+        "stock_solution_refused": "no generic chase escalation",
+        "value_before": "the SUV appears neutral",
+        "value_after": "the SUV controls the exit",
+    }
+    assert list(Draft202012Validator(schema).iter_errors(_scene_artifact(contract)))
+
+    contract["seedance_contract"]["authoring_state"]["specific_detail_provenance"] = "authored_choice"
+    contract["seedance_contract"]["authoring_state"]["specific_detail_source"] = "reference frame 12"
+    assert list(Draft202012Validator(schema).iter_errors(_scene_artifact(contract)))
+
+
+def test_v2_connected_seedance_scene_requires_handoff_state():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "scene_plan.schema.json").read_text()
+    )
+    contract = _minimal_seedance_scene_contract()
+    contract["continuation_type"] = "seamless_continuation"
+    contract["seedance_contract"]["continuity_state"] = {
+        "parent_asset_id": "clip-00-take-01",
+        "source_status": "accepted",
+        "observed_start_state": "SUV is stopped at the lane marker.",
+        "extension_depth": 1,
+        "observation_confidence": "high",
+        "uncertainties": [],
+    }
+
+    errors = list(Draft202012Validator(schema).iter_errors(_scene_artifact(contract)))
+    assert any("handoff_state" in error.message for error in errors)
+
+
+def test_v2_temporal_beats_reject_exact_duplicates():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "scene_plan.schema.json").read_text()
+    )
+    contract = _minimal_seedance_scene_contract()
+    beat = deepcopy(contract["seedance_contract"]["temporal_beats"][0])
+    contract["seedance_contract"]["temporal_beats"].append(beat)
+
+    assert list(Draft202012Validator(schema).iter_errors(_scene_artifact(contract)))
+
+
+def test_prompt_compile_spec_requires_action_endpoint_and_truthful_emission():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "asset_manifest.schema.json").read_text()
+    )
+    validator = Draft202012Validator(schema["$defs"]["promptCompileSpec"])
+
+    missing_endpoint = _prompt_compile_spec()
+    missing_endpoint["ordered_sections"].remove("endpoint")
+    assert list(validator.iter_errors(missing_endpoint))
+
+    missing_action = _prompt_compile_spec()
+    missing_action["ordered_sections"].remove("action_beats")
+    assert list(validator.iter_errors(missing_action))
+
+    false_emission = _prompt_compile_spec()
+    false_emission["reference_emissions"][0]["emitted"] = True
+    assert list(validator.iter_errors(false_emission))
+
+
 def test_generation_contract_requires_explicit_model_family():
     schema = json.loads(
         (ROOT / "schemas" / "artifacts" / "scene_plan.schema.json").read_text()

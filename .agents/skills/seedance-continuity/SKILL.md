@@ -8,6 +8,12 @@ description: Plan and control connected Seedance clips, character or vehicle ide
 Plan the whole sequence, but finalize only the next unresolved generation.
 Accepted footage is canon; the original plan is not.
 
+For a new or resumed active sequence, use
+`seedance_contract_version="2.0"`. Read the provider
+[contract-versioning reference](../seedance-provider/references/contract-versioning.md)
+before upgrading a legacy checkpoint; preserve the old artifact and derive
+every new handoff from inspected evidence.
+
 ## Sequence Workflow
 
 1. Establish the story objective, final outcome, ordered beats, scene map, and

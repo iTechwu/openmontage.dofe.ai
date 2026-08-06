@@ -282,7 +282,8 @@
                   "temporal_beats": {
                     "type": "array",
                     "items": { "$ref": "#/$defs/temporalBeat" },
-                    "minItems": 1
+                    "minItems": 1,
+                    "uniqueItems": true
                   },
                   "dialogue_beats": {
                     "type": "array",
@@ -425,8 +426,39 @@
                                   "specific_detail_source",
                                   "value_before",
                                   "value_after"
+                                ],
+                                "maxProperties": 14,
+                                "allOf": [
+                                  {
+                                    "if": {
+                                      "properties": { "specific_detail_provenance": { "const": "source_bound" } },
+                                      "required": ["specific_detail_provenance"]
+                                    },
+                                    "then": {
+                                      "properties": {
+                                        "specific_detail_source": { "type": "string", "minLength": 1 }
+                                      }
+                                    }
+                                  },
+                                  {
+                                    "if": {
+                                      "properties": { "specific_detail_provenance": { "const": "authored_choice" } },
+                                      "required": ["specific_detail_provenance"]
+                                    },
+                                    "then": {
+                                      "properties": { "specific_detail_source": { "type": "null" } }
+                                    }
+                                  }
                                 ]
                               }
+                            }
+                          }
+                        },
+                        {
+                          "if": { "properties": { "lane": { "const": "utility" } }, "required": ["lane"] },
+                          "then": {
+                            "properties": {
+                              "authoring_state": { "maxProperties": 2 }
                             }
                           }
                         }
@@ -462,6 +494,32 @@
                             }
                           }
                         }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "model_family": { "const": "seedance" },
+                    "seedance_contract_version": { "const": "2.0" },
+                    "continuation_type": {
+                      "enum": [
+                        "seamless_continuation",
+                        "intentional_next_shot",
+                        "bridge_between_known_states",
+                        "repair_tail"
+                      ]
+                    }
+                  },
+                  "required": ["model_family", "seedance_contract_version", "continuation_type"]
+                },
+                "then": {
+                  "properties": {
+                    "seedance_contract": {
+                      "properties": {
+                        "continuity_state": { "required": ["handoff_state"] }
                       }
                     }
                   }

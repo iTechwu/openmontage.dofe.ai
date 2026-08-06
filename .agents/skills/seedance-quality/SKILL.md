@@ -24,6 +24,7 @@ Reject or revise a prompt when any of these is true:
 - a recurring subject has no registry ID or the prompt conflicts with its
   canonical anchor;
 - temporal beats are unordered, duplicated, or lack completed states;
+- beat orders repeat or skip, even when the beat objects are otherwise distinct;
 - abstract adjectives replace filmable behavior, light, or sound;
 - required text, plate, subtitle, or logo rendering is delegated to the model.
 

@@ -23,6 +23,10 @@ Build `asset_manifest.assets[].prompt_review.compile_spec` before prose. Record:
 - ordered prompt sections, exact reference emissions, `carrier_coverage`,
   `compression_decisions`, and the endpoint clause.
 
+The ordered sections must include both `action_beats` and `endpoint`. Emit
+`false` for `input_parameter` and `internal_only` references; only a provider-
+verified `prompt_token` may be emitted as prompt syntax.
+
 The compile spec is provider-neutral. Never invent a model field, reference
 token, or limit in it; provider preflight remains authoritative.
 
