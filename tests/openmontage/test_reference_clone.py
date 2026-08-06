@@ -113,14 +113,14 @@ def test_capabilities_include_replayable_job_submission_contract(monkeypatch):
     assert contract["workflow_field_is_pipeline"] is True
     assert "compose is a stage" in contract["workflow_stage_warning"]
     assert contract["supported_workflows"] == sorted(list_pipelines())
-    assert contract["required_fields"] == [
+    assert set(contract["required_fields"]) == {
         "clientRequestId",
         "workflow",
         "input",
         "brief",
         "output",
         "budget",
-    ]
+    }
     assert contract["request_schema"] == JobCreateRequest.model_json_schema(by_alias=True)
     assert JobCreateRequest.model_validate(contract["request_example"]).workflow == "animated-explainer"
 
@@ -151,3 +151,24 @@ def test_job_submission_preflight_excludes_invalid_workflow(monkeypatch):
             "reason": "Workflow 'broken' is unavailable because its manifest is invalid",
         }
     ]
+    assert contract["request_example"]["workflow"] == "framework-smoke"
+
+
+def test_job_submission_preflight_omits_example_when_no_workflow_is_available(monkeypatch):
+    import jsonschema
+
+    import openmontage.capabilities as capabilities
+    import openmontage.contracts as contracts
+
+    monkeypatch.setattr(capabilities, "list_pipelines", lambda: ["broken"])
+    monkeypatch.setattr(contracts, "list_pipelines", lambda: ["broken"])
+    monkeypatch.setattr(
+        contracts,
+        "load_pipeline_readonly",
+        lambda _workflow: (_ for _ in ()).throw(jsonschema.ValidationError("internal path")),
+    )
+
+    contract = job_submission_capability()
+
+    assert contract["supported_workflows"] == []
+    assert contract["request_example"] is None

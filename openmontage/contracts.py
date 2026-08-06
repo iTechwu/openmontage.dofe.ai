@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
@@ -9,7 +10,14 @@ from typing import Annotated, Any, Literal
 
 import jsonschema
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationError,
+    field_validator,
+)
 
 from lib.pipeline_loader import get_stage_order, list_pipelines, load_pipeline_readonly
 
@@ -142,6 +150,13 @@ class JobCreateRequest(WireModel):
     output: JobOutput
     budget: JobBudget
 
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def validate_schema_version_type(cls, value: Any) -> Any:
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError("schemaVersion must be the integer 1")
+        return value
+
 
 class JobRequestSnapshot(WireModel):
     """Backward-compatible persisted v1 request payload."""
@@ -180,41 +195,47 @@ class WorkflowDefinition(WireModel):
         if pipeline_type not in supported:
             choices = ", ".join(supported)
             raise ValueError(
-                f"Unknown workflow {pipeline_type!r}; supported workflows: {choices}"
+                f"Unknown workflow {pipeline_type!r}; known workflow names: {choices}. "
+                "Call openmontage_capabilities for current availability"
             )
         try:
             manifest = load_pipeline_readonly(pipeline_type)
-        except FileNotFoundError as exc:
-            choices = ", ".join(supported)
-            raise ValueError(
-                f"Unknown workflow {pipeline_type!r}; supported workflows: {choices}"
-            ) from exc
+            if manifest["name"] != pipeline_type:
+                raise WorkflowConfigurationError(
+                    f"Workflow {pipeline_type!r} is unavailable because its manifest is invalid"
+                )
+            approval_by_stage = {
+                stage["name"]: bool(stage.get("human_approval_default", False))
+                for stage in manifest["stages"]
+            }
+            return cls(
+                name=manifest["name"],
+                version=manifest["version"],
+                stages=tuple(
+                    StageDefinition(
+                        code=stage,
+                        label_code=f"openmontage.stage.{stage}",
+                        approval_required=approval_by_stage[stage],
+                    )
+                    for stage in get_stage_order(manifest)
+                ),
+            )
+        except WorkflowConfigurationError:
+            raise
         except (
             jsonschema.ValidationError,
             jsonschema.SchemaError,
+            json.JSONDecodeError,
             yaml.YAMLError,
             OSError,
             UnicodeError,
+            ValidationError,
+            KeyError,
+            TypeError,
         ) as exc:
             raise WorkflowConfigurationError(
                 f"Workflow {pipeline_type!r} is unavailable because its manifest is invalid"
             ) from exc
-        approval_by_stage = {
-            stage["name"]: bool(stage.get("human_approval_default", False))
-            for stage in manifest["stages"]
-        }
-        return cls(
-            name=manifest["name"],
-            version=manifest["version"],
-            stages=tuple(
-                StageDefinition(
-                    code=stage,
-                    label_code=f"openmontage.stage.{stage}",
-                    approval_required=approval_by_stage[stage],
-                )
-                for stage in get_stage_order(manifest)
-            ),
-        )
 
 
 class StageSnapshot(WireModel):

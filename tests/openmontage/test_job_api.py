@@ -80,17 +80,25 @@ def test_rest_job_creation_rejects_unknown_workflow_as_validation_error(tmp_path
     assert error["code"] == "OPENMONTAGE_VALIDATION_FAILED"
     assert "Unknown workflow 'compose'" in error["message"]
     assert "framework-smoke" in error["message"]
+    assert "known workflow names" in error["message"]
+    assert "openmontage_capabilities" in error["message"]
+    assert "supported workflows" not in error["message"]
     assert "pipeline_defs" not in error["message"]
 
 
 def test_rest_job_creation_reports_invalid_manifest_as_workflow_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    manifest_error: Exception,
 ) -> None:
     client, _ = _client(tmp_path)
+
+    def fail_to_load_manifest(_workflow: str) -> None:
+        raise manifest_error
+
     monkeypatch.setattr(
         "openmontage.contracts.load_pipeline_readonly",
-        lambda _workflow: (_ for _ in ()).throw(jsonschema.ValidationError("internal path")),
+        fail_to_load_manifest,
     )
 
     response = client.post("/api/v1/jobs", json=_request(), headers=_headers())
@@ -104,9 +112,71 @@ def test_rest_job_creation_reports_invalid_manifest_as_workflow_unavailable(
     }
 
 
+@pytest.fixture(
+    params=[
+        jsonschema.ValidationError("internal path"),
+        json.JSONDecodeError("internal path", "", 0),
+        FileNotFoundError("internal path"),
+    ],
+    ids=["manifest-validation", "manifest-schema-json", "manifest-disappeared"],
+)
+def manifest_error(request: pytest.FixtureRequest) -> Exception:
+    return request.param
+
+
+def test_rest_job_creation_reports_invalid_manifest_projection_as_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = _client(tmp_path)
+    monkeypatch.setattr(
+        "openmontage.contracts.load_pipeline_readonly",
+        lambda _workflow: {
+            "name": "",
+            "version": "1",
+            "stages": [{"name": "research"}],
+        },
+    )
+
+    response = client.post("/api/v1/jobs", json=_request(), headers=_headers())
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "code": "OPENMONTAGE_WORKFLOW_UNAVAILABLE",
+            "message": "Workflow 'framework-smoke' is unavailable because its manifest is invalid",
+        }
+    }
+
+
+def test_rest_job_creation_reports_manifest_name_mismatch_as_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = _client(tmp_path)
+    monkeypatch.setattr(
+        "openmontage.contracts.load_pipeline_readonly",
+        lambda _workflow: {
+            "name": "different-workflow",
+            "version": "1",
+            "stages": [{"name": "research"}],
+        },
+    )
+
+    response = client.post("/api/v1/jobs", json=_request(), headers=_headers())
+
+    assert response.status_code == 503
+    assert response.json()["error"] == {
+        "code": "OPENMONTAGE_WORKFLOW_UNAVAILABLE",
+        "message": "Workflow 'framework-smoke' is unavailable because its manifest is invalid",
+    }
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message_fragment"),
     [
+        ("schemaVersion", True, "schemaVersion"),
+        ("schemaVersion", 1.0, "schemaVersion"),
         ("clientRequestId", "   ", "clientRequestId"),
         ("input", {"type": "artifact"}, "artifactId"),
         ("input", {"type": "artifact", "artifactId": "   "}, "artifactId"),
@@ -326,13 +396,44 @@ async def test_mcp_job_creation_rejects_unknown_workflow_with_actionable_error(
     message = result.content[0].text
     assert "Unknown workflow 'compose'" in message
     assert "framework-smoke" in message
+    assert "known workflow names" in message
+    assert "openmontage_capabilities" in message
+    assert "supported workflows" not in message
     assert "pipeline_defs" not in message
+
+
+@pytest.mark.asyncio
+async def test_mcp_job_creation_reports_invalid_manifest_without_internal_details(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp import Client
+
+    def fail_to_load_manifest(_workflow: str) -> None:
+        raise jsonschema.ValidationError("internal path")
+
+    monkeypatch.setattr(
+        "openmontage.contracts.load_pipeline_readonly",
+        fail_to_load_manifest,
+    )
+    service = JobService(tmp_path / "jobs.sqlite3")
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
+    ) as client:
+        result = await client.call_tool("submit_video_job", {"request": _request()})
+
+    assert result.is_error is True
+    assert "Workflow 'framework-smoke' is unavailable" in result.content[0].text
+    assert "internal path" not in result.content[0].text
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("field", "value", "message_fragment"),
     [
+        ("schemaVersion", True, "schemaVersion"),
+        ("schemaVersion", 1.0, "schemaVersion"),
         ("clientRequestId", "   ", "clientRequestId"),
         ("input", {"type": "artifact"}, "artifactId"),
         ("input", {"type": "text", "inlineText": "   "}, "inlineText"),
