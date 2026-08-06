@@ -143,6 +143,26 @@ def test_selector_adapts_shared_fields_to_runway_contract():
     assert adapted["image_url"] == "https://example.com/car.png"
 
 
+def test_selector_filters_providers_that_contradict_explicit_aspect_ratio():
+    selector = VideoSelector()
+    candidates = selector._filter_candidates(
+        {"operation": "text_to_video", "aspect_ratio": "21:9"},
+        [RunwayVideo(), HiggsFieldVideo()],
+    )
+
+    assert [tool.name for tool in candidates] == ["higgsfield_video"]
+
+
+def test_selector_filters_providers_that_contradict_explicit_model():
+    selector = VideoSelector()
+    candidates = selector._filter_candidates(
+        {"operation": "text_to_video", "model_name": "kling_3.0"},
+        [RunwayVideo(), HiggsFieldVideo()],
+    )
+
+    assert [tool.name for tool in candidates] == ["higgsfield_video"]
+
+
 def test_scene_plan_accepts_seedance_generation_contract():
     schema = json.loads(
         (ROOT / "schemas" / "artifacts" / "scene_plan.schema.json").read_text()

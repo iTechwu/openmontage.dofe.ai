@@ -81,7 +81,7 @@ class VideoSelector(BaseTool):
             },
             "aspect_ratio": {
                 "type": "string",
-                "enum": ["16:9", "9:16", "1:1"],
+                "enum": ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
                 "default": "16:9",
                 "description": "Video aspect ratio. Passed through to the selected provider.",
             },
@@ -508,6 +508,10 @@ class VideoSelector(BaseTool):
         if self._has_custom_workflow(inputs):
             return [t for t in candidates if self._custom_workflow_eligible(t, inputs)]
 
+        candidates = [
+            tool for tool in candidates if self._explicit_inputs_compatible(tool, inputs)
+        ]
+
         operation = inputs.get("operation", "text_to_video")
         if operation == "rank":
             operation = inputs.get("target_operation", "text_to_video")
@@ -536,6 +540,33 @@ class VideoSelector(BaseTool):
                 filtered.append(tool)
 
         return filtered if matched_operation else candidates
+
+    def _explicit_inputs_compatible(
+        self,
+        tool: BaseTool,
+        inputs: dict[str, object],
+    ) -> bool:
+        """Reject candidates whose declared enums contradict explicit inputs."""
+        adapted = self._adapt_inputs_for_tool(tool, inputs)
+        properties = getattr(tool, "input_schema", {}).get("properties", {})
+        field_groups = (
+            ("model", "model_name"),
+            ("aspect_ratio", "ratio"),
+            ("duration",),
+            ("resolution",),
+        )
+
+        for group in field_groups:
+            if not any(inputs.get(field) is not None for field in group):
+                continue
+            provider_field = next((field for field in group if field in properties), None)
+            if provider_field is None:
+                continue
+            allowed = properties[provider_field].get("enum")
+            if allowed is not None and adapted.get(provider_field) not in allowed:
+                return False
+
+        return True
 
     @staticmethod
     def _operation_ready(tool: BaseTool, operation: str) -> bool:
