@@ -45,7 +45,12 @@
         "type": "object",
         "required": ["name", "description", "required_tools", "best_for"],
         "properties": {
-          "name": { "type": "string", "minLength": 1 },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
           "description": { "type": "string", "minLength": 1 },
           "required_tools": { "type": "array", "items": { "type": "string" } },
           "optional_tools": { "type": "array", "items": { "type": "string" } },

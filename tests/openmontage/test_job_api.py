@@ -196,6 +196,32 @@ def test_rest_job_creation_reports_duplicate_manifest_stages_as_unavailable(
 
 
 @pytest.mark.parametrize(
+    "stages",
+    [[], [{"name": "../../escape"}]],
+    ids=["empty", "unsafe-stage-code"],
+)
+def test_rest_job_creation_reports_unsafe_manifest_stage_shape_as_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stages: list[dict[str, object]],
+) -> None:
+    client, _ = _client(tmp_path)
+    monkeypatch.setattr(
+        "openmontage.contracts.load_pipeline_readonly",
+        lambda _workflow: {
+            "name": "framework-smoke",
+            "version": "1",
+            "stages": stages,
+        },
+    )
+
+    response = client.post("/api/v1/jobs", json=_request(), headers=_headers())
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "OPENMONTAGE_WORKFLOW_UNAVAILABLE"
+
+
+@pytest.mark.parametrize(
     ("field", "value", "message_fragment"),
     [
         ("schemaVersion", True, "schemaVersion"),

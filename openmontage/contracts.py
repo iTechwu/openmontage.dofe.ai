@@ -211,7 +211,7 @@ class ApprovalStatus(str, Enum):
 
 
 class StageDefinition(WireModel):
-    code: str = Field(min_length=1)
+    code: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
     label_code: str = Field(min_length=1)
     approval_required: bool = False
 
@@ -219,7 +219,7 @@ class StageDefinition(WireModel):
 class WorkflowDefinition(WireModel):
     name: str = Field(min_length=1)
     version: str = Field(min_length=1)
-    stages: tuple[StageDefinition, ...]
+    stages: tuple[StageDefinition, ...] = Field(min_length=1)
 
     @classmethod
     def from_pipeline(cls, pipeline_type: str) -> "WorkflowDefinition":
