@@ -7,6 +7,8 @@ from decimal import Decimal
 from enum import Enum
 from typing import Annotated, Any, Literal
 
+import jsonschema
+import yaml
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from lib.pipeline_loader import get_stage_order, list_pipelines, load_pipeline_readonly
@@ -77,6 +79,10 @@ class JobAttribution(WireModel):
 NonBlankString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
+class WorkflowConfigurationError(RuntimeError):
+    """Raised when a listed workflow cannot be loaded from its manifest."""
+
+
 class TextJobInput(WireModel):
     type: Literal["text"]
     inline_text: NonBlankString
@@ -92,14 +98,14 @@ JobInput = Annotated[TextJobInput | ArtifactJobInput, Field(discriminator="type"
 
 class JobBrief(WireModel):
     title: NonBlankString
-    duration_seconds: int | None = Field(default=None, gt=0, le=86_400)
+    duration_seconds: int | None = Field(default=None, gt=0, le=86_400, strict=True)
     audience: NonBlankString | None = None
 
 
 class JobOutput(WireModel):
     container: Literal["mp4"]
     resolution: str | None = Field(default=None, pattern=r"^[1-9][0-9]*x[1-9][0-9]*$")
-    fps: int | None = Field(default=None, gt=0, le=240)
+    fps: int | None = Field(default=None, gt=0, le=240, strict=True)
 
     @field_validator("resolution")
     @classmethod
@@ -119,8 +125,7 @@ class JobBudget(WireModel):
 
 class JobCreateRequest(WireModel):
     schema_version: Literal[1] = 1
-    client_request_id: str = Field(
-        min_length=1,
+    client_request_id: NonBlankString = Field(
         description=(
             "Idempotency key for one business submission; reuse it for retries and change it "
             "for a new Job."
@@ -148,28 +153,6 @@ class JobRequestSnapshot(WireModel):
     brief: dict[str, Any]
     output: dict[str, Any]
     budget: dict[str, Any]
-
-
-def job_submission_capability() -> dict[str, Any]:
-    """Return the agent-facing submission contract from canonical runtime sources."""
-    request_schema = JobCreateRequest.model_json_schema(by_alias=True)
-    return {
-        "workflow_field_is_pipeline": True,
-        "workflow_stage_warning": "compose is a stage, not a workflow; use a pipeline name",
-        "supported_workflows": sorted(list_pipelines()),
-        "request_schema": request_schema,
-        "request_example": {
-            "schemaVersion": 1,
-            "clientRequestId": "<unique-per-business-attempt>",
-            "workflow": "animated-explainer",
-            "input": {"type": "text", "inlineText": "Create a concise product video"},
-            "brief": {"title": "Product video", "durationSeconds": 12},
-            "output": {"container": "mp4", "resolution": "1280x720", "fps": 30},
-            "budget": {"maxAmount": "1.00", "currency": "CNY"},
-        },
-        "required_fields": request_schema.get("required", []),
-        "idempotency": "Reuse clientRequestId when retrying the same business submission; change it for a new Job.",
-    }
 
 
 class ApprovalStatus(str, Enum):
@@ -205,6 +188,16 @@ class WorkflowDefinition(WireModel):
             choices = ", ".join(supported)
             raise ValueError(
                 f"Unknown workflow {pipeline_type!r}; supported workflows: {choices}"
+            ) from exc
+        except (
+            jsonschema.ValidationError,
+            jsonschema.SchemaError,
+            yaml.YAMLError,
+            OSError,
+            UnicodeError,
+        ) as exc:
+            raise WorkflowConfigurationError(
+                f"Workflow {pipeline_type!r} is unavailable because its manifest is invalid"
             ) from exc
         approval_by_stage = {
             stage["name"]: bool(stage.get("human_approval_default", False))

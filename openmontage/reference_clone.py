@@ -20,7 +20,7 @@ from tools.dofe.errors import DofeError
 from tools.dofe.models import resolve_alias
 from tools.tool_registry import registry
 
-from openmontage.contracts import job_submission_capability
+from openmontage.capabilities import job_submission_capability
 
 
 _PROJECT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$|^[a-z0-9]$")

@@ -7,6 +7,7 @@ from lib.pipeline_loader import list_pipelines
 from tools.base_tool import ToolResult
 
 from openmontage import reference_clone
+from openmontage.capabilities import job_submission_capability
 from openmontage.contracts import JobCreateRequest
 
 
@@ -122,3 +123,31 @@ def test_capabilities_include_replayable_job_submission_contract(monkeypatch):
     ]
     assert contract["request_schema"] == JobCreateRequest.model_json_schema(by_alias=True)
     assert JobCreateRequest.model_validate(contract["request_example"]).workflow == "animated-explainer"
+
+
+def test_job_submission_preflight_excludes_invalid_workflow(monkeypatch):
+    import jsonschema
+
+    import openmontage.capabilities as capabilities
+    import openmontage.contracts as contracts
+
+    monkeypatch.setattr(capabilities, "list_pipelines", lambda: ["framework-smoke", "broken"])
+    monkeypatch.setattr(contracts, "list_pipelines", lambda: ["framework-smoke", "broken"])
+    load_valid_manifest = contracts.load_pipeline_readonly
+
+    def load(workflow: str):
+        if workflow == "broken":
+            raise jsonschema.ValidationError("internal path")
+        return load_valid_manifest(workflow)
+
+    monkeypatch.setattr("openmontage.contracts.load_pipeline_readonly", load)
+
+    contract = job_submission_capability()
+
+    assert contract["supported_workflows"] == ["framework-smoke"]
+    assert contract["unavailable_workflows"] == [
+        {
+            "workflow": "broken",
+            "reason": "Workflow 'broken' is unavailable because its manifest is invalid",
+        }
+    ]

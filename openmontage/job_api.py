@@ -14,7 +14,12 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from openmontage.contracts import JobAttribution, JobCreateRequest, JobSnapshot
+from openmontage.contracts import (
+    JobAttribution,
+    JobCreateRequest,
+    JobSnapshot,
+    WorkflowConfigurationError,
+)
 from openmontage.job_service import (
     JobConflictError,
     JobNotFoundError,
@@ -235,6 +240,16 @@ def _error_response(error: Exception) -> JSONResponse:
         return JSONResponse(
             {"error": {"code": "OPENMONTAGE_JOB_STATE_INVALID", "message": str(error)}},
             status_code=409,
+        )
+    if isinstance(error, WorkflowConfigurationError):
+        return JSONResponse(
+            {
+                "error": {
+                    "code": "OPENMONTAGE_WORKFLOW_UNAVAILABLE",
+                    "message": str(error),
+                }
+            },
+            status_code=503,
         )
     if isinstance(error, (ValidationError, ValueError, KeyError)):
         return JSONResponse(

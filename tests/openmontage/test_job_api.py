@@ -4,6 +4,7 @@ import base64
 import json
 from pathlib import Path
 
+import jsonschema
 import pytest
 from starlette.testclient import TestClient
 
@@ -82,9 +83,31 @@ def test_rest_job_creation_rejects_unknown_workflow_as_validation_error(tmp_path
     assert "pipeline_defs" not in error["message"]
 
 
+def test_rest_job_creation_reports_invalid_manifest_as_workflow_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = _client(tmp_path)
+    monkeypatch.setattr(
+        "openmontage.contracts.load_pipeline_readonly",
+        lambda _workflow: (_ for _ in ()).throw(jsonschema.ValidationError("internal path")),
+    )
+
+    response = client.post("/api/v1/jobs", json=_request(), headers=_headers())
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "code": "OPENMONTAGE_WORKFLOW_UNAVAILABLE",
+            "message": "Workflow 'framework-smoke' is unavailable because its manifest is invalid",
+        }
+    }
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message_fragment"),
     [
+        ("clientRequestId", "   ", "clientRequestId"),
         ("input", {"type": "artifact"}, "artifactId"),
         ("input", {"type": "artifact", "artifactId": "   "}, "artifactId"),
         ("input", {"type": "text"}, "inlineText"),
@@ -92,8 +115,10 @@ def test_rest_job_creation_rejects_unknown_workflow_as_validation_error(tmp_path
         ("brief", {}, "title"),
         ("brief", {"title": "   "}, "title"),
         ("brief", {"title": "Smoke", "durationSeconds": 86401}, "durationSeconds"),
+        ("brief", {"title": "Smoke", "durationSeconds": True}, "durationSeconds"),
         ("output", {}, "container"),
         ("output", {"container": "mp4", "resolution": "8193x1080"}, "resolution"),
+        ("output", {"container": "mp4", "fps": True}, "fps"),
         ("budget", {}, "maxAmount"),
         ("budget", {"maxAmount": "1.00"}, "currency"),
     ],
@@ -244,14 +269,14 @@ async def test_mcp_job_tools_do_not_expose_trusted_attribution_as_model_input(tm
     request_schema = submit_schema["properties"]["request"]
     if "$ref" in request_schema:
         request_schema = submit_schema["$defs"][request_schema["$ref"].rsplit("/", 1)[-1]]
-    assert request_schema["required"] == [
+    assert set(request_schema["required"]) == {
         "clientRequestId",
         "workflow",
         "input",
         "brief",
         "output",
         "budget",
-    ]
+    }
     assert set(request_schema["properties"]) == {
         "schemaVersion",
         "clientRequestId",
@@ -267,8 +292,16 @@ async def test_mcp_job_tools_do_not_expose_trusted_attribution_as_model_input(tm
     assert request_schema["additionalProperties"] is False
     assert "discriminator" in request_schema["properties"]["input"]
     assert "oneOf" in request_schema["properties"]["input"]
-    for model_name in ("TextJobInput", "ArtifactJobInput", "JobBrief", "JobOutput", "JobBudget"):
-        assert submit_schema["$defs"][model_name]["additionalProperties"] is False
+    nested_refs = {
+        request_schema["properties"][name]["$ref"].rsplit("/", 1)[-1]
+        for name in ("brief", "output", "budget")
+    }
+    input_refs = {
+        item["$ref"].rsplit("/", 1)[-1]
+        for item in request_schema["properties"]["input"]["oneOf"]
+    }
+    for definition_name in nested_refs | input_refs:
+        assert submit_schema["$defs"][definition_name]["additionalProperties"] is False
     assert created.structured_content["status"] == "QUEUED"
     assert artifacts.structured_content["artifacts"] == []
 
@@ -300,10 +333,11 @@ async def test_mcp_job_creation_rejects_unknown_workflow_with_actionable_error(
 @pytest.mark.parametrize(
     ("field", "value", "message_fragment"),
     [
+        ("clientRequestId", "   ", "clientRequestId"),
         ("input", {"type": "artifact"}, "artifactId"),
         ("input", {"type": "text", "inlineText": "   "}, "inlineText"),
-        ("brief", {}, "title"),
-        ("output", {}, "container"),
+        ("brief", {"title": "Smoke", "durationSeconds": True}, "durationSeconds"),
+        ("output", {"container": "mp4", "fps": True}, "fps"),
         ("budget", {}, "maxAmount"),
     ],
 )
