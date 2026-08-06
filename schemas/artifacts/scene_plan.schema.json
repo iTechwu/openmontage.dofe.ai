@@ -381,7 +381,6 @@
                     "then": {
                       "properties": {
                         "authoring_state": {
-                          "$ref": "#/$defs/narrativeAuthoringState",
                           "required": [
                             "dramatic_function",
                             "turn",
@@ -393,7 +392,8 @@
                             "suppressed_behavior",
                             "specific_detail",
                             "stock_solution_refused"
-                          ]
+                          ],
+                          "maxProperties": 14
                         }
                       }
                     }
@@ -403,8 +403,8 @@
                     "then": {
                       "properties": {
                         "authoring_state": {
-                          "$ref": "#/$defs/utilityAuthoringState",
-                          "required": ["utility_intent", "non_narrative_refusal"]
+                          "required": ["utility_intent", "non_narrative_refusal"],
+                          "maxProperties": 2
                         }
                       }
                     }
@@ -453,6 +453,7 @@
                           "then": {
                             "properties": {
                               "authoring_state": {
+                                "$ref": "#/$defs/narrativeAuthoringState",
                                 "required": [
                                   "specific_detail_provenance",
                                   "specific_detail_source",
@@ -482,6 +483,14 @@
                                   }
                                 ]
                               }
+                            }
+                          }
+                        },
+                        {
+                          "if": { "properties": { "lane": { "const": "utility" } }, "required": ["lane"] },
+                          "then": {
+                            "properties": {
+                              "authoring_state": { "$ref": "#/$defs/utilityAuthoringState" }
                             }
                           }
                         }

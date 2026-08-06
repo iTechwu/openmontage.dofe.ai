@@ -1411,6 +1411,38 @@ def test_legacy_seedance_artifacts_keep_wearing_v2_field_shapes():
     assert not list(Draft202012Validator(asset_schema).iter_errors(manifest))
 
 
+def test_legacy_seedance_narrative_lane_shape_remains_readable():
+    """Keep v1 records readable even when they used the old field-count lane rule."""
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "scene_plan.schema.json").read_text()
+    )
+    contract = _minimal_seedance_scene_contract()
+    del contract["seedance_contract_version"]
+    del contract["identity_ids"]
+    del contract["seedance_contract"]["temporal_beats"]
+    for field in ("lens", "blocking", "camera_axis", "screen_direction"):
+        del contract["seedance_contract"]["shot_design"][field]
+
+    contract["seedance_contract"]["lane"] = "narrative"
+    contract["seedance_contract"]["authoring_state"] = {
+        "dramatic_function": "reveal",
+        "turn": "calm becomes danger",
+        "pov": "the waiting driver",
+        "power_shift": "the SUV controls the lane",
+        "objective": "block the exit",
+        "obstacle_and_tactic": "wet paint; brake across the marker",
+        "subtext": "the stop is deliberate",
+        "suppressed_behavior": "the lamps pause before brightening",
+        "specific_detail": "the right tire clips one reflector",
+        "stock_solution_refused": "no generic chase escalation",
+        "utility_intent": "legacy planning note retained for checkpoint readability",
+    }
+    scene_plan = _scene_artifact(contract)
+    del scene_plan["identity_registry"]
+
+    assert not list(Draft202012Validator(schema).iter_errors(scene_plan))
+
+
 def test_two_clip_seedance_golden_trace_validates_scene_asset_and_handoff():
     fixture = json.loads(
         (ROOT / "tests/fixtures/seedance/two_clip_sequence.json").read_text()
