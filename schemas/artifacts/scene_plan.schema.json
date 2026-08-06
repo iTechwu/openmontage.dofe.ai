@@ -5,9 +5,87 @@
   "description": "Ordered scene list produced by the Scene Planner agent.",
   "type": "object",
   "required": ["version", "scenes"],
+  "$defs": {
+    "identityRecord": {
+      "type": "object",
+      "description": "Canonical identity bible entry. Scenes reference the stable ID instead of rewriting identity from memory.",
+      "required": ["id", "kind", "role", "canonical_anchor", "immutable_traits", "allowed_changes", "reference_tags"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "enum": ["character", "vehicle", "product", "prop", "environment"] },
+        "role": { "type": "string", "minLength": 1 },
+        "canonical_anchor": { "type": "string", "minLength": 1 },
+        "immutable_traits": {
+          "type": "object",
+          "required": ["silhouette", "proportions", "palette", "materials", "signature_features"],
+          "properties": {
+            "silhouette": { "type": "string", "minLength": 1 },
+            "proportions": { "type": "string", "minLength": 1 },
+            "palette": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "uniqueItems": true },
+            "materials": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "uniqueItems": true },
+            "signature_features": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "uniqueItems": true }
+          },
+          "additionalProperties": false
+        },
+        "allowed_changes": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "reference_tags": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "postproduction_zones": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
+      },
+      "additionalProperties": false
+    },
+    "temporalBeat": {
+      "type": "object",
+      "required": ["beat_id", "order", "action", "camera_phase", "completed_end_state"],
+      "properties": {
+        "beat_id": { "type": "string", "minLength": 1 },
+        "order": { "type": "integer", "minimum": 1 },
+        "duration_hint_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "action": { "type": "string", "minLength": 1 },
+        "camera_phase": { "type": "string", "minLength": 1 },
+        "sound_phase": { "type": "string", "minLength": 1 },
+        "completed_end_state": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "dialogueBeat": {
+      "type": "object",
+      "required": ["order", "speaker_identity_id", "line", "screen_position", "eyeline", "reaction", "pause_after_seconds"],
+      "properties": {
+        "order": { "type": "integer", "minimum": 1 },
+        "speaker_identity_id": { "type": "string", "minLength": 1 },
+        "line": { "type": "string", "minLength": 1 },
+        "screen_position": { "type": "string", "minLength": 1 },
+        "eyeline": { "type": "string", "minLength": 1 },
+        "reaction": { "type": "string", "minLength": 1 },
+        "pause_after_seconds": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "continuityHandoffState": {
+      "type": "object",
+      "description": "Observed state dimensions handed from an accepted parent. Unknown dimensions must be named in continuity_state.uncertainties rather than invented.",
+      "required": ["subjects", "props", "environment", "camera", "lighting", "audio", "open_motion"],
+      "properties": {
+        "subjects": { "type": "string", "minLength": 1 },
+        "props": { "type": "string", "minLength": 1 },
+        "environment": { "type": "string", "minLength": 1 },
+        "camera": { "type": "string", "minLength": 1 },
+        "lighting": { "type": "string", "minLength": 1 },
+        "audio": { "type": "string", "minLength": 1 },
+        "open_motion": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    }
+  },
   "properties": {
     "version": { "type": "string", "const": "1.0" },
     "style_playbook": { "type": "string", "description": "Name of the active style playbook" },
+    "identity_registry": {
+      "type": "array",
+      "description": "Project-level identity bible for recurring subjects, products, props, and environments.",
+      "items": { "$ref": "#/$defs/identityRecord" },
+      "minItems": 1
+    },
     "scenes": {
       "type": "array",
       "items": {
@@ -100,6 +178,13 @@
                 "uniqueItems": true,
                 "minItems": 1
               },
+              "identity_ids": {
+                "type": "array",
+                "description": "Stable IDs from the project identity_registry used by this scene.",
+                "items": { "type": "string", "minLength": 1 },
+                "uniqueItems": true,
+                "minItems": 1
+              },
               "reference_roles": {
                 "type": "array",
                 "items": {
@@ -144,6 +229,7 @@
                   "authoring_state",
                   "primary_action",
                   "shot_design",
+                  "temporal_beats",
                   "sound_intent",
                   "prompt_carriers",
                   "exclusions",
@@ -163,7 +249,11 @@
                       "subtext": { "type": "string", "minLength": 1 },
                       "suppressed_behavior": { "type": "string", "minLength": 1 },
                       "specific_detail": { "type": "string", "minLength": 1 },
+                      "specific_detail_provenance": { "type": "string", "enum": ["source_bound", "authored_choice"] },
+                      "specific_detail_source": { "type": ["string", "null"] },
                       "stock_solution_refused": { "type": "string", "minLength": 1 },
+                      "value_before": { "type": "string", "minLength": 1 },
+                      "value_after": { "type": "string", "minLength": 1 },
                       "utility_intent": { "type": "string", "minLength": 1 },
                       "non_narrative_refusal": { "type": "string", "minLength": 1 }
                     },
@@ -172,14 +262,27 @@
                   "primary_action": { "type": "string", "minLength": 1 },
                   "shot_design": {
                     "type": "object",
-                    "required": ["framing", "camera", "lighting", "behavior"],
+                    "required": ["framing", "lens", "blocking", "camera", "camera_axis", "screen_direction", "lighting", "behavior"],
                     "properties": {
                       "framing": { "type": "string", "minLength": 1 },
+                      "lens": { "type": "string", "minLength": 1 },
+                      "blocking": { "type": "string", "minLength": 1 },
                       "camera": { "type": "string", "minLength": 1 },
+                      "camera_axis": { "type": "string", "minLength": 1 },
+                      "screen_direction": { "type": "string", "minLength": 1 },
                       "lighting": { "type": "string", "minLength": 1 },
                       "behavior": { "type": "string", "minLength": 1 }
                     },
                     "additionalProperties": false
+                  },
+                  "temporal_beats": {
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/temporalBeat" },
+                    "minItems": 1
+                  },
+                  "dialogue_beats": {
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/dialogueBeat" }
                   },
                   "sound_intent": { "type": "string", "minLength": 1 },
                   "prompt_carriers": {
@@ -204,6 +307,7 @@
                         "enum": ["planned", "canonical_reference", "accepted", "accepted_with_deviation"]
                       },
                       "observed_start_state": { "type": "string", "minLength": 1 },
+                      "handoff_state": { "$ref": "#/$defs/continuityHandoffState" },
                       "extension_depth": { "type": "integer", "minimum": 0, "maximum": 3 },
                       "reanchor_required": { "type": "boolean" },
                       "observation_confidence": { "type": "string", "enum": ["high", "medium", "low", "unobserved"] },
@@ -253,7 +357,11 @@
                             "subtext",
                             "suppressed_behavior",
                             "specific_detail",
-                            "stock_solution_refused"
+                            "specific_detail_provenance",
+                            "specific_detail_source",
+                            "stock_solution_refused",
+                            "value_before",
+                            "value_after"
                           ]
                         }
                       }
@@ -283,6 +391,7 @@
                     "continuation_type",
                     "planned_start_state",
                     "identity_anchors",
+                    "identity_ids",
                     "prompt_budget",
                     "seedance_contract"
                   ]
@@ -308,7 +417,7 @@
                     "seedance_contract": {
                       "properties": {
                         "continuity_state": {
-                          "required": ["parent_asset_id", "observed_start_state"],
+                          "required": ["parent_asset_id", "observed_start_state", "handoff_state"],
                           "properties": {
                             "source_status": {
                               "enum": ["accepted", "accepted_with_deviation"]
@@ -391,5 +500,28 @@
     },
     "metadata": { "type": "object" }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "scenes": {
+            "contains": {
+              "type": "object",
+              "properties": {
+                "generation_contract": {
+                  "type": "object",
+                  "properties": { "model_family": { "const": "seedance" } },
+                  "required": ["model_family"]
+                }
+              },
+              "required": ["generation_contract"]
+            }
+          }
+        },
+        "required": ["scenes"]
+      },
+      "then": { "required": ["identity_registry"] }
+    }
+  ],
   "additionalProperties": false
 }

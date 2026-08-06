@@ -383,6 +383,24 @@ def test_scene_plan_accepts_seedance_generation_contract():
     )
     artifact = {
         "version": "1.0",
+        "identity_registry": [
+            {
+                "id": "vehicle-white-suv",
+                "kind": "vehicle",
+                "role": "apparent rescuer",
+                "canonical_anchor": "compact SUV, white paint, split lamps",
+                "immutable_traits": {
+                    "silhouette": "compact two-box SUV",
+                    "proportions": "short overhangs and tall cabin",
+                    "palette": ["white paint", "black glass"],
+                    "materials": ["painted metal", "clear lamp lenses"],
+                    "signature_features": ["split lamps", "five-spoke wheels"],
+                },
+                "allowed_changes": ["wheel rotation", "suspension compression"],
+                "reference_tags": ["vehicle-identity-reference"],
+                "postproduction_zones": ["license plate"],
+            }
+        ],
         "scenes": [
             {
                 "id": "clip-01",
@@ -399,6 +417,7 @@ def test_scene_plan_accepts_seedance_generation_contract():
                     "planned_start_state": "Tunnel entrance is empty.",
                     "planned_end_state": "Vehicle blocks the exit, facing camera.",
                     "identity_anchors": ["compact SUV, white paint, split lamps"],
+                    "identity_ids": ["vehicle-white-suv"],
                     "reference_roles": [
                         {
                             "tag": "vehicle-identity-reference",
@@ -429,15 +448,34 @@ def test_scene_plan_accepts_seedance_generation_contract():
                             "subtext": "the rescue posture conceals an ambush",
                             "suppressed_behavior": "headlamps hesitate before flaring",
                             "specific_detail": "right wheel clips one broken reflector",
+                            "specific_detail_provenance": "authored_choice",
+                            "specific_detail_source": None,
                             "stock_solution_refused": "no generic transformation reveal",
+                            "value_before": "the arrival reads as rescue",
+                            "value_after": "the arrival controls the only exit",
                         },
                         "primary_action": "SUV slides sideways and blocks the exit",
                         "shot_design": {
                             "framing": "low medium-wide, SUV enters frame left",
+                            "lens": "35mm moderate wide-angle perspective",
+                            "blocking": "SUV crosses the trapped vehicle and occupies both lanes",
                             "camera": "35mm lateral track, then locked endpoint",
+                            "camera_axis": "stay on the trapped vehicle side of the lane axis",
+                            "screen_direction": "SUV travels left-to-right",
                             "lighting": "cold tunnel practicals sweep across white paint",
                             "behavior": "suspension compresses, tires bite, lamps hesitate",
                         },
+                        "temporal_beats": [
+                            {
+                                "beat_id": "arrival-block",
+                                "order": 1,
+                                "duration_hint_seconds": 6,
+                                "action": "SUV slides across both lanes and brakes",
+                                "camera_phase": "track laterally, then settle locked",
+                                "sound_phase": "tire water rises, then engine drops to idle",
+                                "completed_end_state": "SUV is square to camera and blocks the exit",
+                            }
+                        ],
                         "sound_intent": "tire water, engine load, distant alarm; no music",
                         "prompt_carriers": [
                             "headlamps hesitate before flaring",
@@ -788,6 +826,7 @@ def _minimal_seedance_scene_contract() -> dict:
         "planned_start_state": "SUV is stationary.",
         "planned_end_state": "SUV stops at the lane marker.",
         "identity_anchors": ["white compact SUV"],
+        "identity_ids": ["vehicle-white-suv"],
         "prompt_budget": {
             "primary_spend": "motion",
             "economized": ["background traffic"],
@@ -801,10 +840,23 @@ def _minimal_seedance_scene_contract() -> dict:
             "primary_action": "SUV brakes at the lane marker.",
             "shot_design": {
                 "framing": "low medium-wide",
+                "lens": "35mm natural perspective",
+                "blocking": "SUV holds the lane center",
                 "camera": "locked 35mm",
+                "camera_axis": "driver-side profile axis",
+                "screen_direction": "left-to-right, then stationary",
                 "lighting": "overcast daylight",
                 "behavior": "suspension compresses once",
             },
+            "temporal_beats": [
+                {
+                    "beat_id": "controlled-stop",
+                    "order": 1,
+                    "action": "SUV brakes once at the lane marker",
+                    "camera_phase": "locked throughout",
+                    "completed_end_state": "SUV is stationary at the marker",
+                }
+            ],
             "sound_intent": "tire contact and engine load",
             "prompt_carriers": ["suspension compresses once"],
             "exclusions": ["no readable text"],
@@ -822,6 +874,23 @@ def _minimal_seedance_scene_contract() -> dict:
 def _scene_artifact(contract: dict) -> dict:
     return {
         "version": "1.0",
+        "identity_registry": [
+            {
+                "id": "vehicle-white-suv",
+                "kind": "vehicle",
+                "role": "demonstration vehicle",
+                "canonical_anchor": "white compact SUV",
+                "immutable_traits": {
+                    "silhouette": "compact SUV",
+                    "proportions": "short overhangs and tall cabin",
+                    "palette": ["white paint"],
+                    "materials": ["painted metal"],
+                    "signature_features": ["split lamps"],
+                },
+                "allowed_changes": ["wheel rotation", "suspension compression"],
+                "reference_tags": [],
+            }
+        ],
         "scenes": [
             {
                 "id": "clip-01",
@@ -844,6 +913,28 @@ def test_generation_contract_requires_explicit_model_family():
 
     errors = list(Draft202012Validator(schema).iter_errors(_scene_artifact(contract)))
     assert any("model_family" in error.message for error in errors)
+
+
+def test_seedance_scene_requires_project_identity_registry():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "scene_plan.schema.json").read_text()
+    )
+    artifact = _scene_artifact(_minimal_seedance_scene_contract())
+    del artifact["identity_registry"]
+
+    errors = list(Draft202012Validator(schema).iter_errors(artifact))
+    assert any("identity_registry" in error.message for error in errors)
+
+
+def test_seedance_scene_requires_temporal_beats():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "scene_plan.schema.json").read_text()
+    )
+    contract = _minimal_seedance_scene_contract()
+    del contract["seedance_contract"]["temporal_beats"]
+
+    errors = list(Draft202012Validator(schema).iter_errors(_scene_artifact(contract)))
+    assert any("temporal_beats" in error.message for error in errors)
 
 
 def test_connected_seedance_scene_rejects_planned_source_state():
