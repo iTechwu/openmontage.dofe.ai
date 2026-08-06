@@ -135,9 +135,20 @@ def test_invocation_ledger_backfills_fingerprint_for_pre_migration_rows(tmp_path
 
     assert record.model_invocation_id == "om-existing"
     assert record.request_fingerprint == "fingerprint-1"
+    store = ModelInvocationStore(database_path)
+    store.save_response(
+        "om-existing",
+        status_code=200,
+        headers={"Content-Type": "application/json"},
+        body=b'{"taskId":"task-existing"}',
+    )
+    cached = store.get_cached_response("om-existing")
+    assert cached is not None
+    assert cached.status_code == 200
+    assert cached.body == b'{"taskId":"task-existing"}'
 
 
-def test_proxy_reuses_persisted_invocation_id_after_restart(tmp_path) -> None:
+def test_proxy_replays_persisted_success_after_restart_without_forwarding_again(tmp_path) -> None:
     captured: list[str] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -168,6 +179,7 @@ def test_proxy_reuses_persisted_invocation_id_after_restart(tmp_path) -> None:
             expires_at="2099-08-06T09:00:01Z",
         )
         store = ModelInvocationStore(tmp_path / "jobs.sqlite3")
+        responses: list[requests.Response] = []
         for _ in range(2):
             with DelegationSigningProxy(
                 credential,
@@ -181,13 +193,14 @@ def test_proxy_reuses_persisted_invocation_id_after_restart(tmp_path) -> None:
                     timeout=5,
                 )
                 assert response.status_code == 200
+                responses.append(response)
     finally:
         upstream.shutdown()
         upstream.server_close()
         thread.join(timeout=2)
 
-    assert len(captured) == 2
-    assert captured[0] == captured[1]
+    assert len(captured) == 1
+    assert responses[0].content == responses[1].content == b'{"ok":true}'
     assert store.list_recoverable(job_id="job-1") == []
 
 
@@ -246,3 +259,53 @@ def test_proxy_rejects_reused_logical_call_id_with_different_request(tmp_path) -
     assert first.status_code == 200
     assert second.status_code == 409
     assert len(forwarded) == 1
+
+
+def test_proxy_does_not_cache_event_stream_responses(tmp_path) -> None:
+    forwarded = 0
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            nonlocal forwarded
+            forwarded += 1
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = b"data: done\n\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = upstream.server_address
+        credential = DelegatedModelCredential(
+            api_key="delegated-api-key",
+            models_base_url=f"http://{host}:{port}/api",
+            delegation_id="delegation-1",
+            external_job_id="job-stream",
+            pipeline_stage="script",
+            runtime_credential_id="runtime-credential-1",
+            expires_at="2099-08-06T09:00:01Z",
+        )
+        store = ModelInvocationStore(tmp_path / "jobs.sqlite3")
+        for _ in range(2):
+            with DelegationSigningProxy(credential, invocation_store=store) as proxy:
+                response = requests.post(
+                    f"{proxy.base_url}/v1/responses",
+                    headers={"X-Request-Id": "stream-request"},
+                    json={"model": "gpt-test", "stream": True},
+                    timeout=5,
+                )
+                assert response.content == b"data: done\n\n"
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+    assert forwarded == 2

@@ -10,7 +10,7 @@ from typing import Any
 from urllib.parse import urlparse
 import requests
 
-from openmontage.invocation_store import ModelInvocationStore
+from openmontage.invocation_store import InvocationRequestConflictError, ModelInvocationStore
 from tools.dofe.delegation import DelegatedModelCredential
 
 
@@ -28,6 +28,7 @@ _HOP_HEADERS = {
     "upgrade",
 }
 _MAX_REQUEST_BYTES = 32 * 1024 * 1024
+_MAX_CACHED_RESPONSE_BYTES = 8 * 1024 * 1024
 _LOGICAL_CALL_HEADERS = (
     "X-OpenMontage-Logical-Call-Id",
     "Idempotency-Key",
@@ -55,6 +56,21 @@ def _request_fingerprint(method: str, path: str, body: bytes | None, content_typ
     digest.update(b"\n")
     digest.update(normalized_body)
     return digest.hexdigest()
+
+
+def _send_response(
+    handler: BaseHTTPRequestHandler,
+    status_code: int,
+    headers: dict[str, str],
+    body: bytes,
+) -> None:
+    handler.send_response(status_code)
+    for key, value in headers.items():
+        if key.lower() not in _HOP_HEADERS:
+            handler.send_header(key, value)
+    handler.send_header("Connection", "close")
+    handler.end_headers()
+    handler.wfile.write(body)
 
 
 class DelegationSigningProxy:
@@ -149,6 +165,10 @@ class DelegationSigningProxy:
                     request_fingerprint=fingerprint,
                 )
                 invocation_id = record.model_invocation_id
+                cached = self.invocation_store.get_cached_response(invocation_id)
+                if cached is not None:
+                    _send_response(handler, cached.status_code, cached.headers, cached.body)
+                    return
                 self.invocation_store.mark(invocation_id, "in_flight")
             headers = {
                 key: value
@@ -166,21 +186,52 @@ class DelegationSigningProxy:
                 allow_redirects=False,
                 timeout=(10, 3600),
             )
-            handler.send_response(upstream.status_code)
-            for key, value in upstream.headers.items():
-                if key.lower() not in _HOP_HEADERS:
+            response_headers = {
+                key: value
+                for key, value in upstream.headers.items()
+                if key.lower() not in _HOP_HEADERS
+            }
+            content_type = upstream.headers.get("Content-Type", "").lower()
+            content_length = upstream.headers.get("Content-Length", "")
+            can_buffer = "text/event-stream" not in content_type
+            if content_length.isdigit() and int(content_length) > _MAX_CACHED_RESPONSE_BYTES:
+                can_buffer = False
+            if can_buffer:
+                response_body = upstream.raw.read(
+                    _MAX_CACHED_RESPONSE_BYTES + 1,
+                    decode_content=False,
+                )
+                can_buffer = len(response_body) <= _MAX_CACHED_RESPONSE_BYTES
+            else:
+                response_body = b""
+            if can_buffer:
+                if self.invocation_store is not None and upstream.status_code < 400:
+                    self.invocation_store.save_response(
+                        invocation_id,
+                        status_code=upstream.status_code,
+                        headers=response_headers,
+                        body=response_body,
+                    )
+                _send_response(handler, upstream.status_code, response_headers, response_body)
+            else:
+                handler.send_response(upstream.status_code)
+                for key, value in response_headers.items():
                     handler.send_header(key, value)
-            handler.send_header("Connection", "close")
-            handler.end_headers()
-            for chunk in upstream.raw.stream(64 * 1024, decode_content=False):
-                handler.wfile.write(chunk)
+                handler.send_header("Connection", "close")
+                handler.end_headers()
+                if response_body:
+                    handler.wfile.write(response_body)
+                for chunk in upstream.raw.stream(64 * 1024, decode_content=False):
+                    handler.wfile.write(chunk)
             upstream.close()
             if self.invocation_store is not None:
-                self.invocation_store.mark(
-                    invocation_id,
-                    "succeeded" if upstream.status_code < 400 else "failed",
-                )
-        except ValueError as exc:
+                cached_success = upstream.status_code < 400 and can_buffer
+                if not cached_success:
+                    self.invocation_store.mark(
+                        invocation_id,
+                        "succeeded" if upstream.status_code < 400 else "failed",
+                    )
+        except InvocationRequestConflictError as exc:
             handler.send_error(409, str(exc))
         except Exception:
             if self.invocation_store is not None and "invocation_id" in locals():

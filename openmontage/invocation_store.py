@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -21,6 +22,17 @@ class ModelInvocationRecord:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class CachedInvocationResponse:
+    status_code: int
+    headers: dict[str, str]
+    body: bytes
+
+
+class InvocationRequestConflictError(ValueError):
+    """A logical call identifier was reused for different request content."""
+
+
 class ModelInvocationStore:
     """SQLite-backed idempotency ledger shared by the Job Worker and proxy."""
 
@@ -38,6 +50,9 @@ class ModelInvocationStore:
                     request_fingerprint TEXT NOT NULL DEFAULT '',
                     model_invocation_id TEXT NOT NULL PRIMARY KEY,
                     status TEXT NOT NULL CHECK (status IN ('created', 'in_flight', 'succeeded', 'failed', 'unknown')),
+                    response_status INTEGER,
+                    response_headers TEXT,
+                    response_body BLOB,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE (job_id, stage, attempt, request_id)
@@ -55,6 +70,15 @@ class ModelInvocationStore:
                     "ALTER TABLE openmontage_model_invocation "
                     "ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT ''"
                 )
+            for name, definition in (
+                ("response_status", "INTEGER"),
+                ("response_headers", "TEXT"),
+                ("response_body", "BLOB"),
+            ):
+                if name not in columns:
+                    db.execute(
+                        f"ALTER TABLE openmontage_model_invocation ADD COLUMN {name} {definition}"
+                    )
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.database_path, timeout=5)
@@ -103,7 +127,9 @@ class ModelInvocationStore:
         if row is None:
             raise RuntimeError("model invocation ledger insert did not return a row")
         if row["request_fingerprint"] != fingerprint:
-            raise ValueError("model invocation request id was reused for a different request")
+            raise InvocationRequestConflictError(
+                "model invocation request id was reused for a different request"
+            )
         return ModelInvocationRecord(**dict(row))
 
     def mark(self, model_invocation_id: str, status: str) -> ModelInvocationRecord:
@@ -124,6 +150,55 @@ class ModelInvocationStore:
         if row is None:
             raise KeyError(model_invocation_id)
         return ModelInvocationRecord(**dict(row))
+
+    def save_response(
+        self,
+        model_invocation_id: str,
+        *,
+        status_code: int,
+        headers: dict[str, str],
+        body: bytes,
+    ) -> None:
+        if status_code < 200 or status_code >= 400:
+            raise ValueError("only successful invocation responses can be cached")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as db:
+            cursor = db.execute(
+                """UPDATE openmontage_model_invocation
+                   SET status = 'succeeded', response_status = ?, response_headers = ?,
+                       response_body = ?, updated_at = ?
+                   WHERE model_invocation_id = ?""",
+                (
+                    status_code,
+                    json.dumps(headers, ensure_ascii=True, sort_keys=True),
+                    body,
+                    now,
+                    model_invocation_id,
+                ),
+            )
+        if cursor.rowcount != 1:
+            raise KeyError(model_invocation_id)
+
+    def get_cached_response(self, model_invocation_id: str) -> CachedInvocationResponse | None:
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT response_status, response_headers, response_body
+                   FROM openmontage_model_invocation
+                   WHERE model_invocation_id = ? AND status = 'succeeded'
+                     AND response_status IS NOT NULL AND response_headers IS NOT NULL
+                     AND response_body IS NOT NULL""",
+                (model_invocation_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        headers = json.loads(row["response_headers"])
+        if not isinstance(headers, dict):
+            raise ValueError("cached invocation response headers are invalid")
+        return CachedInvocationResponse(
+            status_code=int(row["response_status"]),
+            headers={str(key): str(value) for key, value in headers.items()},
+            body=bytes(row["response_body"]),
+        )
 
     def list_recoverable(self, *, job_id: str | None = None) -> list[ModelInvocationRecord]:
         query = """SELECT job_id, stage, attempt, request_id, request_fingerprint,
