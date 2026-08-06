@@ -86,11 +86,29 @@ def test_seedream_payload_never_sends_negative_prompt(model):
     assert p["style"] == "cinematic"
 
 
-def test_dofe_contract_does_not_advertise_negative_prompt():
+def test_non_seedream_payload_preserves_negative_prompt():
+    payload = DofeImage()._build_payload(
+        {"prompt": "x", "negative_prompt": "blurry"},
+        "flux-pro-1.1",
+    )
+
+    assert payload["params"]["negativePrompt"] == "blurry"
+
+
+def test_dofe_contract_advertises_model_scoped_negative_prompt():
     tool = DofeImage()
-    assert "negative_prompt" not in tool.supports
-    assert "negative_prompt" not in tool.input_schema["properties"]
-    assert "negative_prompt" not in tool.idempotency_key_fields
+    assert tool.supports["negative_prompt"] == "model_scoped"
+    assert "negative_prompt" in tool.input_schema["properties"]
+    assert "negative_prompt" in tool.idempotency_key_fields
+
+
+def test_negative_prompt_changes_dofe_idempotency_key():
+    tool = DofeImage()
+    base = {"prompt": "x", "model_name": "flux-pro-1.1"}
+
+    assert tool.idempotency_key(base) != tool.idempotency_key(
+        {**base, "negative_prompt": "blurry"}
+    )
 
 
 def test_metadata_carries_idempotency_key():
