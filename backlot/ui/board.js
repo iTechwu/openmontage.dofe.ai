@@ -28,11 +28,12 @@ function applyTheme(theme) {
 
 function renderThemeToggle() {
   const next = currentTheme === "light" ? "dark" : "light";
+  const nextLabel = next === "light" ? "浅色" : "深色";
   return el("button", {
     class: "theme-toggle",
     type: "button",
-    title: `Switch to ${next} theme`,
-    "aria-label": `Switch to ${next} theme`,
+    title: `切换到${nextLabel}主题`,
+    "aria-label": `切换到${nextLabel}主题`,
     "aria-pressed": currentTheme === "light" ? "true" : "false",
     onclick: () => {
       applyTheme(next);
@@ -50,9 +51,9 @@ applyTheme(currentTheme);
 function renderSlate(s) {
   const board = s.storyboard;
   const chips = [
-    el("span", { class: "chip" }, `${s.pipeline.pipeline_type} pipeline`),
+    el("span", { class: "chip" }, `${s.pipeline.pipeline_type} 流水线`),
     board && board.total_duration_seconds
-      ? el("span", { class: "chip" }, `${board.scenes.length} scenes · ${fmtDuration(board.total_duration_seconds)}`)
+      ? el("span", { class: "chip" }, `${board.scenes.length} 个场景 · ${fmtDuration(board.total_duration_seconds)}`)
       : null,
     s.style_playbook ? el("span", { class: "chip" }, s.style_playbook) : null,
   ];
@@ -62,15 +63,15 @@ function renderSlate(s) {
   const stalled = s.stages.find((x) => x.stalled);
   let liveEl;
   if (awaiting) {
-    liveEl = el("span", { class: "live" }, el("span", { class: "dot" }), "◈ AWAITING YOU");
+    liveEl = el("span", { class: "live" }, el("span", { class: "dot" }), "◈ 等待确认");
   } else if (stalled) {
     liveEl = el("span", { class: "live", style: "color:var(--red)" },
-      el("span", { class: "dot", style: "background:var(--red);animation:none" }), "⚠ STALLED?");
+      el("span", { class: "dot", style: "background:var(--red);animation:none" }), "⚠ 是否卡住？");
   } else if (s.live || inProgress) {
-    liveEl = el("span", { class: "live" }, el("span", { class: "dot" }), "LIVE");
+    liveEl = el("span", { class: "live" }, el("span", { class: "dot" }), "进行中");
   } else {
     liveEl = el("span", { class: "live idle" }, el("span", { class: "dot" }),
-      `IDLE${s.last_activity ? " · " + fmtAgo(s.last_activity).toUpperCase() : ""}`);
+      `空闲${s.last_activity ? " · " + fmtAgo(s.last_activity) : ""}`);
   }
 
   const cost = el("div", { class: "cost" });
@@ -86,7 +87,7 @@ function renderSlate(s) {
         class: pct > 90 ? "crit" : pct > 75 ? "warn" : "", style: `width:${pct}%`,
       })));
     }
-    cost.append(el("div", { class: "label" }, "generation spend"));
+    cost.append(el("div", { class: "label" }, "生成花费"));
   }
 
   return el("header", { class: "slate" },
@@ -108,19 +109,19 @@ function renderSlate(s) {
 // ---------------------------------------------------------------------------
 
 function stageSub(st) {
-  if (st.status === "awaiting_human") return "awaiting your approval\nreply in chat to continue";
+  if (st.status === "awaiting_human") return "等待你的确认\n在对话中回复以继续";
   if (st.status === "in_progress" && st.stalled) {
-    return `stalled? no activity for ${st.stalled_minutes}m\nask the agent for status`;
+    return `是否卡住？已 ${st.stalled_minutes} 分钟无活动\n向 Agent 询问状态`;
   }
   if (st.status === "in_progress" && st.partial_progress) {
     const done = st.partial_progress.completed_scene_ids;
-    if (Array.isArray(done)) return `${done.length} scene${done.length === 1 ? "" : "s"} done`;
-    return "in progress";
+    if (Array.isArray(done)) return `${done.length} 个场景完成`;
+    return "进行中";
   }
-  if (st.status === "in_progress") return "in progress";
-  if (st.status === "failed") return st.error ? String(st.error).slice(0, 60) : "failed";
+  if (st.status === "in_progress") return "进行中";
+  if (st.status === "failed") return st.error ? String(st.error).slice(0, 60) : "失败";
   if (st.timestamp) {
-    const approved = st.gated && st.human_approved ? " · approved" : "";
+    const approved = st.gated && st.human_approved ? " · 已确认" : "";
     return fmtClock(st.timestamp) + approved;
   }
   return "";
@@ -138,14 +139,14 @@ function renderRail(s) {
     if (!STAGE_ICONS[st.status]) pendingIndex += 1;
     const node = el("div", {
       class: `stage ${cls}${selectedStage === st.name ? " selected" : ""}${st.undeclared ? " undeclared" : ""}`,
-      title: st.undeclared ? `"${st.name}" ran but isn't declared by this pipeline's manifest` : null,
+      title: st.undeclared ? `"${st.name}" 已运行但未被该流水线的 manifest 声明` : null,
       onclick: () => toggleDrawer(st.name),
     },
       el("span", { class: "line" }),
       el("span", { class: "node" }, icon),
-      el("span", { class: "name" }, st.name),
+      el("span", { class: "name" }, humanize(st.name)),
       el("span", { class: "sub", style: "white-space:pre-line" },
-        st.undeclared ? `${stageSub(st)}\nunlisted`.trim() : stageSub(st)),
+        st.undeclared ? `${stageSub(st)}\n未列入`.trim() : stageSub(st)),
     );
     rail.append(node);
   }
@@ -192,9 +193,9 @@ function reviewSummaryText(review) {
   const counts = reviewMetrics(review);
   return [
     review.decision,
-    `${counts.critical} critical`,
-    `${counts.suggestions} suggestion${counts.suggestions === 1 ? "" : "s"}`,
-    nested.review_focus_met ? `review focus ${nested.review_focus_met}` : null,
+    `${counts.critical} 严重`,
+    `${counts.suggestions} 条建议`,
+    nested.review_focus_met ? `审查重点 ${nested.review_focus_met}` : null,
     nested.schema_validation,
   ].filter(Boolean).join(" · ");
 }
@@ -210,9 +211,9 @@ function renderDrawer(s) {
     const metrics = reviewMetrics(st.review);
     const summary = reviewSummaryText(st.review);
     body.append(el("div", { class: "findings", style: "margin-bottom:12px" },
-      el("span", { class: `f ${metrics.critical ? "crit" : ""}` }, `${metrics.critical} critical`),
-      el("span", { class: `f ${metrics.suggestions ? "sugg" : ""}` }, `${metrics.suggestions} suggestions`),
-      el("span", { class: "f" }, `${metrics.nitpicks} nitpicks`),
+      el("span", { class: `f ${metrics.critical ? "crit" : ""}` }, `${metrics.critical} 严重`),
+      el("span", { class: `f ${metrics.suggestions ? "sugg" : ""}` }, `${metrics.suggestions} 条建议`),
+      el("span", { class: "f" }, `${metrics.nitpicks} 个细节`),
       summary ? el("span", { style: "font-size:calc(11.5px * var(--fs-scale));color:var(--text-2);margin-left:8px" }, summary) : null,
     ));
   }
@@ -230,16 +231,16 @@ function renderDrawer(s) {
   }
   if (!shown) {
     body.append(el("div", { class: "hint" },
-      st.status === "pending" ? "This stage hasn't run yet." : "No canonical artifact found on disk for this stage."));
+      st.status === "pending" ? "该阶段尚未运行。" : "磁盘上未找到该阶段的规范产物。"));
   }
 
   return el("div", { class: "drawer" },
     el("div", { class: "drawer-head" },
-      el("h3", {}, `${st.name} — ${st.status}`),
-      st.gate_skipped ? el("span", { class: "gate-chip" }, "⚑ GATE SKIPPED") : null,
+      el("h3", {}, `${humanize(st.name)} — ${STATUS_LABELS[st.status] || st.status}`),
+      st.gate_skipped ? el("span", { class: "gate-chip" }, "⚑ 已跳过审查门") : null,
       st.versions > 1 ? el("span", { class: "ver-chip" }, `v${st.versions}`) : null,
       st.timestamp ? el("span", { class: "meta", style: "font-family:var(--mono);font-size:calc(10.5px * var(--fs-scale));color:var(--text-3)" }, st.timestamp) : null,
-      el("span", { class: "close", onclick: () => toggleDrawer(st.name) }, "CLOSE ✕"),
+      el("span", { class: "close", onclick: () => toggleDrawer(st.name) }, "关闭 ✕"),
     ),
     body,
   );
@@ -255,7 +256,7 @@ function scriptSections(script, limit) {
   const nodes = [];
   for (const sec of shown) {
     nodes.push(el("div", { class: "sp-slug" },
-      `${(sec.id || "").toUpperCase()} — ${sec.label || "Section"} `,
+      `${(sec.id || "").toUpperCase()} — ${sec.label || "段落"} `,
       el("span", { class: "tc" }, `${fmtDuration(sec.start_seconds)} – ${fmtDuration(sec.end_seconds)}`)));
     if (sec.text) nodes.push(el("div", { class: "sp-action" }, sec.text));
     if (sec.speaker_directions) nodes.push(el("div", { class: "sp-paren" }, `(${sec.speaker_directions})`));
@@ -266,7 +267,7 @@ function scriptSections(script, limit) {
     }
   }
   if (limit && sections.length > limit) {
-    nodes.push(el("div", { class: "sp-fade" }, `… ${sections.length - limit} more sections`));
+    nodes.push(el("div", { class: "sp-fade" }, `… 还有 ${sections.length - limit} 个段落`));
   }
   return nodes;
 }
@@ -277,26 +278,49 @@ function renderScriptCard(s) {
   const scriptStage = s.stages.find((x) => x.name === "script");
   const status = scriptStage ? scriptStage.status : "unknown";
   const stamp = status === "completed"
-    ? el("span", { class: "script-status script-approved" }, "APPROVED")
+    ? el("span", { class: "script-status script-approved" }, "已确认")
     : status === "awaiting_human"
-      ? el("span", { class: "script-status script-pending" }, "PENDING APPROVAL")
+      ? el("span", { class: "script-status script-pending" }, "待确认")
       : status === "in_progress"
-        ? el("span", { class: "script-status script-draft" }, "DRAFTING")
+        ? el("span", { class: "script-status script-draft" }, "草拟中")
         : null;
 
-  const card = el("div", { class: "script-card script-preview", title: "Click to expand full script", onclick: openScriptModal },
+  const card = el("div", { class: "script-card script-preview", title: "点击展开完整脚本", onclick: openScriptModal },
     stamp,
     el("div", { class: "sp-title" }, script.title || s.title),
     el("div", { class: "sp-meta" },
-      `script · ${fmtDuration(script.total_duration_seconds)} · ${(script.sections || []).length} sections`),
+      `脚本 · ${fmtDuration(script.total_duration_seconds)} · ${(script.sections || []).length} 段`),
     ...scriptSections(script, 4),
-    el("span", { class: "sp-expand" }, "⤢ EXPAND SCRIPT"),
+    el("span", { class: "sp-expand" }, "⤢ 展开脚本"),
   );
   return card;
 }
 
+const GLOSSARY = {
+  research: "调研", research_brief: "研究简报",
+  proposal: "提案", proposal_packet: "制作方案",
+  idea: "构思", brief: "创意简报",
+  script: "脚本", scene_plan: "场景计划",
+  assets: "素材", asset_manifest: "素材清单",
+  edit: "剪辑", edit_decisions: "剪辑决策",
+  compose: "合成", render_report: "渲染报告", final_review: "终审",
+  publish: "发布", publish_log: "发布日志",
+  decision_log: "决策日志",
+  artifact: "产物",
+};
+
+const STATUS_LABELS = {
+  pending: "待运行",
+  in_progress: "进行中",
+  awaiting_human: "等待确认",
+  completed: "已完成",
+  failed: "失败",
+  unknown: "未知",
+};
+
 function humanize(value) {
-  return String(value || "artifact").replaceAll("_", " ");
+  const key = String(value || "artifact");
+  return GLOSSARY[key] || key.replaceAll("_", " ");
 }
 
 function shortText(value, limit = 180) {
@@ -324,11 +348,11 @@ function titledItems(items, selectedId = null) {
       return el("li", {}, shortText(item));
     }
     const id = item.id || item.concept_id || item.option_id;
-    const title = item.title || item.name || item.display_name || item.label || id || item.path || item.platform || item.description || `Item ${index + 1}`;
+    const title = item.title || item.name || item.display_name || item.label || id || item.path || item.platform || item.description || `项目 ${index + 1}`;
     const detail = item.hook || item.why_this_works || item.summary || item.description || item.silhouette_notes;
     return el("li", { class: id && id === selectedId ? "selected" : "" },
       el("div", { class: "approval-item-title" }, shortText(title, 100),
-        id && id === selectedId ? el("span", { class: "approval-selected" }, "SELECTED") : null),
+        id && id === selectedId ? el("span", { class: "approval-selected" }, "已选") : null),
       detail && detail !== title ? el("p", {}, shortText(detail)) : null,
     );
   }).filter(Boolean);
@@ -343,7 +367,7 @@ function genericArtifactSummary(artifact) {
     if (["string", "number", "boolean"].includes(typeof value)) {
       facts.push(reviewFact(humanize(key), shortText(value, 90)));
     } else if (Array.isArray(value)) {
-      facts.push(reviewFact(humanize(key), `${value.length} item${value.length === 1 ? "" : "s"}`));
+      facts.push(reviewFact(humanize(key), `${value.length} 项`));
       if (!items.length && value.length) items.push(titledItems(value));
     }
     if (facts.length >= 6) break;
@@ -356,10 +380,10 @@ function artifactReviewContent(name, artifact) {
     return [
       artifact.hook ? el("p", { class: "approval-lead" }, artifact.hook) : null,
       reviewFacts([
-        reviewFact("platform", artifact.target_platform),
-        reviewFact("duration", artifact.target_duration_seconds != null ? fmtDuration(artifact.target_duration_seconds) : null),
-        reviewFact("tone", artifact.tone),
-        reviewFact("style", artifact.style),
+        reviewFact("平台", artifact.target_platform),
+        reviewFact("时长", artifact.target_duration_seconds != null ? fmtDuration(artifact.target_duration_seconds) : null),
+        reviewFact("基调", artifact.tone),
+        reviewFact("风格", artifact.style),
       ]),
       titledItems(artifact.key_points),
     ].filter(Boolean);
@@ -370,15 +394,15 @@ function artifactReviewContent(name, artifact) {
     const cost = artifact.cost_estimate || {};
     return [
       reviewFacts([
-        reviewFact("runtime", plan.render_runtime),
-        reviewFact("pipeline", plan.pipeline),
-        reviewFact("estimated cost", cost.total_estimated_usd != null ? fmtMoney(cost.total_estimated_usd) : null),
-        reviewFact("concepts", Array.isArray(artifact.concept_options) ? artifact.concept_options.length : null),
+        reviewFact("渲染引擎", plan.render_runtime),
+        reviewFact("流水线", plan.pipeline),
+        reviewFact("预估成本", cost.total_estimated_usd != null ? fmtMoney(cost.total_estimated_usd) : null),
+        reviewFact("方案数", Array.isArray(artifact.concept_options) ? artifact.concept_options.length : null),
       ]),
       titledItems(artifact.concept_options, selected),
       (artifact.selected_concept || {}).rationale
         ? el("p", { class: "approval-rationale" },
-          el("b", {}, "WHY THIS CONCEPT  "), shortText(artifact.selected_concept.rationale))
+          el("b", {}, "为何选择此方案  "), shortText(artifact.selected_concept.rationale))
         : null,
     ].filter(Boolean);
   }
@@ -386,9 +410,9 @@ function artifactReviewContent(name, artifact) {
     return [
       artifact.topic ? el("p", { class: "approval-lead" }, artifact.topic) : null,
       reviewFacts([
-        reviewFact("sources", Array.isArray(artifact.sources) ? artifact.sources.length : null),
-        reviewFact("data points", Array.isArray(artifact.data_points) ? artifact.data_points.length : null),
-        reviewFact("angles", Array.isArray(artifact.angles_discovered) ? artifact.angles_discovered.length : null),
+        reviewFact("来源", Array.isArray(artifact.sources) ? artifact.sources.length : null),
+        reviewFact("数据点", Array.isArray(artifact.data_points) ? artifact.data_points.length : null),
+        reviewFact("角度", Array.isArray(artifact.angles_discovered) ? artifact.angles_discovered.length : null),
       ]),
       titledItems(artifact.angles_discovered),
     ].filter(Boolean);
@@ -397,11 +421,11 @@ function artifactReviewContent(name, artifact) {
     const first = (artifact.sections || [])[0];
     return [
       reviewFacts([
-        reviewFact("duration", fmtDuration(artifact.total_duration_seconds)),
-        reviewFact("sections", (artifact.sections || []).length),
+        reviewFact("时长", fmtDuration(artifact.total_duration_seconds)),
+        reviewFact("段数", (artifact.sections || []).length),
       ]),
       first && first.text ? el("p", { class: "approval-lead" }, shortText(first.text, 220)) : null,
-      el("p", { class: "approval-guidance" }, "The complete script preview is shown directly below."),
+      el("p", { class: "approval-guidance" }, "完整脚本预览见下方。"),
     ].filter(Boolean);
   }
   if (name === "scene_plan") {
@@ -409,11 +433,11 @@ function artifactReviewContent(name, artifact) {
     const end = scenes.reduce((max, scene) => Math.max(max, Number(scene.end_seconds) || 0), 0);
     return [
       reviewFacts([
-        reviewFact("scenes", scenes.length),
-        reviewFact("duration", end ? fmtDuration(end) : null),
+        reviewFact("场景数", scenes.length),
+        reviewFact("时长", end ? fmtDuration(end) : null),
       ]),
       titledItems(scenes),
-      el("p", { class: "approval-guidance" }, "Review timing and shot coverage in the storyboard below."),
+      el("p", { class: "approval-guidance" }, "在下方的分镜中查看时长与镜头覆盖。"),
     ].filter(Boolean);
   }
   if (name === "asset_manifest") {
@@ -421,19 +445,19 @@ function artifactReviewContent(name, artifact) {
     const types = [...new Set(assets.map((asset) => asset.type).filter(Boolean))];
     return [
       reviewFacts([
-        reviewFact("assets", assets.length),
-        reviewFact("types", types.join(", ")),
-        reviewFact("generation cost", artifact.total_cost_usd != null ? fmtMoney(artifact.total_cost_usd) : null),
+        reviewFact("素材数", assets.length),
+        reviewFact("类型", types.join(", ")),
+        reviewFact("生成成本", artifact.total_cost_usd != null ? fmtMoney(artifact.total_cost_usd) : null),
       ]),
       titledItems(assets),
-      el("p", { class: "approval-guidance" }, "Inspect every generated take in the filmstrip below before approving compose."),
+      el("p", { class: "approval-guidance" }, "在下方胶片中逐一检查每个生成镜头，确认后再通过合成。"),
     ].filter(Boolean);
   }
   if (name === "edit_decisions") {
     return [
       reviewFacts([
-        reviewFact("cuts", Array.isArray(artifact.cuts) ? artifact.cuts.length : null),
-        reviewFact("runtime", artifact.render_runtime || (artifact.metadata || {}).render_runtime),
+        reviewFact("剪辑数", Array.isArray(artifact.cuts) ? artifact.cuts.length : null),
+        reviewFact("渲染引擎", artifact.render_runtime || (artifact.metadata || {}).render_runtime),
       ]),
       titledItems(artifact.cuts),
     ].filter(Boolean);
@@ -441,17 +465,17 @@ function artifactReviewContent(name, artifact) {
   if (name === "render_report") {
     return [
       reviewFacts([
-        reviewFact("outputs", Array.isArray(artifact.outputs) ? artifact.outputs.length : null),
-        reviewFact("duration", artifact.duration_seconds != null ? fmtDuration(artifact.duration_seconds) : null),
+        reviewFact("产物数", Array.isArray(artifact.outputs) ? artifact.outputs.length : null),
+        reviewFact("时长", artifact.duration_seconds != null ? fmtDuration(artifact.duration_seconds) : null),
       ]),
       titledItems(artifact.outputs),
     ].filter(Boolean);
   }
   if (name === "publish_log") {
     return [
-      reviewFacts([reviewFact("destinations", Array.isArray(artifact.entries) ? artifact.entries.length : null)]),
+      reviewFacts([reviewFact("目标数", Array.isArray(artifact.entries) ? artifact.entries.length : null)]),
       titledItems((artifact.entries || []).map((entry) => ({
-        title: entry.platform || entry.destination || "Publish destination",
+        title: entry.platform || entry.destination || "发布目标",
         description: [entry.status, entry.url].filter(Boolean).join(" · "),
       }))),
     ].filter(Boolean);
@@ -463,14 +487,14 @@ function artifactReviewTitle(name, artifact, s) {
   if (name === "proposal_packet") {
     const selected = (artifact.selected_concept || {}).concept_id;
     const concept = (artifact.concept_options || []).find((item) => item.id === selected);
-    return (concept && concept.title) || "Production proposal";
+    return (concept && concept.title) || "制作方案";
   }
-  if (name === "research_brief") return artifact.topic || "Research brief";
-  if (name === "scene_plan") return "Scene plan";
-  if (name === "asset_manifest") return "Generated assets";
-  if (name === "edit_decisions") return "Edit decisions";
-  if (name === "render_report") return "Render report";
-  if (name === "publish_log") return "Publish plan";
+  if (name === "research_brief") return artifact.topic || "研究简报";
+  if (name === "scene_plan") return "场景计划";
+  if (name === "asset_manifest") return "生成的素材";
+  if (name === "edit_decisions") return "剪辑决策";
+  if (name === "render_report") return "渲染报告";
+  if (name === "publish_log") return "发布计划";
   return artifact.title || artifact.name || s.title;
 }
 
@@ -499,30 +523,30 @@ function renderApprovalReview(s) {
 
   if (!artifacts.length) {
     artifacts.push(el("div", { class: "approval-missing", role: "alert" },
-      el("b", {}, "Nothing reviewable was found. "),
+      el("b", {}, "未找到可审查的内容。"),
       names.length
-        ? `The ${awaiting.name} checkpoint declares ${names.map(humanize).join(", ")}, but Backlot could not load it.`
-        : `The ${awaiting.name} checkpoint does not declare an artifact.`,
+        ? `${humanize(awaiting.name)} 检查点声明了 ${names.map(humanize).join("、")}，但 Backlot 无法加载它。`
+        : `${humanize(awaiting.name)} 检查点未声明产物。`,
     ));
   }
 
   return el("section", { class: "approval-review", "data-stage": awaiting.name },
     el("div", { class: "approval-review-head" },
       el("div", {},
-        el("div", { class: "approval-eyebrow" }, "REVIEW GATE"),
-        el("h2", {}, `${humanize(awaiting.name)} is ready for your review`),
-        el("p", {}, "Review the artifact here, then reply in chat to approve it or request changes."),
+        el("div", { class: "approval-eyebrow" }, "审查门"),
+        el("h2", {}, `${humanize(awaiting.name)} 已就绪，等待你的审查`),
+        el("p", {}, "在此审查产物，然后在对话中回复以确认或要求修改。"),
       ),
-      el("span", { class: "approval-status" }, "PENDING APPROVAL"),
+      el("span", { class: "approval-status" }, "待确认"),
     ),
     reviewSummary ? el("div", { class: "approval-review-note" },
-      el("b", {}, "SELF-REVIEW  "), shortText(reviewSummary, 260)) : null,
+      el("b", {}, "自审  "), shortText(reviewSummary, 260)) : null,
     el("div", { class: "approval-artifacts" }, artifacts),
     el("div", { class: "approval-review-foot" },
       el("span", {}, nextStage
-        ? `Approval unlocks ${humanize(nextStage.name)}.`
-        : "This is the final approval gate."),
-      el("button", { type: "button", onclick: () => toggleDrawer(awaiting.name) }, "OPEN FULL ARTIFACT"),
+        ? `确认后将解锁 ${humanize(nextStage.name)}。`
+        : "这是最后一个确认门。"),
+      el("button", { type: "button", onclick: () => toggleDrawer(awaiting.name) }, "打开完整产物"),
     ),
   );
 }
@@ -532,14 +556,14 @@ function openScriptModal() {
   if (!script) return;
   modal.innerHTML = "";
   modal.append(
-    el("span", { class: "modal-close", onclick: closeModal }, "ESC · CLOSE"),
+    el("span", { class: "modal-close", onclick: closeModal }, "ESC · 关闭"),
     el("div", { class: "modal-page" },
       el("div", { class: "script-card", style: "cursor:default" },
         el("div", { class: "sp-title" }, script.title || state.title),
         el("div", { class: "sp-meta" },
-          `script · ${fmtDuration(script.total_duration_seconds)} · ${(script.sections || []).length} sections`),
+          `脚本 · ${fmtDuration(script.total_duration_seconds)} · ${(script.sections || []).length} 段`),
         ...scriptSections(script, 0),
-        el("div", { class: "sp-fade" }, "END"),
+        el("div", { class: "sp-fade" }, "完"),
       )),
   );
   modal.classList.add("open");
@@ -550,12 +574,12 @@ function openNarrModal(card) {
   const meta = [sceneLabel(card.id), card.section_label, fmtDuration(card.duration_seconds)]
     .filter(Boolean).join(" · ");
   modal.append(
-    el("span", { class: "modal-close", onclick: closeModal }, "ESC · CLOSE"),
+    el("span", { class: "modal-close", onclick: closeModal }, "ESC · 关闭"),
     el("div", { class: "modal-page" },
       el("div", { class: "script-card", style: "cursor:default" },
         el("div", { class: "sp-meta" }, meta),
         card.narration ? el("div", { class: "sp-action", style: "margin-left:0" }, card.narration) : null,
-        card.shot_intent ? el("div", { class: "sp-paren", style: "margin-left:0" }, `Intent — ${card.shot_intent}`) : null,
+        card.shot_intent ? el("div", { class: "sp-paren", style: "margin-left:0" }, `意图 — ${card.shot_intent}`) : null,
         card.description ? el("div", { class: "sp-paren", style: "margin-left:0" }, card.description) : null,
       )),
   );
@@ -595,15 +619,15 @@ function renderDecisions(s) {
       .filter((o) => (o.option_id ?? o.label) !== d.selected && (o.option_id || o.label));
     body.append(el("div", { class: "decision" },
       el("div", { class: "d-cat" }, `${d.category || "decision"}${d.confidence ? ` · ${d.confidence}` : ""}`,
-        revised ? el("span", { class: "d-revised" }, " · revised") : null),
+        revised ? el("span", { class: "d-revised" }, " · 已修订") : null),
       el("div", { class: "d-pick" }, `${d.subject || ""} `, el("span", { class: "arrow" }, "→"), ` ${selLabel}`),
       d.reason ? el("div", { class: "d-why" }, d.reason) : null,
-      alts.length ? el("div", { class: "d-alt" }, "also considered: ",
+      alts.length ? el("div", { class: "d-alt" }, "备选：",
         alts.slice(0, 3).map((o, i) => [i ? " · " : "", el("s", {}, o.label || o.option_id)]).flat()) : null,
     ));
   }
   return el("div", { class: "panel" },
-    el("div", { class: "panel-head" }, el("h2", {}, "Decisions"), el("span", { class: "meta" }, "decision_log.json")),
+    el("div", { class: "panel-head" }, el("h2", {}, "决策"), el("span", { class: "meta" }, "decision_log.json")),
     body);
 }
 
@@ -643,7 +667,7 @@ function renderActivity(s) {
     } else if (ev.event === "error") {
       statusEl = el("span", { class: "status err" }, "✕");
     } else {
-      statusEl = el("span", { class: "status run" }, "● running");
+      statusEl = el("span", { class: "status run" }, "● 运行中");
     }
     body.append(el("div", { class: "act-row" },
       el("span", { class: "t" }, fmtClock(ev.ts)),
@@ -653,7 +677,7 @@ function renderActivity(s) {
     ));
   }
   return el("div", { class: "panel" },
-    el("div", { class: "panel-head" }, el("h2", {}, "Activity"), el("span", { class: "meta" }, "events.jsonl")),
+    el("div", { class: "panel-head" }, el("h2", {}, "活动"), el("span", { class: "meta" }, "events.jsonl")),
     body);
 }
 
@@ -676,7 +700,7 @@ function sceneCard(s, card) {
   const slate = el("div", { class: "sc-slate" },
     el("span", { class: "num" }, sceneLabel(card.id)),
     card.takes.length > 1 ? el("span", { class: "take" }, `T${card.takes.length}`) : null,
-    card.hero_moment ? el("span", { class: "hero" }, "★ HERO") : null,
+    card.hero_moment ? el("span", { class: "hero" }, "★ 高光") : null,
     el("span", { class: "dur" }, fmtDuration(dur)),
   );
   wrap.append(slate);
@@ -687,7 +711,7 @@ function sceneCard(s, card) {
     thumb = el("div", { class: "thumb generating" },
       el("div", { class: "shimmer" }),
       el("div", { class: "gen-label" },
-        el("span", {}, "◉ GENERATING"),
+        el("span", {}, "◉ 生成中"),
         el("span", { class: "sub" }, card.generating_tool || "")));
   } else if (card.visual && card.visual.exists) {
     const v = card.visual;
@@ -712,25 +736,25 @@ function sceneCard(s, card) {
         t.className = "thumb spec";
         t.innerHTML = "";
         t.append(el("div", { class: "spec-in" },
-          el("div", { class: "spec-desc" }, card.description || "asset unavailable"),
+          el("div", { class: "spec-desc" }, card.description || "素材不可用"),
           el("div", { class: "spec-shot" }, [card.framing, card.movement].filter(Boolean).join(" · ").slice(0, 70))));
       };
       thumb = el("div", { class: "thumb approved" }, img,
-        v.snapshot ? el("span", { class: "badge" }, "snapshot") : (badge ? el("span", { class: "badge" }, badge) : null));
+        v.snapshot ? el("span", { class: "badge" }, "快照") : (badge ? el("span", { class: "badge" }, badge) : null));
     }
   } else if (card.type === "animation") {
     // Bespoke/atelier scene with no snapshot yet — name it as such rather
     // than "no asset yet" (the composition IS the asset).
     thumb = el("div", { class: "thumb spec bespoke" },
       el("div", { class: "spec-in" },
-        el("span", { class: "bespoke-tag" }, "◆ BESPOKE"),
+        el("span", { class: "bespoke-tag" }, "◆ 定制"),
         el("div", { class: "spec-desc" }, card.description || ""),
-        el("div", { class: "spec-shot" }, "hand-authored composition")));
+        el("div", { class: "spec-shot" }, "手工编排的合成")));
   } else if (card.visual && !card.visual.exists) {
     thumb = el("div", { class: "thumb missing" },
       el("div", { class: "spec-in" },
         el("span", { class: "warn-ic" }, "⚑"),
-        el("div", { class: "spec-desc" }, "asset in manifest, file missing"),
+        el("div", { class: "spec-desc" }, "清单中有素材，但文件缺失"),
         el("div", { class: "spec-shot" }, card.visual.path || "")));
   } else if (card.type === "text_card") {
     thumb = el("div", { class: "thumb textcard" },
@@ -739,7 +763,7 @@ function sceneCard(s, card) {
     thumb = el("div", { class: "thumb missing" },
       el("div", { class: "spec-in" },
         el("span", { class: "warn-ic" }, "⚑"),
-        el("div", { class: "spec-desc" }, "no asset yet"),
+        el("div", { class: "spec-desc" }, "暂无素材"),
         el("div", { class: "spec-shot" }, (card.required_assets[0].description || "").slice(0, 60))));
   } else {
     thumb = el("div", { class: "thumb spec" },
@@ -771,7 +795,7 @@ function sceneCard(s, card) {
       if (t.exists && t.type === "image") tk.append(el("img", { src: thumbURL(s.project_id, t.path, 320), loading: "lazy", alt: "" }));
       takes.append(tk);
     });
-    takes.append(el("span", { class: "tk-label" }, `${card.takes.length} TAKES`));
+    takes.append(el("span", { class: "tk-label" }, `${card.takes.length} 个镜头`));
     wrap.append(takes);
   }
 
@@ -780,7 +804,7 @@ function sceneCard(s, card) {
     const long = card.narration.length > 90;
     wrap.append(el("div", {
       class: `narr${long ? " clip" : ""}`,
-      title: "Click to read the full narration",
+      title: "点击阅读完整旁白",
       onclick: () => openNarrModal(card),
     }, card.narration, long ? el("span", { class: "narr-more" }, "⤢") : null));
   } else if (card.shot_intent || card.description) {
@@ -788,7 +812,7 @@ function sceneCard(s, card) {
   }
   const narrAudio = card.audio.find((a) => a.exists && (a.type === "narration" || a.type === "audio"));
   if (narrAudio) {
-    const wave = el("div", { class: "wave", style: "cursor:pointer", title: "Play narration" });
+    const wave = el("div", { class: "wave", style: "cursor:pointer", title: "播放旁白" });
     waveBars(wave, card.id + narrAudio.path);
     wave.append(el("span", { class: "wv-time" }, narrAudio.duration_seconds ? fmtDuration(narrAudio.duration_seconds) : "♪"));
     wave.onclick = () => {
@@ -806,9 +830,9 @@ function renderStoryboard(s) {
   const strip = el("div", { class: "filmstrip" });
   for (const card of board.scenes) strip.append(sceneCard(s, card));
   return el("div", {},
-    el("div", { class: "section-title" }, "Storyboard",
+    el("div", { class: "section-title" }, "分镜",
       el("span", { class: "meta" },
-        `${board.scenes.length} scenes${board.total_duration_seconds ? ` · ${fmtDuration(board.total_duration_seconds)}` : ""} · card width ∝ duration`)),
+        `${board.scenes.length} 个场景${board.total_duration_seconds ? ` · ${fmtDuration(board.total_duration_seconds)}` : ""} · 卡片宽度 ∝ 时长`)),
     el("div", { class: "strip-outer" }, strip));
 }
 
@@ -843,12 +867,12 @@ function renderRenders(s) {
     renders.map((r, i) => el("span", {
       class: `v${i === activeRender ? " active" : ""}`,
       onclick: () => { activeRender = i; render(); },
-    }, `${r.path.split("/").pop()}${r.at_root ? " · root" : ""}`)),
+    }, `${r.path.split("/").pop()}${r.at_root ? " · 根目录" : ""}`)),
     el("span", { style: "margin-left:auto" }, `${(current.size / 1048576).toFixed(1)} MB`),
   );
   return el("div", {},
-    el("div", { class: "section-title" }, "Renders",
-      el("span", { class: "meta" }, `${renders.length} version${renders.length === 1 ? "" : "s"}`)),
+    el("div", { class: "section-title" }, "成片",
+      el("span", { class: "meta" }, `${renders.length} 个版本`)),
     el("div", { class: "render-hero" }, video),
     versions);
 }
@@ -862,8 +886,8 @@ function renderFoundMedia(s) {
       el("img", { src: thumbURL(s.project_id, snap.path, 640), loading: "lazy", alt: "" })));
   }
   return el("div", {},
-    el("div", { class: "section-title" }, "What the watcher found",
-      el("span", { class: "meta" }, "snapshots / verification frames")),
+    el("div", { class: "section-title" }, "监控发现的画面",
+      el("span", { class: "meta" }, "快照 / 校验帧")),
     grid);
 }
 
@@ -872,9 +896,9 @@ function renderNoState(s) {
   return el("div", { class: "notice", style: "border-color:#2b2b33;background:var(--surface-2);color:var(--text-3)" },
     el("span", { style: "font-size:calc(15px * var(--fs-scale))" }, "◌"),
     el("span", {},
-      el("b", { style: "color:var(--text-2)" }, "No pipeline state. "),
-      "This project has no checkpoints — Backlot is showing what it found on disk. ",
-      "Runs that follow the checkpoint protocol get the full board."));
+      el("b", { style: "color:var(--text-2)" }, "无流水线状态。"),
+      "该项目没有检查点——Backlot 显示的是磁盘上发现的内容。",
+      "遵循检查点协议的运行会获得完整看板。"));
 }
 
 function renderAwaitingNotice(s) {
@@ -883,8 +907,8 @@ function renderAwaitingNotice(s) {
   return el("div", { class: "notice" },
     el("span", { style: "font-size:calc(16px * var(--fs-scale))" }, "◈"),
     el("span", {},
-      el("b", {}, `The ${awaiting.name} stage is waiting for your review. `),
-      "The agent is paused at this gate — reply ", el("b", {}, "in chat"), " to approve or request changes."));
+      el("b", {}, `${humanize(awaiting.name)} 阶段正在等待你的审查。`),
+      "Agent 已在此门处暂停——在", el("b", {}, "对话中"), "回复以确认或要求修改。"));
 }
 
 // ---------------------------------------------------------------------------
@@ -979,8 +1003,8 @@ function renderReplayBar(s) {
   if (!replay) {
     // collapsed: just the entry button
     return el("div", { class: "replay-bar", style: "justify-content:flex-end" },
-      el("span", { class: "rp-time" }, "scrub the whole run"),
-      el("span", { class: "rp-btn", onclick: startReplay }, "▶ REPLAY RUN"));
+      el("span", { class: "rp-time" }, "回看整个运行"),
+      el("span", { class: "rp-btn", onclick: startReplay }, "▶ 回放运行"));
   }
   const pos = (replay.t - replay.t0) / Math.max(1, replay.t1 - replay.t0);
   const timeLabel = el("span", { class: "rp-time" },
@@ -1001,7 +1025,7 @@ function renderReplayBar(s) {
       onchange: (e) => { setT(e.target.value); render(); },
     }),
     timeLabel,
-    el("span", { class: "rp-btn", onclick: stopReplay }, "✕ LIVE"),
+    el("span", { class: "rp-btn", onclick: stopReplay }, "✕ 实时"),
   );
 }
 
@@ -1133,7 +1157,7 @@ async function refresh() {
 refresh().catch((err) => {
   app.innerHTML = "";
   app.append(el("div", { class: "empty", style: "margin-top:80px" },
-    el("div", { class: "big" }, "PROJECT NOT FOUND"),
+    el("div", { class: "big" }, "未找到项目"),
     el("div", {}, String(err))));
 });
 // ?static=1 disables the live feed (screenshots, static exports).
