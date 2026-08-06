@@ -86,9 +86,14 @@ def test_rest_job_creation_rejects_unknown_workflow_as_validation_error(tmp_path
     ("field", "value", "message_fragment"),
     [
         ("input", {"type": "artifact"}, "artifactId"),
+        ("input", {"type": "artifact", "artifactId": "   "}, "artifactId"),
         ("input", {"type": "text"}, "inlineText"),
+        ("input", {"type": "text", "inlineText": "   "}, "inlineText"),
         ("brief", {}, "title"),
+        ("brief", {"title": "   "}, "title"),
+        ("brief", {"title": "Smoke", "durationSeconds": 86401}, "durationSeconds"),
         ("output", {}, "container"),
+        ("output", {"container": "mp4", "resolution": "8193x1080"}, "resolution"),
         ("budget", {}, "maxAmount"),
         ("budget", {"maxAmount": "1.00"}, "currency"),
     ],
@@ -292,7 +297,22 @@ async def test_mcp_job_creation_rejects_unknown_workflow_with_actionable_error(
 
 
 @pytest.mark.asyncio
-async def test_mcp_job_creation_rejects_incomplete_artifact_input(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("field", "value", "message_fragment"),
+    [
+        ("input", {"type": "artifact"}, "artifactId"),
+        ("input", {"type": "text", "inlineText": "   "}, "inlineText"),
+        ("brief", {}, "title"),
+        ("output", {}, "container"),
+        ("budget", {}, "maxAmount"),
+    ],
+)
+async def test_mcp_job_creation_rejects_invalid_nested_contracts(
+    tmp_path: Path,
+    field: str,
+    value: dict[str, object],
+    message_fragment: str,
+) -> None:
     from mcp import Client
 
     service = JobService(tmp_path / "jobs.sqlite3")
@@ -302,8 +322,8 @@ async def test_mcp_job_creation_rejects_incomplete_artifact_input(tmp_path: Path
     ) as client:
         result = await client.call_tool(
             "submit_video_job",
-            {"request": {**_request(), "input": {"type": "artifact"}}},
+            {"request": {**_request(), field: value}},
         )
 
     assert result.is_error is True
-    assert "artifactId" in result.content[0].text
+    assert message_fragment in result.content[0].text

@@ -17,6 +17,7 @@ from openmontage.contracts import (
     JobCreateRequest,
     JobEvent,
     JobEventType,
+    JobRequestSnapshot,
     JobSnapshot,
     JobStatus,
     OutboxRecord,
@@ -61,6 +62,19 @@ def _now() -> datetime:
 
 def _canonical_json(value: dict[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _same_request_identity(snapshot_json: str, expected: dict[str, Any]) -> bool:
+    """Compare a legacy snapshot after applying the current semantic normalization."""
+    try:
+        snapshot = json.loads(snapshot_json)
+        stored_request = JobCreateRequest.model_validate(snapshot["request"])
+        stored_attribution = JobAttribution.model_validate(snapshot["attribution"])
+        expected_request = JobCreateRequest.model_validate(expected["request"])
+        expected_attribution = JobAttribution.model_validate(expected["attribution"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return stored_request == expected_request and stored_attribution == expected_attribution
 
 
 class JobService:
@@ -167,7 +181,9 @@ class JobService:
                 (attribution.workspace_id, request.client_request_id),
             ).fetchone()
             if existing is not None:
-                if existing["request_hash"] != request_hash:
+                if existing["request_hash"] != request_hash and not _same_request_identity(
+                    existing["snapshot_json"], request_identity
+                ):
                     raise JobConflictError(
                         "client_request_id was already used with different Job input or attribution"
                     )
@@ -180,7 +196,7 @@ class JobService:
                 status=JobStatus.QUEUED,
                 workflow=workflow,
                 attribution=attribution,
-                request=request,
+                request=JobRequestSnapshot.model_validate(request.to_wire()),
                 stages=tuple(
                     StageSnapshot(
                         code=stage.code,

@@ -20,7 +20,6 @@ from lib.checkpoint import (
 from openmontage.artifact_bridge import ArtifactBridgeClient, ArtifactBridgeError
 from openmontage.contracts import (
     ApprovalStatus,
-    ArtifactJobInput,
     JobSnapshot,
     JobStatus,
     StageSnapshot,
@@ -434,16 +433,23 @@ class JobWorker:
             return
         init_project(
             snapshot.job_id,
-            title=snapshot.request.brief.title,
+            title=(
+                snapshot.request.brief.get("title")
+                if isinstance(snapshot.request.brief.get("title"), str)
+                and snapshot.request.brief["title"].strip()
+                else snapshot.job_id
+            ),
             pipeline_type=snapshot.workflow.name,
             pipeline_dir=self.projects_dir,
         )
 
     def _prepare_inputs(self, snapshot: JobSnapshot) -> tuple[dict[str, Any], ...]:
         request_input = snapshot.request.input
-        if not isinstance(request_input, ArtifactJobInput):
+        if request_input.get("type") != "artifact":
             return ()
-        artifact_id = request_input.artifact_id
+        artifact_id = request_input.get("artifactId")
+        if not isinstance(artifact_id, str) or not artifact_id.strip():
+            raise ValueError("Artifact input requires artifactId")
         if self.artifact_bridge is None:
             raise ArtifactBridgeError("Artifact Bridge is required for Artifact input")
 

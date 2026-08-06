@@ -7,7 +7,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from lib.pipeline_loader import get_stage_order, list_pipelines, load_pipeline_readonly
 
@@ -74,28 +74,42 @@ class JobAttribution(WireModel):
     trace_id: str = Field(min_length=1)
 
 
+NonBlankString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
 class TextJobInput(WireModel):
     type: Literal["text"]
-    inline_text: str = Field(min_length=1)
+    inline_text: NonBlankString
 
 
 class ArtifactJobInput(WireModel):
     type: Literal["artifact"]
-    artifact_id: str = Field(min_length=1)
+    artifact_id: NonBlankString
 
 
 JobInput = Annotated[TextJobInput | ArtifactJobInput, Field(discriminator="type")]
 
 
 class JobBrief(WireModel):
-    title: str = Field(min_length=1)
-    duration_seconds: int | None = Field(default=None, gt=0)
+    title: NonBlankString
+    duration_seconds: int | None = Field(default=None, gt=0, le=86_400)
+    audience: NonBlankString | None = None
 
 
 class JobOutput(WireModel):
     container: Literal["mp4"]
     resolution: str | None = Field(default=None, pattern=r"^[1-9][0-9]*x[1-9][0-9]*$")
     fps: int | None = Field(default=None, gt=0, le=240)
+
+    @field_validator("resolution")
+    @classmethod
+    def validate_resolution_bounds(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        width, height = (int(part) for part in value.split("x"))
+        if width > 8192 or height > 8192:
+            raise ValueError("resolution dimensions must not exceed 8192 pixels")
+        return value
 
 
 class JobBudget(WireModel):
@@ -122,6 +136,18 @@ class JobCreateRequest(WireModel):
     brief: JobBrief
     output: JobOutput
     budget: JobBudget
+
+
+class JobRequestSnapshot(WireModel):
+    """Backward-compatible persisted v1 request payload."""
+
+    schema_version: Literal[1] = 1
+    client_request_id: str = Field(min_length=1)
+    workflow: str = Field(min_length=1)
+    input: dict[str, Any]
+    brief: dict[str, Any]
+    output: dict[str, Any]
+    budget: dict[str, Any]
 
 
 def job_submission_capability() -> dict[str, Any]:
@@ -229,7 +255,7 @@ class JobSnapshot(WireModel):
     status: JobStatus
     workflow: WorkflowDefinition
     attribution: JobAttribution
-    request: JobCreateRequest
+    request: JobRequestSnapshot
     stages: tuple[StageSnapshot, ...]
     artifacts: tuple[PublishedArtifact, ...] = ()
     current_stage: str | None = None
