@@ -132,6 +132,7 @@ class DelegationSigningProxy:
         return f"http://{host}:{port}{self._upstream_prefix}"
 
     def _forward(self, handler: BaseHTTPRequestHandler) -> None:
+        response_cached = False
         try:
             length = int(handler.headers.get("Content-Length", "0"))
             if length < 0 or length > _MAX_REQUEST_BYTES:
@@ -212,6 +213,7 @@ class DelegationSigningProxy:
                         headers=response_headers,
                         body=response_body,
                     )
+                    response_cached = True
                 _send_response(handler, upstream.status_code, response_headers, response_body)
             else:
                 handler.send_response(upstream.status_code)
@@ -234,6 +236,10 @@ class DelegationSigningProxy:
         except InvocationRequestConflictError as exc:
             handler.send_error(409, str(exc))
         except Exception:
-            if self.invocation_store is not None and "invocation_id" in locals():
+            if (
+                self.invocation_store is not None
+                and "invocation_id" in locals()
+                and not response_cached
+            ):
                 self.invocation_store.mark(invocation_id, "unknown")
             handler.send_error(502)

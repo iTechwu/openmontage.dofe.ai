@@ -8,6 +8,7 @@ from threading import Thread
 
 import requests
 
+import openmontage.delegation_proxy as delegation_proxy
 from openmontage.delegation_proxy import DelegationSigningProxy
 from openmontage.invocation_store import ModelInvocationStore
 from tools.dofe.delegation import DelegatedModelCredential
@@ -202,6 +203,79 @@ def test_proxy_replays_persisted_success_after_restart_without_forwarding_again(
     assert len(captured) == 1
     assert responses[0].content == responses[1].content == b'{"ok":true}'
     assert store.list_recoverable(job_id="job-1") == []
+
+
+def test_proxy_keeps_cached_success_when_downstream_disconnects(monkeypatch, tmp_path) -> None:
+    forwarded = 0
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            nonlocal forwarded
+            forwarded += 1
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = b'{"taskId":"task-accepted"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    original_send_response = delegation_proxy._send_response
+    send_attempts = 0
+
+    def disconnect_once(*args, **kwargs):
+        nonlocal send_attempts
+        send_attempts += 1
+        if send_attempts == 1:
+            raise BrokenPipeError("simulated downstream disconnect")
+        return original_send_response(*args, **kwargs)
+
+    monkeypatch.setattr(delegation_proxy, "_send_response", disconnect_once)
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = upstream.server_address
+        credential = DelegatedModelCredential(
+            api_key="delegated-api-key",
+            models_base_url=f"http://{host}:{port}/api",
+            delegation_id="delegation-1",
+            external_job_id="job-disconnect",
+            pipeline_stage="assets",
+            runtime_credential_id="runtime-credential-1",
+            expires_at="2099-08-06T09:00:01Z",
+        )
+        store = ModelInvocationStore(tmp_path / "jobs.sqlite3")
+        with DelegationSigningProxy(credential, invocation_store=store) as proxy:
+            headers = {"X-OpenMontage-Logical-Call-Id": "accepted-call"}
+            with requests.Session() as session:
+                try:
+                    session.post(
+                        f"{proxy.base_url}/v1/generation/tasks",
+                        headers=headers,
+                        json={"model": "seedream-5.0", "prompt": "scene"},
+                        timeout=5,
+                    )
+                except requests.RequestException:
+                    pass
+                replay = session.post(
+                    f"{proxy.base_url}/v1/generation/tasks",
+                    headers=headers,
+                    json={"model": "seedream-5.0", "prompt": "scene"},
+                    timeout=5,
+                )
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+    assert replay.status_code == 200
+    assert replay.json() == {"taskId": "task-accepted"}
+    assert forwarded == 1
+    assert store.list_recoverable(job_id="job-disconnect") == []
 
 
 def test_proxy_rejects_reused_logical_call_id_with_different_request(tmp_path) -> None:
