@@ -1,7 +1,8 @@
 # Reference Authority
 
-Give every reference exactly one primary role and describe both transfer and
-non-transfer:
+Give every reference exactly one primary role, a `binding_mode`, and both
+transfer and non-transfer. Use a provider token only when the selected tool
+contract declares its syntax; otherwise bind via the provider input field.
 
 ```text
 @Image1 controls vehicle identity only; preserve body geometry, paint, lights,

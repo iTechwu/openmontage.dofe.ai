@@ -21,7 +21,9 @@ Use this skill for execution facts. Use
    the Seedance family name or another provider's endpoint.
 4. Resolve reference-token syntax from the selected provider surface. Treat
    fal, DoFe, Runway, Higgsfield, and Replicate as separate prompt surfaces;
-   never normalize their tokens to a universal `@Image1` form.
+   never normalize their tokens to a universal `@Image1` form. If the selected
+   tool contract does not declare prompt-token syntax, use its input parameter
+   and mark the reference `binding_mode=input_parameter`; do not invent a token.
 5. Pass an explicit `output_path` under the active project workspace.
 6. Preserve the approved provider/model path. Stop for approval before any
    fallback changes that path.

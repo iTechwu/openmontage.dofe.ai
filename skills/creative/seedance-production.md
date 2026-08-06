@@ -16,7 +16,7 @@ pipeline, not only cinematic.
 ## Scene Contract
 
 For every selected Seedance scene, set
-`generation_contract.provider_family="seedance"` and complete the schema's
+`generation_contract.model_family="seedance"` and complete the schema's
 `seedance_contract`:
 
 - choose the `narrative` or `utility` lane;
@@ -27,9 +27,10 @@ For every selected Seedance scene, set
 - record exclusions, accepted source status, observed opening state when
   available, extension depth, confidence, and uncertainties.
 
-Reference tokens are surface-specific. Record the exact token emitted or
-required by the selected route in `reference_roles[].tag`; never assume
-`@Image1` is portable across providers.
+Reference tokens are surface-specific. Set `binding_mode=prompt_token` only
+when the selected tool contract declares the syntax and record that exact token
+in `reference_roles[].tag`. Otherwise use `input_parameter` and a stable internal
+tag; never assume `@Image1` is portable across providers.
 
 ## Asset Generation
 

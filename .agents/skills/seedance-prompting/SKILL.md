@@ -45,7 +45,9 @@ Do not mix both structures.
 - Keep dialogue short, assign every line to a visible speaker, and specify the
   reaction/pause that makes the exchange readable.
 - Preserve the selected surface's exact reference tags and explicitly block
-  unwanted transfer. Never assume `@Image1` syntax works on another route.
+  unwanted transfer. Emit a tag only for `binding_mode=prompt_token`. For
+  `input_parameter`, describe the reference role without inventing a provider
+  token. Never assume `@Image1` syntax works on another route.
 - If a source clip is attached, let it carry visible state; text describes the
   delta, open motion, endpoint, and known drift risks.
 - Move plates, logos, subtitles, HUDs, and required text to post.

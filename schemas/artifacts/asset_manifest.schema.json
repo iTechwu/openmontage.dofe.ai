@@ -41,9 +41,9 @@
             "description": "Generation prompt compilation and preflight audit trail.",
             "required": ["draft", "final", "skills_applied", "continuity_checked", "reference_roles_checked"],
             "properties": {
-              "draft": { "type": "string" },
+              "draft": { "type": "string", "minLength": 1 },
               "critique": { "type": "array", "items": { "type": "string" } },
-              "final": { "type": "string" },
+              "final": { "type": "string", "minLength": 1 },
               "skills_applied": {
                 "type": "array",
                 "items": { "type": "string" },
@@ -149,13 +149,25 @@
                   "properties": {
                     "skills_applied": {
                       "allOf": [
+                        { "contains": { "const": "seedance-provider" } },
+                        { "contains": { "const": "seedance-directing" } },
+                        { "contains": { "const": "seedance-continuity" } },
                         { "contains": { "const": "seedance-prompting" } },
                         { "contains": { "const": "seedance-quality" } }
                       ]
-                    }
+                    },
+                    "continuity_checked": { "const": true },
+                    "reference_roles_checked": { "const": true }
                   }
                 },
-                "take_review": { "required": ["canon_status"] }
+                "take_review": {
+                  "required": [
+                    "canon_status",
+                    "extension_depth",
+                    "observation_confidence",
+                    "uncertainties"
+                  ]
+                }
               }
             }
           }

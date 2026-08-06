@@ -129,7 +129,7 @@ def test_scene_plan_accepts_seedance_generation_contract():
                 "start_seconds": 0,
                 "end_seconds": 6,
                 "generation_contract": {
-                    "provider_family": "seedance",
+                    "model_family": "seedance",
                     "mode": "reference_to_video",
                     "shot_structure": "single_take",
                     "continuation_type": "sequence_first_clip",
@@ -139,7 +139,8 @@ def test_scene_plan_accepts_seedance_generation_contract():
                     "identity_anchors": ["compact SUV, white paint, split lamps"],
                     "reference_roles": [
                         {
-                            "tag": "@Image1",
+                            "tag": "vehicle-identity-reference",
+                            "binding_mode": "input_parameter",
                             "role": "identity",
                             "transfers": ["body geometry", "paint", "lights"],
                             "must_not_transfer": ["background", "text"],
@@ -217,8 +218,9 @@ def test_asset_manifest_accepts_prompt_and_take_reviews():
                 "prompt_review": {
                     "draft": "A cinematic SUV drives through a tunnel.",
                     "critique": ["Missing endpoint", "Identity role is ambiguous"],
-                    "final": "@Image1 controls vehicle identity only...",
+                    "final": "The attached identity reference controls vehicle geometry only...",
                     "skills_applied": [
+                        "seedance-provider",
                         "seedance-directing",
                         "seedance-continuity",
                         "seedance-prompting",
@@ -259,7 +261,7 @@ def test_seedance_generation_contract_rejects_incomplete_directors_read():
                 "start_seconds": 0,
                 "end_seconds": 5,
                 "generation_contract": {
-                    "provider_family": "seedance",
+                    "model_family": "seedance",
                     "mode": "text_to_video",
                     "shot_structure": "single_take",
                     "continuation_type": "standalone",
@@ -320,7 +322,7 @@ def test_seedance_keep_decision_must_enter_canon():
                 "prompt_review": {
                     "draft": "draft",
                     "final": "final",
-                    "skills_applied": ["seedance-prompting", "seedance-quality"],
+                    "skills_applied": list(SKILL_NAMES),
                     "continuity_checked": True,
                     "reference_roles_checked": True,
                 },
@@ -329,6 +331,9 @@ def test_seedance_keep_decision_must_enter_canon():
                     "issues": [],
                     "accepted_as_canon": False,
                     "canon_status": "not_accepted",
+                    "extension_depth": 0,
+                    "observation_confidence": "high",
+                    "uncertainties": [],
                     "next_action": "continue",
                 },
             }
@@ -370,3 +375,165 @@ def test_generic_asset_reviews_do_not_require_seedance_specific_fields():
     }
 
     Draft202012Validator(schema).validate(artifact)
+
+
+def _minimal_seedance_scene_contract() -> dict:
+    return {
+        "model_family": "seedance",
+        "mode": "image_to_video",
+        "shot_structure": "single_take",
+        "continuation_type": "standalone",
+        "felt_intent": "Show controlled vehicle weight.",
+        "planned_start_state": "SUV is stationary.",
+        "planned_end_state": "SUV stops at the lane marker.",
+        "identity_anchors": ["white compact SUV"],
+        "prompt_budget": {
+            "primary_spend": "motion",
+            "economized": ["background traffic"],
+        },
+        "seedance_contract": {
+            "lane": "utility",
+            "authoring_state": {
+                "utility_intent": "Demonstrate one controlled braking action.",
+                "non_narrative_refusal": "Do not add conflict or transformation.",
+            },
+            "primary_action": "SUV brakes at the lane marker.",
+            "shot_design": {
+                "framing": "low medium-wide",
+                "camera": "locked 35mm",
+                "lighting": "overcast daylight",
+                "behavior": "suspension compresses once",
+            },
+            "sound_intent": "tire contact and engine load",
+            "prompt_carriers": ["suspension compresses once"],
+            "exclusions": ["no readable text"],
+            "continuity_state": {
+                "source_status": "canonical_reference",
+                "extension_depth": 0,
+                "reanchor_required": False,
+                "observation_confidence": "high",
+                "uncertainties": [],
+            },
+        },
+    }
+
+
+def _scene_artifact(contract: dict) -> dict:
+    return {
+        "version": "1.0",
+        "scenes": [
+            {
+                "id": "clip-01",
+                "type": "generated",
+                "description": "Controlled braking insert.",
+                "start_seconds": 0,
+                "end_seconds": 5,
+                "generation_contract": contract,
+            }
+        ],
+    }
+
+
+def test_generation_contract_requires_explicit_model_family():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "scene_plan.schema.json").read_text()
+    )
+    contract = _minimal_seedance_scene_contract()
+    del contract["model_family"]
+
+    errors = list(Draft202012Validator(schema).iter_errors(_scene_artifact(contract)))
+    assert any("model_family" in error.message for error in errors)
+
+
+def test_connected_seedance_scene_rejects_planned_source_state():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "scene_plan.schema.json").read_text()
+    )
+    contract = _minimal_seedance_scene_contract()
+    contract["continuation_type"] = "seamless_continuation"
+    contract["seedance_contract"]["continuity_state"] = {
+        "source_status": "planned",
+        "extension_depth": 1,
+        "observation_confidence": "unobserved",
+        "uncertainties": [],
+    }
+
+    assert list(Draft202012Validator(schema).iter_errors(_scene_artifact(contract)))
+
+
+def test_connected_seedance_scene_requires_observed_parent_state():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "scene_plan.schema.json").read_text()
+    )
+    contract = _minimal_seedance_scene_contract()
+    contract["continuation_type"] = "seamless_continuation"
+    contract["seedance_contract"]["continuity_state"] = {
+        "source_status": "accepted",
+        "extension_depth": 1,
+        "observation_confidence": "high",
+        "uncertainties": [],
+    }
+
+    errors = list(Draft202012Validator(schema).iter_errors(_scene_artifact(contract)))
+    messages = " ".join(error.message for error in errors)
+    assert "parent_asset_id" in messages
+    assert "observed_start_state" in messages
+
+
+def test_third_output_extension_requires_reanchor():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "scene_plan.schema.json").read_text()
+    )
+    contract = _minimal_seedance_scene_contract()
+    contract["continuation_type"] = "seamless_continuation"
+    contract["seedance_contract"]["continuity_state"] = {
+        "parent_asset_id": "clip-00-take-01",
+        "source_status": "accepted",
+        "observed_start_state": "SUV is aligned at the lane marker.",
+        "extension_depth": 3,
+        "reanchor_required": False,
+        "observation_confidence": "high",
+        "uncertainties": [],
+    }
+
+    assert list(Draft202012Validator(schema).iter_errors(_scene_artifact(contract)))
+
+
+def test_seedance_asset_requires_full_skill_and_check_audit():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "asset_manifest.schema.json").read_text()
+    )
+    artifact = {
+        "version": "1.0",
+        "assets": [
+            {
+                "id": "take-01",
+                "type": "video",
+                "path": "assets/video/take-01.mp4",
+                "source_tool": "seedance_video",
+                "scene_id": "clip-01",
+                "model_family": "seedance",
+                "provider": "fal",
+                "model": "seedance-2.0",
+                "prompt_review": {
+                    "draft": "draft",
+                    "final": "final",
+                    "skills_applied": ["seedance-prompting", "seedance-quality"],
+                    "continuity_checked": False,
+                    "reference_roles_checked": False,
+                },
+                "take_review": {
+                    "decision": "reject",
+                    "issues": ["identity drift"],
+                    "accepted_as_canon": False,
+                    "canon_status": "not_accepted",
+                    "extension_depth": 0,
+                    "observation_confidence": "high",
+                    "uncertainties": [],
+                    "next_action": "re-anchor",
+                },
+            }
+        ],
+    }
+
+    assert list(Draft202012Validator(schema).iter_errors(artifact))

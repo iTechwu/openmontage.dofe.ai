@@ -24,7 +24,7 @@ Turn story intent into a shot that can be seen and heard. Do not use
    become a withheld gesture, interrupted task, eyeline, spatial retreat, or
    contradiction between dialogue and body.
 7. Persist the result in `scene_plan.scenes[].generation_contract`, including
-   `provider_family="seedance"` and the structured `seedance_contract`.
+   `model_family="seedance"` and the structured `seedance_contract`.
 
 ## Shot Contract
 

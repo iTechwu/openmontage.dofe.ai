@@ -71,12 +71,12 @@
           "generation_contract": {
             "type": "object",
             "description": "Provider-neutral control contract for an AI-generated video scene.",
-            "required": ["mode", "shot_structure", "felt_intent", "planned_end_state"],
+            "required": ["model_family", "mode", "shot_structure", "felt_intent", "planned_end_state"],
             "properties": {
-              "provider_family": {
+              "model_family": {
                 "type": "string",
                 "enum": ["seedance", "generic"],
-                "description": "Generation family selected by video_selector; seedance enables the structured production contract."
+                "description": "Model family selected by video_selector; seedance enables the structured production contract."
               },
               "mode": {
                 "type": "string",
@@ -104,9 +104,14 @@
                 "type": "array",
                 "items": {
                   "type": "object",
-                  "required": ["tag", "role", "transfers", "must_not_transfer"],
+                  "required": ["tag", "binding_mode", "role", "transfers", "must_not_transfer"],
                   "properties": {
                     "tag": { "type": "string", "minLength": 1 },
+                    "binding_mode": {
+                      "type": "string",
+                      "enum": ["prompt_token", "input_parameter", "internal_only"],
+                      "description": "How this reference reaches the provider. prompt_token is valid only when the selected tool contract declares token syntax."
+                    },
                     "role": {
                       "type": "string",
                       "enum": ["identity", "first_frame", "last_frame", "product", "environment", "motion", "camera", "timing", "audio", "continuity_source"]
@@ -208,6 +213,27 @@
                         "uniqueItems": true
                       }
                     },
+                    "allOf": [
+                      {
+                        "if": {
+                          "properties": {
+                            "source_status": { "enum": ["accepted", "accepted_with_deviation"] }
+                          },
+                          "required": ["source_status"]
+                        },
+                        "then": { "required": ["parent_asset_id", "observed_start_state"] }
+                      },
+                      {
+                        "if": {
+                          "properties": { "extension_depth": { "const": 3 } },
+                          "required": ["extension_depth"]
+                        },
+                        "then": {
+                          "required": ["reanchor_required"],
+                          "properties": { "reanchor_required": { "const": true } }
+                        }
+                      }
+                    ],
                     "additionalProperties": false
                   }
                 },
@@ -250,16 +276,71 @@
             },
             "allOf": [
               {
-                "if": { "properties": { "provider_family": { "const": "seedance" } }, "required": ["provider_family"] },
+                "if": { "properties": { "model_family": { "const": "seedance" } }, "required": ["model_family"] },
                 "then": {
                   "required": [
-                    "provider_family",
+                    "model_family",
                     "continuation_type",
                     "planned_start_state",
                     "identity_anchors",
                     "prompt_budget",
                     "seedance_contract"
                   ]
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "model_family": { "const": "seedance" },
+                    "continuation_type": {
+                      "enum": [
+                        "seamless_continuation",
+                        "intentional_next_shot",
+                        "bridge_between_known_states",
+                        "repair_tail"
+                      ]
+                    }
+                  },
+                  "required": ["model_family", "continuation_type"]
+                },
+                "then": {
+                  "properties": {
+                    "seedance_contract": {
+                      "properties": {
+                        "continuity_state": {
+                          "required": ["parent_asset_id", "observed_start_state"],
+                          "properties": {
+                            "source_status": {
+                              "enum": ["accepted", "accepted_with_deviation"]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "model_family": { "const": "seedance" },
+                    "continuation_type": { "const": "reanchor_after_drift" }
+                  },
+                  "required": ["model_family", "continuation_type"]
+                },
+                "then": {
+                  "properties": {
+                    "seedance_contract": {
+                      "properties": {
+                        "continuity_state": {
+                          "properties": {
+                            "source_status": { "const": "canonical_reference" },
+                            "extension_depth": { "const": 0 }
+                          }
+                        }
+                      }
+                    }
+                  }
                 }
               }
             ],
