@@ -11,6 +11,7 @@ This stage builds the beat map, selected lines, title-card copy, and reveal stru
 | Schema | `schemas/artifacts/script.schema.json` | Artifact validation |
 | Prior artifact | `state.artifacts["proposal"]["proposal_packet"]` | Emotional arc and source truth |
 | Tools | `transcriber`, `scene_detect` | Optional dialogue mining and source review |
+| Layer 3 | `.agents/skills/seedance-directing/SKILL.md` | Motivated beats, performance, and shot-contract inputs when Seedance is planned |
 
 ## Process
 
@@ -24,6 +25,15 @@ Use a simple structure:
 - landing.
 
 If the piece is longer, add one midpoint turn. Do not let it become essay-shaped.
+
+### 1b. Direct Generated Narrative Beats
+
+When the approved plan uses Seedance, read `seedance-directing` before writing
+generated narrative beats. For each beat, record its lane, felt intent, visible
+turn, focal objective/obstacle, one suppressed behavior, one brief-specific
+detail, and the stock genre shortcut being replaced. Store these internal
+records under `script.metadata.directing_contracts`; only visible/audible
+carriers belong in spoken dialogue or narration.
 
 ### 2. Use Dialogue Sparingly
 

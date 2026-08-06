@@ -1,0 +1,4 @@
+interface:
+  display_name: "Seedance Quality"
+  short_description: "Review prompts and generated Seedance takes"
+  default_prompt: "Use $seedance-quality to review this Seedance prompt or generated take and choose the smallest repair."

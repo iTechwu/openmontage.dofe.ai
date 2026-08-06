@@ -21,7 +21,7 @@ OpenMontage wraps it as `gemini_omni_video` (native Gemini API, no gateway). It 
 
 | Use it for | Prefer another provider for |
 |---|---|
-| Iterative refinement — generate, review, then edit the same clip in layers | One-shot cinematic hero clips (→ Seedance 2.0, see `seedance-2-0`) |
+| Iterative refinement — generate, review, then edit the same clip in layers | One-shot cinematic hero clips (→ Seedance 2.0, see `seedance-provider` and `seedance-prompting`) |
 | Editing an existing/uploaded clip (restyle, add/remove objects, change text) | Clips longer than 10s or above 720p |
 | On-screen rendered text and word-by-word text beats | Seed-reproducible generations (no seed support) |
 | Reference-image-bound subjects/styles via prompt tags | First/last-frame interpolation (→ `veo_video`) |

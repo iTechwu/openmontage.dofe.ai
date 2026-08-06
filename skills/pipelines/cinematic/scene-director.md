@@ -12,6 +12,8 @@ You are deciding how each cinematic beat will look and transition. This is where
 | Prior artifacts | `state.artifacts["script"]["script"]`, `state.artifacts["proposal"]["proposal_packet"]` | Beat map and source truth |
 | Tools | `frame_sampler`, `scene_detect` | Source inspection and reframing checks |
 | Playbook | Active style playbook | Color and typography consistency |
+| Layer 3 | `.agents/skills/seedance-directing/SKILL.md` | Motivated shot contracts for generated scenes |
+| Layer 3 | `.agents/skills/seedance-continuity/SKILL.md` | Identity, references, accepted-state handoffs, and re-anchors |
 
 ## Process
 
@@ -49,6 +51,24 @@ Recommended metadata keys:
 - `title_card_rules`
 - `support_insert_rules`
 
+### 4b. Create A Generation Contract
+
+For every Seedance-generated scene, populate `scene.generation_contract` rather
+than leaving control decisions in prose. At minimum lock:
+
+- generation mode and single-take/multi-shot structure,
+- felt intent, planned opening, and completed endpoint,
+- identity anchors and one primary role for each reference,
+- continuity locks, allowed changes, completed beats, and reserved beats,
+- identity/motion/scene-density prompt allocation,
+- whether native audio is approved.
+
+For connected scenes, read `seedance-continuity`, set the continuation type and
+parent scene, and schedule a canonical-reference re-anchor after two consecutive
+output-sourced generations (hard ceiling three). Future scene prompts remain
+provisional until the previous take is accepted and its actual end state is
+recorded.
+
 ### 5. 5-Aspect Scene-Plan Checklist
 
 > Every scene beat — and especially every hero frame — must specify all five aspects. Cinematic relies on a small number of memorable frames; vague hero-frame specs are the single most common failure mode and produce unpredictable model output. Marking an aspect as N/A is allowed but must be explicit (e.g., "no subject — establishing scenery shot"). Silent omission is forbidden.
@@ -70,6 +90,8 @@ Recommended metadata keys:
 - support inserts are justified,
 - overlays are recorded under `overlays:`, never inside the depth/framing description,
 - the visual language stays consistent across the piece.
+- every Seedance-generated scene has a schema-valid `generation_contract`, and connected
+  scenes begin from accepted evidence rather than planned state.
 
 ## Common Pitfalls
 

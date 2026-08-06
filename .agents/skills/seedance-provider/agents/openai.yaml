@@ -1,0 +1,4 @@
+interface:
+  display_name: "Seedance Provider"
+  short_description: "Choose Seedance provider modes and parameters"
+  default_prompt: "Use $seedance-provider to choose the correct Seedance provider, mode, and generation parameters."

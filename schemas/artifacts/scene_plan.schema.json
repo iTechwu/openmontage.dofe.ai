@@ -68,6 +68,67 @@
             "default": false,
             "description": "True if this is the visual peak of the video — deserves extra attention"
           },
+          "generation_contract": {
+            "type": "object",
+            "description": "Provider-neutral control contract for an AI-generated video scene.",
+            "required": ["mode", "shot_structure", "felt_intent", "planned_end_state"],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": ["text_to_video", "image_to_video", "reference_to_video", "first_last_frame", "video_to_video", "edit", "extend"]
+              },
+              "shot_structure": {
+                "type": "string",
+                "enum": ["single_take", "phased_single_take", "multi_shot"]
+              },
+              "continuation_type": {
+                "type": "string",
+                "enum": ["standalone", "sequence_first_clip", "seamless_continuation", "intentional_next_shot", "bridge_between_known_states", "repair_tail", "reanchor_after_drift"]
+              },
+              "parent_scene_id": { "type": "string" },
+              "felt_intent": { "type": "string", "minLength": 1 },
+              "planned_start_state": { "type": "string" },
+              "planned_end_state": { "type": "string", "minLength": 1 },
+              "identity_anchors": {
+                "type": "array",
+                "items": { "type": "string" },
+                "uniqueItems": true
+              },
+              "reference_roles": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["tag", "role", "transfers", "must_not_transfer"],
+                  "properties": {
+                    "tag": { "type": "string", "minLength": 1 },
+                    "role": {
+                      "type": "string",
+                      "enum": ["identity", "first_frame", "last_frame", "product", "environment", "motion", "camera", "timing", "audio", "continuity_source"]
+                    },
+                    "transfers": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                    "must_not_transfer": { "type": "array", "items": { "type": "string" } }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "continuity_locks": { "type": "array", "items": { "type": "string" } },
+              "allowed_changes": { "type": "array", "items": { "type": "string" } },
+              "completed_beats": { "type": "array", "items": { "type": "string" } },
+              "reserved_beats": { "type": "array", "items": { "type": "string" } },
+              "prompt_budget": {
+                "type": "object",
+                "required": ["primary_spend", "economized"],
+                "properties": {
+                  "primary_spend": { "type": "string", "enum": ["identity", "motion", "scene_density"] },
+                  "secondary_spend": { "type": "string", "enum": ["identity", "motion", "scene_density"] },
+                  "economized": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+                },
+                "additionalProperties": false
+              },
+              "generate_audio": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          },
           "character_actions": {
             "type": "array",
             "description": "Character-specific acting beats for rigged character animation scenes",

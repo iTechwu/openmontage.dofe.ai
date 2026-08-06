@@ -1,0 +1,4 @@
+interface:
+  display_name: "Seedance Directing"
+  short_description: "Design motivated shots and story beats"
+  default_prompt: "Use $seedance-directing to turn this beat into a controlled, motivated shot contract."

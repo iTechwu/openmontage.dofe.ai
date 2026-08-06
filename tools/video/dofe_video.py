@@ -52,7 +52,7 @@ class DofeVideo(BaseTool):
         "Set DOFE_ENABLED=true to make selectors prefer the dofe chain. "
         "Override the default model with DOFE_VIDEO_MODEL (default seedance-2.0-fast)."
     )
-    agent_skills = ["seedance-2-0", "ai-video-gen"]
+    agent_skills = ["seedance-provider", "seedance-prompting", "ai-video-gen"]
 
     dofe_spec = DofeToolSpec(
         capability="video",

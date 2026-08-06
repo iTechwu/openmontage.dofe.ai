@@ -47,7 +47,7 @@ class HiggsFieldVideo(BaseTool):
         "  Get them at https://cloud.higgsfield.ai/api-keys\n"
         "  Alternatively, set HIGGSFIELD_KEY as a combined key:secret value."
     )
-    agent_skills = ["seedance-2-0", "ai-video-gen"]
+    agent_skills = ["seedance-provider", "seedance-prompting", "ai-video-gen"]
 
     capabilities = ["text_to_video", "image_to_video"]
     supports = {
@@ -95,7 +95,7 @@ class HiggsFieldVideo(BaseTool):
                     "soul_cinema",
                 ],
                 "default": _DEFAULT_MODEL,
-                "description": "Underlying model. Defaults to Seedance 2.0 (preferred premium) — see .agents/skills/seedance-2-0/",
+                "description": "Underlying model. Defaults to Seedance 2.0 (preferred premium) — see .agents/skills/seedance-provider/",
             },
             "duration": {
                 "type": "string",
