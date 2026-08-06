@@ -7,10 +7,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from typing import Any
 from urllib.parse import urlparse
-from uuid import uuid4
-
 import requests
 
+from openmontage.invocation_store import ModelInvocationStore
 from tools.dofe.delegation import DelegatedModelCredential
 
 
@@ -31,8 +30,20 @@ _MAX_REQUEST_BYTES = 32 * 1024 * 1024
 
 
 class DelegationSigningProxy:
-    def __init__(self, credential: DelegatedModelCredential) -> None:
+    def __init__(
+        self,
+        credential: DelegatedModelCredential,
+        *,
+        invocation_store: ModelInvocationStore | None = None,
+        job_id: str | None = None,
+        stage: str | None = None,
+        stage_attempt: int = 1,
+    ) -> None:
         self.credential = credential
+        self.invocation_store = invocation_store
+        self.job_id = job_id or credential.external_job_id
+        self.stage = stage or credential.pipeline_stage
+        self.stage_attempt = stage_attempt
         parsed = urlparse(credential.models_base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError("Delegated models base URL is invalid")
@@ -84,10 +95,20 @@ class DelegationSigningProxy:
                 return
             body = handler.rfile.read(length) if length else None
             incoming_request_id = handler.headers.get("X-Request-Id", "").strip()
-            seed = incoming_request_id or uuid4().hex
-            invocation_id = "om-" + hashlib.sha256(
-                f"{self.credential.external_job_id}\n{self.credential.pipeline_stage}\n{seed}".encode()
-            ).hexdigest()[:32]
+            seed = incoming_request_id or hashlib.sha256(body or b"").hexdigest()
+            if self.invocation_store is None:
+                invocation_id = "om-" + hashlib.sha256(
+                    f"{self.credential.external_job_id}\n{self.credential.pipeline_stage}\n{seed}".encode()
+                ).hexdigest()[:32]
+            else:
+                record = self.invocation_store.get_or_create(
+                    job_id=self.job_id,
+                    stage=self.stage,
+                    attempt=self.stage_attempt,
+                    request_id=seed,
+                )
+                invocation_id = record.model_invocation_id
+                self.invocation_store.mark(invocation_id, "in_flight")
             headers = {
                 key: value
                 for key, value in handler.headers.items()
@@ -113,5 +134,12 @@ class DelegationSigningProxy:
             for chunk in upstream.raw.stream(64 * 1024, decode_content=False):
                 handler.wfile.write(chunk)
             upstream.close()
+            if self.invocation_store is not None:
+                self.invocation_store.mark(
+                    invocation_id,
+                    "succeeded" if upstream.status_code < 400 else "failed",
+                )
         except Exception:
+            if self.invocation_store is not None and "invocation_id" in locals():
+                self.invocation_store.mark(invocation_id, "unknown")
             handler.send_error(502)
