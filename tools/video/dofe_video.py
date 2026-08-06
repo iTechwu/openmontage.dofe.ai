@@ -87,6 +87,18 @@ class DofeVideo(BaseTool):
         "aspect_ratio": True,
         "seed": True,
     }
+    reference_binding_contract = {
+        "supported_modes": ["input_parameter"],
+        "input_fields": [
+            "image_url",
+            "image_path",
+            "reference_image_url",
+            "reference_image_path",
+            "reference_image_urls",
+            "reference_image_paths",
+        ],
+        "prompt_token_syntax": None,
+    }
     best_for = [
         "video generation via the models.dofe.ai gateway (seedance-2.0-fast and the gateway catalog)",
         "text/image/reference-to-video when DOFE_ENABLED=true",

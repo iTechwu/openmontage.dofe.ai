@@ -268,6 +268,10 @@ class BaseTool(ABC):
     artifact_schema: dict = {}
     progress_schema: Optional[dict] = None
     supports: dict[str, Any] = {}
+    # Provider-surface reference contract. Keep this separate from generic
+    # ``supports`` so agents can distinguish input parameters from prompt-token
+    # syntax instead of assuming one provider's notation works everywhere.
+    reference_binding_contract: dict[str, Any] = {}
     best_for: list[str] = []
     not_good_for: list[str] = []
     provider_matrix: dict[str, Any] = {}
@@ -371,6 +375,7 @@ class BaseTool(ABC):
             "output_schema": self.output_schema,
             "artifact_schema": self.artifact_schema,
             "supports": self.supports,
+            "reference_binding_contract": self.reference_binding_contract,
             "best_for": self.best_for,
             "not_good_for": self.not_good_for,
             "provider_matrix": self.provider_matrix,
@@ -426,6 +431,189 @@ class BaseTool(ABC):
             "estimated_runtime_seconds": self.estimate_runtime(inputs),
             "status": self.get_status().value,
             "would_execute": True,
+        }
+
+    def probe_provider_contract(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        """Probe a provider's live, side-effect-free contract when supported.
+
+        Provider tools may override this to query authoritative model metadata
+        or an input schema without submitting a paid generation. The default is
+        deliberately honest: dependency availability does not prove live model
+        entitlement or a current remote interface.
+        """
+        return {
+            "status": "not_supported",
+            "verification_scope": [],
+            "warnings": [
+                "Provider exposes no side-effect-free live contract probe; "
+                "model access remains unverified until a representative sample succeeds."
+            ],
+            "errors": [],
+        }
+
+    def preflight(self, inputs: dict[str, Any], *, live: bool = False) -> dict[str, Any]:
+        """Validate declared inputs and optionally probe the live provider contract.
+
+        This method reports execution facts only. It does not choose a provider,
+        approve a creative prompt, or decide whether a continuity deviation is
+        acceptable; those remain agent/reviewer responsibilities.
+        """
+        from jsonschema import Draft202012Validator
+
+        schema = self.input_schema or {"type": "object"}
+        properties = schema.get("properties", {})
+        resolved = dict(inputs)
+        for field_name, field_schema in properties.items():
+            if field_name not in resolved and "default" in field_schema:
+                resolved[field_name] = field_schema["default"]
+
+        declared_inputs = {
+            field_name: resolved[field_name]
+            for field_name in properties
+            if field_name in resolved
+        }
+        contract_errors = sorted(
+            (
+                {
+                    "path": ".".join(str(part) for part in error.absolute_path),
+                    "message": error.message,
+                }
+                for error in Draft202012Validator(schema).iter_errors(declared_inputs)
+            ),
+            key=lambda item: (item["path"], item["message"]),
+        )
+
+        operation = str(resolved.get("operation") or "")
+        reference_values = {
+            field_name: resolved.get(field_name)
+            for field_name in (
+                "image_url",
+                "image_path",
+                "reference_image_url",
+                "reference_image_path",
+                "reference_image_urls",
+                "reference_image_paths",
+                "reference_video_url",
+                "reference_video_path",
+                "reference_video_urls",
+                "reference_audio_urls",
+                "image_list",
+                "video_list",
+                "element_list",
+            )
+            if resolved.get(field_name)
+        }
+        binding_contract = dict(self.reference_binding_contract or {})
+        supported_binding_modes = list(binding_contract.get("supported_modes") or [])
+        requested_binding_modes = sorted(
+            {
+                str(role.get("binding_mode"))
+                for role in (resolved.get("reference_roles") or [])
+                if isinstance(role, dict) and role.get("binding_mode")
+            }
+        )
+
+        if operation == "image_to_video" and not reference_values:
+            contract_errors.append(
+                {
+                    "path": "operation",
+                    "message": "image_to_video requires a declared image reference input",
+                }
+            )
+        if operation == "reference_to_video" and not reference_values:
+            contract_errors.append(
+                {
+                    "path": "operation",
+                    "message": "reference_to_video requires at least one declared reference input",
+                }
+            )
+        for mode in requested_binding_modes:
+            if mode == "internal_only":
+                continue
+            if mode not in supported_binding_modes:
+                contract_errors.append(
+                    {
+                        "path": "reference_roles",
+                        "message": (
+                            f"reference binding mode {mode!r} is not declared by {self.name}"
+                        ),
+                    }
+                )
+            if mode == "prompt_token" and not binding_contract.get("prompt_token_syntax"):
+                contract_errors.append(
+                    {
+                        "path": "reference_roles",
+                        "message": (
+                            f"{self.name} does not declare provider prompt-token syntax"
+                        ),
+                    }
+                )
+
+        schema_fingerprint = hashlib.sha256(
+            json.dumps(schema, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:16]
+        model_selection = next(
+            (
+                {"field": field_name, "value": resolved[field_name]}
+                for field_name in ("model_name", "model", "model_variant")
+                if resolved.get(field_name) is not None
+            ),
+            None,
+        )
+
+        live_probe = (
+            self.probe_provider_contract(resolved)
+            if live
+            else {
+                "status": "not_requested",
+                "verification_scope": [],
+                "warnings": [],
+                "errors": [],
+            }
+        )
+        errors = list(contract_errors) + [
+            {"path": "live_probe", "message": str(message)}
+            for message in live_probe.get("errors", [])
+        ]
+        warnings = [str(message) for message in live_probe.get("warnings", [])]
+        tool_status = self.get_status().value
+        if tool_status == ToolStatus.UNAVAILABLE.value:
+            errors.append(
+                {"path": "tool_status", "message": "tool dependencies or credentials are unavailable"}
+            )
+
+        live_status = str(live_probe.get("status") or "unverified")
+        if errors or live_status == "blocked":
+            status = "blocked"
+        elif live and live_status not in {"passed"}:
+            status = "degraded"
+        else:
+            status = "passed"
+
+        return {
+            "status": status,
+            "verification_level": (
+                "live_provider_contract" if live_status == "passed" else "declared_tool_contract"
+            ),
+            "tool": self.name,
+            "provider": self.provider,
+            "tool_version": self.version,
+            "tool_status": tool_status,
+            "operation": operation,
+            "model_selection": model_selection,
+            "input_schema_fingerprint": schema_fingerprint,
+            "declared_input_fields": sorted(properties),
+            "resolved_input_fields": sorted(declared_inputs),
+            "reference_binding": {
+                "requested_modes": requested_binding_modes,
+                "supported_modes": supported_binding_modes,
+                "input_fields": list(binding_contract.get("input_fields") or []),
+                "prompt_token_syntax": binding_contract.get("prompt_token_syntax"),
+            },
+            "live_probe": live_probe,
+            "errors": errors,
+            "warnings": warnings,
+            "would_execute": status != "blocked",
         }
 
     # ---- CLI helper ----

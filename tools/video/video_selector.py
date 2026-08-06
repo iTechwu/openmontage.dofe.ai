@@ -14,7 +14,7 @@ from tools.base_tool import BaseTool, ToolResult, ToolRuntime, ToolStability, To
 
 class VideoSelector(BaseTool):
     name = "video_selector"
-    version = "0.3.1"
+    version = "0.4.0"
     tier = ToolTier.GENERATE
     capability = "video_generation"
     provider = "selector"
@@ -70,14 +70,52 @@ class VideoSelector(BaseTool):
             "allowed_providers": {"type": "array", "items": {"type": "string"}},
             "operation": {
                 "type": "string",
-                "enum": ["text_to_video", "image_to_video", "reference_to_video", "rank"],
+                "enum": [
+                    "text_to_video",
+                    "image_to_video",
+                    "reference_to_video",
+                    "rank",
+                    "preflight",
+                ],
                 "default": "text_to_video",
             },
             "target_operation": {
                 "type": "string",
                 "enum": ["text_to_video", "image_to_video", "reference_to_video"],
-                "description": "Operation to score when operation='rank'.",
+                "description": "Operation to score/check when operation is 'rank' or 'preflight'.",
                 "default": "text_to_video",
+            },
+            "live_preflight": {
+                "type": "boolean",
+                "default": True,
+                "description": "Request a side-effect-free live provider contract probe when available.",
+            },
+            "execution_scope": {
+                "type": "string",
+                "enum": ["sample", "batch"],
+                "default": "sample",
+                "description": "Batch execution is blocked when live preflight remains degraded unless explicitly approved.",
+            },
+            "allow_degraded_preflight": {
+                "type": "boolean",
+                "default": False,
+                "description": "Explicit approval to run a batch when live provider verification is unavailable.",
+            },
+            "reference_roles": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["tag", "binding_mode", "role"],
+                    "properties": {
+                        "tag": {"type": "string"},
+                        "binding_mode": {
+                            "type": "string",
+                            "enum": ["prompt_token", "input_parameter", "internal_only"],
+                        },
+                        "role": {"type": "string"},
+                    },
+                },
+                "description": "Reference-role audit copied from the scene generation contract.",
             },
             "aspect_ratio": {
                 "type": "string",
@@ -295,6 +333,42 @@ class VideoSelector(BaseTool):
                 },
             )
 
+        # Preflight mode resolves the exact provider and validates its contract
+        # without submitting a generation request.
+        if inputs.get("operation") == "preflight":
+            preflight_inputs = self._rank_inputs(inputs)
+            task_context = self._prepare_task_context(preflight_inputs)
+            candidates = self._filter_candidates(preflight_inputs, candidates)
+            tool, score = self._select_best_tool(preflight_inputs, candidates, task_context)
+            if tool is None:
+                return ToolResult(
+                    success=True,
+                    data={
+                        "status": "blocked",
+                        "errors": ["No compatible video generation provider available."],
+                        "normalized_task_context": task_context,
+                    },
+                )
+            adapted = self._adapt_inputs_for_tool(tool, preflight_inputs)
+            report = tool.preflight(
+                adapted,
+                live=bool(inputs.get("live_preflight", True)),
+            )
+            return ToolResult(
+                success=True,
+                data={
+                    "status": report["status"],
+                    "selected_tool": tool.name,
+                    "selected_provider": tool.provider,
+                    "selection_reason": (
+                        score.explain() if score else f"Selected {tool.provider} ({tool.name})"
+                    ),
+                    "provider_preflight": report,
+                    "normalized_task_context": task_context,
+                    **self._tool_context_payload(tool, adapted),
+                },
+            )
+
         # Normal generation — use scored selection
         task_context = self._prepare_task_context(inputs)
         try:
@@ -309,6 +383,29 @@ class VideoSelector(BaseTool):
             return ToolResult(success=False, error="No video generation provider available.")
 
         adapted = self._adapt_inputs_for_tool(tool, inputs)
+        preflight = tool.preflight(
+            adapted,
+            live=bool(inputs.get("live_preflight", True)),
+        )
+        if preflight["status"] == "blocked":
+            return ToolResult(
+                success=False,
+                data={"provider_preflight": preflight},
+                error="Provider preflight blocked video generation.",
+            )
+        if (
+            preflight["status"] == "degraded"
+            and inputs.get("execution_scope", "sample") == "batch"
+            and not inputs.get("allow_degraded_preflight", False)
+        ):
+            return ToolResult(
+                success=False,
+                data={"provider_preflight": preflight},
+                error=(
+                    "Provider live contract is unverified; batch generation requires "
+                    "allow_degraded_preflight=true after explicit approval."
+                ),
+            )
 
         # Auto-resolve reference_image_path to a URL for providers that need it
         if adapted.get("operation") == "image_to_video" and adapted.get("reference_image_path"):
@@ -329,6 +426,7 @@ class VideoSelector(BaseTool):
             if score:
                 result.data["provider_score"] = score.to_dict()
             result.data.update(self._tool_context_payload(tool, adapted))
+            result.data["provider_preflight"] = preflight
             result.data["alternatives_considered"] = [
                 t.name for t in candidates
                 if t.name != tool.name and t.get_status().value == "available"

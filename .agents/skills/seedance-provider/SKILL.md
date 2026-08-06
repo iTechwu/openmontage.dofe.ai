@@ -28,6 +28,25 @@ Use this skill for execution facts. Use
 6. Preserve the approved provider/model path. Stop for approval before any
    fallback changes that path.
 
+## Execution Preflight
+
+Before every paid call, run `video_selector` with `operation=preflight`, the
+real `target_operation`, locked model/variant, intended duration, ratio,
+resolution, references, and `reference_roles`. Keep `live_preflight=true`.
+
+- `passed` with `verification_level=live_provider_contract` means the provider
+  exposed a side-effect-free model/input contract and the exact payload passed.
+- `degraded` means only the current OpenMontage tool contract was verified. A
+  representative sample may proceed, but a batch must stop unless the user
+  explicitly approves `allow_degraded_preflight=true`.
+- `blocked` means credentials, model access, declared fields, operation, or
+  reference binding are incompatible. Do not call the provider.
+
+Treat `input_schema_fingerprint`, `provider_contract_version`, and
+`reference_binding` as provenance facts. A dependency check alone never proves
+model entitlement. Do not claim live verification when `live_probe.status` is
+`not_supported` or `unverified`.
+
 ## OpenMontage Routes
 
 | Tool | Route | Use |

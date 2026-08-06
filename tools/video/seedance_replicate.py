@@ -32,7 +32,7 @@ from tools.base_tool import (
 
 class SeedanceReplicate(BaseTool):
     name = "seedance_replicate"
-    version = "0.1.0"
+    version = "0.2.0"
     tier = ToolTier.GENERATE
     capability = "video_generation"
     provider = "seedance"
@@ -67,6 +67,11 @@ class SeedanceReplicate(BaseTool):
         "multi_shot": True,
         "aspect_ratio": True,
         "seed": True,
+    }
+    reference_binding_contract = {
+        "supported_modes": ["input_parameter"],
+        "input_fields": ["image_url"],
+        "prompt_token_syntax": None,
     }
     best_for = [
         "preferred premium video gen when REPLICATE_API_TOKEN is available",
@@ -150,22 +155,16 @@ class SeedanceReplicate(BaseTool):
     def estimate_runtime(self, inputs: dict[str, Any]) -> float:
         return 60.0 if inputs.get("model_variant") == "fast" else 120.0
 
-    def execute(self, inputs: dict[str, Any]) -> ToolResult:
-        token = self._get_api_token()
-        if not token:
-            return ToolResult(
-                success=False,
-                error="REPLICATE_API_TOKEN not set. " + self.install_instructions,
-            )
-
-        import requests
-
-        start = time.time()
-        variant = inputs.get("model_variant", "standard")
-        model_slug = (
-            "bytedance/seedance-2.0-fast" if variant == "fast" else "bytedance/seedance-2.0"
+    @staticmethod
+    def _model_slug(inputs: dict[str, Any]) -> str:
+        return (
+            "bytedance/seedance-2.0-fast"
+            if inputs.get("model_variant", "standard") == "fast"
+            else "bytedance/seedance-2.0"
         )
 
+    @staticmethod
+    def _build_payload_input(inputs: dict[str, Any]) -> dict[str, Any]:
         payload_input: dict[str, Any] = {"prompt": inputs["prompt"]}
         if inputs.get("duration") and inputs["duration"] != "auto":
             payload_input["duration"] = int(inputs["duration"])
@@ -179,6 +178,123 @@ class SeedanceReplicate(BaseTool):
             payload_input["seed"] = inputs["seed"]
         if inputs.get("operation") == "image_to_video" and inputs.get("image_url"):
             payload_input["image"] = inputs["image_url"]
+        return payload_input
+
+    def probe_provider_contract(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        """Read Replicate model metadata and validate the exact API payload.
+
+        ``GET /v1/models/{owner}/{name}`` is side-effect-free. Its latest-version
+        OpenAPI input schema is the authoritative surface for field drift; this
+        probe never creates a prediction or incurs generation cost.
+        """
+        token = self._get_api_token()
+        if not token:
+            return {
+                "status": "blocked",
+                "verification_scope": [],
+                "warnings": [],
+                "errors": ["REPLICATE_API_TOKEN is not configured"],
+            }
+
+        import requests
+        from jsonschema import Draft202012Validator
+
+        model_slug = self._model_slug(inputs)
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        try:
+            response = requests.get(
+                f"https://api.replicate.com/v1/models/{model_slug}",
+                headers=headers,
+                timeout=15,
+            )
+            if response.status_code in {401, 403, 404}:
+                return {
+                    "status": "blocked",
+                    "verification_scope": ["model_access"],
+                    "model": model_slug,
+                    "warnings": [],
+                    "errors": [
+                        f"Replicate model metadata returned HTTP {response.status_code}"
+                    ],
+                }
+            response.raise_for_status()
+            body = response.json()
+        except requests.RequestException as exc:
+            return {
+                "status": "unverified",
+                "verification_scope": [],
+                "model": model_slug,
+                "warnings": [f"Replicate live contract probe failed: {exc}"],
+                "errors": [],
+            }
+        except ValueError:
+            return {
+                "status": "unverified",
+                "verification_scope": ["model_access"],
+                "model": model_slug,
+                "warnings": ["Replicate model metadata returned non-JSON content"],
+                "errors": [],
+            }
+
+        latest = body.get("latest_version") if isinstance(body, dict) else None
+        openapi = latest.get("openapi_schema") if isinstance(latest, dict) else None
+        schemas = (
+            openapi.get("components", {}).get("schemas", {})
+            if isinstance(openapi, dict)
+            else {}
+        )
+        remote_input_schema = schemas.get("Input")
+        if not isinstance(remote_input_schema, dict):
+            return {
+                "status": "unverified",
+                "verification_scope": ["model_access"],
+                "model": model_slug,
+                "provider_contract_version": (
+                    latest.get("id") if isinstance(latest, dict) else None
+                ),
+                "warnings": ["Replicate metadata did not expose a latest-version Input schema"],
+                "errors": [],
+            }
+
+        payload_input = self._build_payload_input(inputs)
+        try:
+            validation_errors = sorted(
+                error.message
+                for error in Draft202012Validator(remote_input_schema).iter_errors(payload_input)
+            )
+        except Exception as exc:
+            return {
+                "status": "unverified",
+                "verification_scope": ["model_access"],
+                "model": model_slug,
+                "warnings": [f"Replicate Input schema could not be evaluated: {exc}"],
+                "errors": [],
+            }
+
+        return {
+            "status": "blocked" if validation_errors else "passed",
+            "verification_scope": ["model_access", "input_schema"],
+            "model": model_slug,
+            "provider_contract_version": latest.get("id"),
+            "remote_input_fields": sorted(remote_input_schema.get("properties", {})),
+            "warnings": [],
+            "errors": validation_errors,
+        }
+
+    def execute(self, inputs: dict[str, Any]) -> ToolResult:
+        token = self._get_api_token()
+        if not token:
+            return ToolResult(
+                success=False,
+                error="REPLICATE_API_TOKEN not set. " + self.install_instructions,
+            )
+
+        import requests
+
+        start = time.time()
+        variant = inputs.get("model_variant", "standard")
+        model_slug = self._model_slug(inputs)
+        payload_input = self._build_payload_input(inputs)
 
         headers = {
             "Authorization": f"Bearer {token}",

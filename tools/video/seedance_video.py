@@ -65,6 +65,19 @@ class SeedanceVideo(BaseTool):
         "aspect_ratio": True,
         "seed": True,
     }
+    reference_binding_contract = {
+        "supported_modes": ["input_parameter"],
+        "input_fields": [
+            "image_url",
+            "image_path",
+            "end_image_url",
+            "reference_image_urls",
+            "reference_image_paths",
+            "reference_video_urls",
+            "reference_audio_urls",
+        ],
+        "prompt_token_syntax": None,
+    }
     best_for = [
         "preferred premium video gen when FAL_KEY is available",
         "cinematic trailers, teasers, and high-fidelity clips with native synchronized audio",

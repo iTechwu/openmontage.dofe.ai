@@ -12,6 +12,10 @@ pipeline, not only cinematic.
    skills before writing the provider prompt.
 3. Announce and lock the exact tool, provider, model, operation, sample/batch
    status, and native-audio choice in the decision log.
+4. Before the paid call, run `video_selector` again with
+   `operation="preflight"`, the real `target_operation`, locked parameters,
+   references, and scene `reference_roles`. Store the returned
+   `provider_preflight` with the prompt audit.
 
 ## Scene Contract
 
@@ -38,7 +42,9 @@ tag; never assume `@Image1` is portable across providers.
    prompts remain provisional.
 2. Run `seedance-quality` preflight and store the draft, critique, final prompt,
    and skills in `prompt_review`.
-3. Generate one representative sample before a batch.
+3. Require provider preflight to be non-blocking. Generate one representative
+   sample before a batch. A degraded live probe may support the sample, but the
+   batch requires explicit approval recorded as `allow_degraded_preflight=true`.
 4. Inspect the actual media, set `model_family="seedance"`, and write a
    schema-valid `take_review`.
 5. Only accepted observed state may seed the next connected clip. A rejected,

@@ -74,6 +74,11 @@ class HiggsFieldVideo(BaseTool):
         "lip_sync": True,
         "multi_shot": True,
     }
+    reference_binding_contract = {
+        "supported_modes": ["input_parameter"],
+        "input_fields": ["image_url"],
+        "prompt_token_syntax": None,
+    }
     best_for = [
         "preferred premium video gen on Higgsfield (Seedance 2.0 is the default model)",
         "cinematic trailers, teasers, and high-fidelity clips with native synchronized audio",

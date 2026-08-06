@@ -13,6 +13,7 @@ from tools.video.runway_video import RunwayVideo
 from tools.video.seedance_replicate import SeedanceReplicate
 from tools.video.seedance_video import SeedanceVideo
 from tools.video.video_selector import VideoSelector
+from tools.base_tool import ToolResult
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -161,6 +162,177 @@ def test_selector_filters_providers_that_contradict_explicit_model():
     )
 
     assert [tool.name for tool in candidates] == ["higgsfield_video"]
+
+
+def test_provider_preflight_distinguishes_declared_contract_from_live_verification(monkeypatch):
+    monkeypatch.setenv("RUNWAY_API_KEY", "test-key")
+    report = RunwayVideo().preflight(
+        {
+            "prompt": "A car enters frame.",
+            "operation": "text_to_video",
+            "model": "seedance_2.0",
+            "duration": 5,
+            "ratio": "16:9",
+        },
+        live=True,
+    )
+
+    assert report["status"] == "degraded"
+    assert report["verification_level"] == "declared_tool_contract"
+    assert report["live_probe"]["status"] == "not_supported"
+
+
+def test_provider_preflight_blocks_undeclared_prompt_token_syntax(monkeypatch):
+    monkeypatch.setenv("RUNWAY_API_KEY", "test-key")
+    report = RunwayVideo().preflight(
+        {
+            "prompt": "Use the vehicle reference.",
+            "operation": "image_to_video",
+            "model": "seedance_2.0",
+            "duration": 5,
+            "ratio": "16:9",
+            "image_url": "https://example.com/car.png",
+            "reference_roles": [
+                {
+                    "tag": "vehicle-identity-reference",
+                    "binding_mode": "prompt_token",
+                    "role": "identity",
+                }
+            ],
+        }
+    )
+
+    assert report["status"] == "blocked"
+    assert any("prompt-token syntax" in error["message"] for error in report["errors"])
+
+
+def test_selector_preflight_resolves_provider_without_generation(monkeypatch):
+    monkeypatch.setenv("RUNWAY_API_KEY", "test-key")
+    provider = RunwayVideo()
+    generated = False
+
+    def fail_if_generated(_inputs):
+        nonlocal generated
+        generated = True
+        raise AssertionError("preflight must not generate")
+
+    provider.execute = fail_if_generated
+    selector = VideoSelector()
+    monkeypatch.setattr(selector, "_providers", lambda: [provider])
+
+    result = selector.execute(
+        {
+            "prompt": "A car enters frame.",
+            "operation": "preflight",
+            "target_operation": "image_to_video",
+            "model": "seedance_2.0",
+            "duration": "5",
+            "aspect_ratio": "16:9",
+            "reference_image_url": "https://example.com/car.png",
+            "reference_roles": [
+                {
+                    "tag": "vehicle-identity-reference",
+                    "binding_mode": "input_parameter",
+                    "role": "identity",
+                }
+            ],
+            "live_preflight": False,
+        }
+    )
+
+    assert result.success
+    assert result.data["status"] == "passed"
+    assert result.data["selected_tool"] == "runway_video"
+    assert not generated
+
+
+def test_selector_blocks_unverified_batch_before_provider_execution(monkeypatch):
+    monkeypatch.setenv("RUNWAY_API_KEY", "test-key")
+    provider = RunwayVideo()
+    generated = False
+
+    def generate(_inputs):
+        nonlocal generated
+        generated = True
+        return ToolResult(success=True)
+
+    provider.execute = generate
+    selector = VideoSelector()
+    monkeypatch.setattr(selector, "_providers", lambda: [provider])
+
+    result = selector.execute(
+        {
+            "prompt": "A car enters frame.",
+            "operation": "text_to_video",
+            "model": "seedance_2.0",
+            "duration": "5",
+            "aspect_ratio": "16:9",
+            "execution_scope": "batch",
+            "live_preflight": True,
+        }
+    )
+
+    assert not result.success
+    assert "batch generation" in result.error
+    assert result.data["provider_preflight"]["status"] == "degraded"
+    assert not generated
+
+
+def test_replicate_live_preflight_validates_remote_input_schema(monkeypatch):
+    monkeypatch.setenv("REPLICATE_API_TOKEN", "test-token")
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        @staticmethod
+        def json():
+            return {
+                "latest_version": {
+                    "id": "version-123",
+                    "openapi_schema": {
+                        "components": {
+                            "schemas": {
+                                "Input": {
+                                    "type": "object",
+                                    "required": ["prompt"],
+                                    "properties": {
+                                        "prompt": {"type": "string"},
+                                        "duration": {"type": "integer", "enum": [5, 10]},
+                                        "aspect_ratio": {"type": "string"},
+                                        "resolution": {"type": "string"},
+                                        "generate_audio": {"type": "boolean"},
+                                    },
+                                    "additionalProperties": False,
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+
+    import requests
+
+    monkeypatch.setattr(requests, "get", lambda *args, **kwargs: Response())
+    report = SeedanceReplicate().preflight(
+        {
+            "prompt": "A car enters frame.",
+            "operation": "text_to_video",
+            "model_variant": "standard",
+            "duration": "5",
+            "aspect_ratio": "16:9",
+            "resolution": "720p",
+            "generate_audio": False,
+        },
+        live=True,
+    )
+
+    assert report["status"] == "passed"
+    assert report["verification_level"] == "live_provider_contract"
+    assert report["live_probe"]["provider_contract_version"] == "version-123"
 
 
 def test_scene_plan_accepts_seedance_generation_contract():
