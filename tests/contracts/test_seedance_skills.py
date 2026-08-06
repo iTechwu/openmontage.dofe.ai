@@ -1251,6 +1251,42 @@ def test_seedance_asset_manifest_rejects_mixed_contract_versions():
     assert any("assets" in ".".join(map(str, e.absolute_path)) for e in errors)
 
 
+def test_seedance_asset_manifest_rejects_v2_lineage_for_legacy_assets():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "asset_manifest.schema.json").read_text()
+    )
+    manifest = {
+        "version": "1.0",
+        "assets": [_minimal_seedance_asset("legacy-take", "1.0")],
+        "lineage_review": _standalone_lineage_review("legacy-take"),
+    }
+
+    errors = list(Draft202012Validator(schema).iter_errors(manifest))
+    assert any("assets" in ".".join(map(str, e.absolute_path)) for e in errors)
+
+
+def test_seedance_v2_lineage_pass_requires_version_consistency_check_to_pass():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "asset_manifest.schema.json").read_text()
+    )
+    review = _standalone_lineage_review("v2-take")
+    review["checks"]["contract_version_consistency"] = {
+        "status": "not_applicable",
+        "evidence": "No continuation edge exists.",
+    }
+    manifest = {
+        "version": "1.0",
+        "assets": [_minimal_seedance_asset("v2-take", "2.0")],
+        "lineage_review": review,
+    }
+
+    errors = list(Draft202012Validator(schema).iter_errors(manifest))
+    assert any(
+        "contract_version_consistency" in ".".join(map(str, e.absolute_path))
+        for e in errors
+    )
+
+
 def test_v2_seedance_authoring_lanes_are_exclusive():
     schema = json.loads(
         (ROOT / "schemas" / "artifacts" / "scene_plan.schema.json").read_text()

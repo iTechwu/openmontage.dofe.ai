@@ -559,7 +559,7 @@
                   "prompt_compilation_trace": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
                   "temporal_structure": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
                   "reference_binding_matches_preflight": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
-                  "contract_version_consistency": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } }
+                  "contract_version_consistency": { "properties": { "status": { "const": "pass" } } }
                 }
               },
               "findings": {
@@ -625,19 +625,33 @@
     },
     {
       "if": {
-        "properties": {
-          "assets": {
-            "contains": {
-              "type": "object",
-              "properties": {
-                "model_family": { "const": "seedance" },
-                "seedance_contract_version": { "const": "2.0" }
-              },
-              "required": ["model_family", "seedance_contract_version"]
-            }
+        "anyOf": [
+          {
+            "properties": {
+              "assets": {
+                "contains": {
+                  "type": "object",
+                  "properties": {
+                    "model_family": { "const": "seedance" },
+                    "seedance_contract_version": { "const": "2.0" }
+                  },
+                  "required": ["model_family", "seedance_contract_version"]
+                }
+              }
+            },
+            "required": ["assets"]
+          },
+          {
+            "properties": {
+              "lineage_review": {
+                "type": "object",
+                "properties": { "seedance_contract_version": { "const": "2.0" } },
+                "required": ["seedance_contract_version"]
+              }
+            },
+            "required": ["lineage_review"]
           }
-        },
-        "required": ["assets"]
+        ]
       },
       "then": {
         "properties": {
