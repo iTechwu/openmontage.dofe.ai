@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "openmontage": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--with-editable",
+        ".",
+        "openmontage",
+        "mcp",
+        "--transport",
+        "stdio"
+      ]
+    }
+  }
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Seedance Continuity"
+  short_description: "Control identity and connected clip continuity"
+  default_prompt: "Use $seedance-continuity to plan this connected sequence and preserve accepted visual state."

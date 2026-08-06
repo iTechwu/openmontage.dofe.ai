@@ -1,0 +1,4 @@
+-r requirements.txt
+youtube-transcript-api>=1.2
+scenedetect[opencv]>=0.6.7
+faster-whisper>=1.2

@@ -1,0 +1,96 @@
+"""Unit tests for dofe_image payload construction (dev-guide §5.1, §8.1).
+
+Focus: text block NEVER carries a role; reference image inlined as a data URI
+with role:"reference"; resolution/outputCount/param mapping.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from PIL import Image
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from tools.graphics.dofe_image import DofeImage
+from tools.dofe.runtime import _normalize_image_format, probe_image
+
+
+def _payload(inputs):
+    return DofeImage()._build_payload({**inputs}, "seedream-5.0")
+
+
+def test_text_block_has_no_role():
+    payload = _payload({"prompt": "a red apple"})
+    block = payload["content"][0]
+    assert block["part"]["type"] == "text"
+    assert "role" not in block, "text content block must not carry a role (dev-guide §2.3)"
+
+
+def test_endpoint_and_model():
+    payload = _payload({"prompt": "x"})
+    assert payload["endpointKind"] == "image_async"
+    assert payload["model"] == "seedream-5.0"
+
+
+def test_resolution_from_width_height():
+    payload = _payload({"prompt": "x", "width": 768, "height": 1344})
+    assert payload["params"]["resolution"] == "768x1344"
+
+
+def test_resolution_from_size_overrides_dimensions():
+    payload = _payload({"prompt": "x", "width": 1, "height": 1, "size": "1024x1024"})
+    assert payload["params"]["resolution"] == "1024x1024"
+
+
+def test_output_count():
+    payload = _payload({"prompt": "x", "n": 2})
+    assert payload["params"]["outputCount"] == 2
+
+
+def test_reference_image_uses_data_uri_with_reference_role(tmp_path):
+    ref = tmp_path / "subject.png"
+    ref.write_bytes(b"\x89PNG\r\n\x1a\n" + b"img")
+    payload = _payload({"prompt": "edit this", "image_path": str(ref)})
+    assert payload["content"][0]["part"]["type"] == "text"
+    ref_block = payload["content"][1]
+    assert ref_block["part"]["type"] == "image_url"
+    assert ref_block["role"] == "reference"
+    assert ref_block["part"]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_reference_image_https_url_passthrough():
+    payload = _payload({"prompt": "edit", "image_url": "https://cdn.test/r.png"})
+    assert payload["content"][1]["part"]["image_url"]["url"] == "https://cdn.test/r.png"
+
+
+def test_optional_params_mapped():
+    payload = _payload({
+        "prompt": "x", "negative_prompt": "blurry", "seed": 7, "quality": "high", "style": "cinematic",
+    })
+    p = payload["params"]
+    assert p["negativePrompt"] == "blurry"
+    assert p["seed"] == 7
+    assert p["quality"] == "high"
+    assert p["style"] == "cinematic"
+
+
+def test_metadata_carries_idempotency_key():
+    payload = _payload({"prompt": "x", "seed": 1})
+    assert "metadata" in payload
+    assert "openmontage_idempotency_key" in payload["metadata"]
+
+
+def test_downloaded_jpeg_is_normalized_to_requested_png(tmp_path):
+    output = tmp_path / "generated.png"
+    Image.new("RGB", (32, 24), "red").save(output, format="JPEG")
+
+    _normalize_image_format(output)
+    metadata = probe_image(output)
+
+    assert output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert metadata["image_format"] == "png"
+    assert metadata["width"] == 32
+    assert metadata["height"] == 24

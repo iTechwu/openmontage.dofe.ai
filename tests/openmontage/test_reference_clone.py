@@ -1,0 +1,97 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from tools.base_tool import ToolResult
+
+from openmontage import reference_clone
+
+
+def test_prepare_creates_agent_ready_airouter_project(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        reference_clone,
+        "normalize_video_url",
+        lambda _value: "https://www.douyin.com/video/7667931266800454975",
+    )
+
+    def fake_execute(_self, inputs):
+        output = Path(inputs["output_dir"])
+        output.mkdir(parents=True, exist_ok=True)
+        brief = {
+            "version": "1.0",
+            "source": {
+                "type": "douyin",
+                "duration_seconds": 5,
+                "title": "Reference title",
+            },
+            "content_analysis": {"summary": "", "topics": [], "target_audience": "general"},
+            "structure_analysis": {"total_scenes": 1, "scenes": [], "pacing_profile": {}},
+            "replication_guidance": {"suggested_pipeline": "animation"},
+            "_analysis_meta": {
+                "steps_completed": ["metadata", "download", "keyframes"],
+                "steps_failed": [],
+                "keyframe_count": 1,
+                "scene_count": 1,
+            },
+        }
+        (output / "video_analysis_brief.json").write_text(json.dumps(brief))
+        return ToolResult(success=True, data=brief)
+
+    monkeypatch.setattr(reference_clone.VideoAnalyzer, "execute", fake_execute)
+    monkeypatch.setattr(reference_clone.registry, "discover", lambda: [])
+    monkeypatch.setattr(
+        reference_clone.DofeClient,
+        "list_models",
+        lambda _self: [
+            {"id": "seedream-5.0"},
+            {"id": "seedance-2.0-fast"},
+        ],
+    )
+    monkeypatch.setattr(
+        reference_clone.registry,
+        "provider_menu_summary",
+        lambda: {"composition_runtimes": {}, "capabilities": [], "setup_offers": [], "runtime_warnings": []},
+    )
+
+    result = reference_clone.ReferenceCloneService(projects_root=tmp_path).prepare(
+        "https://www.douyin.com/video/7667931266800454975",
+        creative_brief="Make it original",
+    )
+    assert result["project_id"] == "clone-douyin-7667931266800454975"
+    assert result["pipeline_type"] == "animation"
+    assert result["model_routing"] == {
+        "policy": "dofe_airouter_only",
+        "provider": "dofe",
+        "base_url": "https://model.local.dofe.ai/api",
+        "direct_provider_fallback": False,
+    }
+    assert result["preflight"]["airouter"]["status"] == "blocked"
+    assert result["preflight"]["airouter"]["missing_required_models"] == ["openspeech-auc"]
+    assert Path(result["analysis"]["brief_path"]).is_file()
+    assert Path(result["request_path"]).is_file()
+    assert result["next_stage"] == "research"
+
+
+def test_prepare_fails_when_download_did_not_complete(monkeypatch, tmp_path):
+    monkeypatch.setattr(reference_clone, "normalize_video_url", lambda value: value)
+
+    def fake_execute(_self, _inputs):
+        return ToolResult(
+            success=True,
+            data={
+                "_analysis_meta": {
+                    "steps_completed": ["metadata"],
+                    "steps_failed": ["download: cookies needed"],
+                }
+            },
+        )
+
+    monkeypatch.setattr(reference_clone.VideoAnalyzer, "execute", fake_execute)
+    service = reference_clone.ReferenceCloneService(projects_root=tmp_path)
+    try:
+        service.prepare("https://www.douyin.com/video/7667931266800454975")
+    except reference_clone.ReferenceCloneError as exc:
+        assert "cookies needed" in str(exc)
+    else:
+        raise AssertionError("Expected preparation to fail without a downloaded reference")

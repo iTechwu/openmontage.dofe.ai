@@ -184,7 +184,14 @@ class TTSSelector(BaseTool):
             )
 
         # Normal generation — use scored selection
-        tool, score = self._select_best_tool(inputs, candidates, task_context)
+        try:
+            tool, score = self._select_best_tool(inputs, candidates, task_context)
+        except Exception as exc:
+            from tools.dofe.config import DofeRoutingError
+
+            if isinstance(exc, DofeRoutingError):
+                return ToolResult(success=False, error=str(exc))
+            raise
         if tool is None:
             return ToolResult(success=False, error="No TTS provider available.")
 
@@ -215,6 +222,13 @@ class TTSSelector(BaseTool):
         allowed = set(inputs.get("allowed_providers") or [])
         if allowed:
             candidates = [tool for tool in candidates if tool.provider in allowed]
+
+        # DOFE_ENABLED is a fail-closed routing policy for all model generation.
+        from tools.dofe.config import select_dofe_if_enabled
+
+        dofe = select_dofe_if_enabled(candidates, "dofe_tts")
+        if dofe is not None:
+            return dofe, None
 
         rankings = rank_providers(candidates, task_context)
 

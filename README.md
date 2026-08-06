@@ -202,9 +202,9 @@ Or if you want the real-footage path:
 
 That's it. The agent researches your topic with live web search, generates AI images, writes and narrates the script with voice direction, finds royalty-free background music automatically, burns in word-level subtitles, and renders the final video. Before you see anything, the system runs a multi-point self-review — ffprobe validation, frame sampling, audio level analysis, delivery promise verification, and subtitle checks. Every provider selection is scored across 7 dimensions with an auditable decision log. Every creative decision gets your approval.
 
-> **No `make`?** macOS/Linux: `python3 -m venv .venv && source .venv/bin/activate && python -m pip install -r requirements.txt && cd remotion-composer && npm install && cd .. && python -m pip install piper-tts && cp .env.example .env`
+> **No `make`?** macOS/Linux: `python3 -m venv .venv && source .venv/bin/activate && python -m pip install -r requirements.txt && cd remotion-composer && npm ci && cd .. && python -m pip install piper-tts && cp .env.example .env`
 >
-> Windows PowerShell: `py -3 -m venv .venv; .\.venv\Scripts\Activate.ps1; python -m pip install -r requirements.txt; cd remotion-composer; npm install; cd ..; python -m pip install piper-tts; Copy-Item .env.example .env`
+> Windows PowerShell: `py -3 -m venv .venv; .\.venv\Scripts\Activate.ps1; python -m pip install -r requirements.txt; cd remotion-composer; npm ci; cd ..; python -m pip install piper-tts; Copy-Item .env.example .env`
 >
 > **Windows:** If `npm install` fails with `ERR_INVALID_ARG_TYPE`, use `npx --yes npm install` instead.
 
@@ -230,7 +230,18 @@ This repo is built for agentic operation. If you're an OpenClaw-style agent, her
 ```bash
 # .env — every key is optional, add what you have
 
-# Image + video gateway:
+# Unified DoFe.AI model gateway (recommended):
+DOFE_ENABLED=true
+DOFE_MODEL_BASE_URL=https://model.local.dofe.ai/api
+DOFE_MODEL_API_KEY=your-key
+DOFE_IMAGE_MODEL=seedream-5.0
+DOFE_VIDEO_MODEL=seedance-2.0-fast
+DOFE_STT_MODEL=openspeech-auc
+DOFE_INTERNAL_API_BASE_URL=https://model.local.dofe.ai
+DOFE_TENANT_ID=your-tenant-uuid
+INTERNAL_API_SECRET=your-internal-service-secret
+
+# Optional direct-provider compatibility paths:
 FAL_KEY=your-key               # FLUX images + Google Veo, Kling, MiniMax video + Recraft images
 ATLASCLOUD_API_KEY=your-key    # Atlas Cloud — Seedream/Nano Banana/GPT Image + Kling/Seedance/Hailuo video
 
@@ -591,9 +602,11 @@ Each tool declares which Layer 3 skills it relies on. The agent reads Layer 1 to
 
 | Engine | Type | What It Does |
 |--------|------|-------------|
-| **Remotion** | Local (Node.js) | React-based programmatic video — spring-animated image scenes, stat reveals, section titles, hero cards, TikTok-style word-by-word captions, scene transitions (fade/slide/wipe/flip), Google Fonts, audio with fade curves, and the TalkingHead avatar composition. **When no video generation providers are configured, the agent generates still images and Remotion turns them into fully animated video.** |
-| **HyperFrames** | Local (Node.js ≥ 22) | HTML/CSS/GSAP programmatic video — kinetic typography, product promos, launch reels, custom motion graphics, registry blocks (data charts, grain overlays, shader transitions), website-to-video workflows, and rigged SVG character animation. Consumed via `npx hyperframes`; no monorepo checkout needed. |
+| **Remotion** | Local (Node.js) | React-based programmatic video — spring-animated image scenes, stat reveals, section titles, hero cards, TikTok-style word-by-word captions, scene transitions (fade/slide/wipe/flip), bundled fonts, audio with fade curves, and the TalkingHead avatar composition. **When no video generation providers are configured, the agent generates still images and Remotion turns them into fully animated video.** |
+| **HyperFrames** | Local (Node.js ≥ 22) | HTML/CSS/GSAP programmatic video — kinetic typography, product promos, launch reels, custom motion graphics, registry blocks (data charts, grain overlays, shader transitions), website-to-video workflows, and rigged SVG character animation. Installed as a pinned project dependency; no monorepo checkout or account needed for local rendering. |
 | **FFmpeg** | Local | Core video assembly, encoding, subtitle burn, audio muxing, color grading |
+
+Remotion and HyperFrames both run locally without an account or API key; optional hosted/cloud services have their own authentication. HyperFrames is Apache-2.0. Remotion uses its own license: individuals, non-profits, and for-profit organizations with up to three employees are eligible for the free license; larger for-profit organizations need a Company License. Run `make install-runtimes && make runtimes-doctor` to install both CLIs and their browser runtimes from the project lockfile. The composer vendors its Space Grotesk and Playfair Display fonts, so rendering does not depend on live Google Fonts requests.
 
 Runtime is chosen at proposal (`render_runtime`) and locked through `edit_decisions`. Silent swaps between runtimes are a governance violation — see `skills/core/hyperframes.md`.
 
@@ -705,6 +718,13 @@ OpenMontage is built to be extended. The two most common contributions:
 3. Reference existing tools — or add new ones if needed
 
 See `docs/ARCHITECTURE.md` for the full technical reference, `docs/PROVIDERS.md` for the complete provider guide (setup, pricing, free tiers), and `AGENT_GUIDE.md` for the agent contract.
+
+### Docker, MCP, and video-link recreation
+
+OpenMontage can run as a Dockerized MCP server for Codex or Claude and includes
+the `$recreate-video` skill. It accepts YouTube, TikTok, Instagram, **Douyin**
+(including `v.douyin.com` short links and pasted share text), and local video
+references. See [Docker and agent integration](docs/DOCKER_AND_AGENTS.md).
 
 ### Join the Community
 

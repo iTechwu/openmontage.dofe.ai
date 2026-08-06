@@ -12,7 +12,7 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["youtube", "shorts", "instagram", "tiktok", "local_file", "other_url"]
+          "enum": ["youtube", "shorts", "instagram", "tiktok", "douyin", "local_file", "other_url"]
         },
         "url": { "type": "string" },
         "local_path": { "type": "string" },

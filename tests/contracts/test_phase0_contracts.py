@@ -255,7 +255,9 @@ def sample_artifact(name: str) -> dict:
 class TestConfig:
     def test_load_defaults(self):
         config = OpenMontageConfig()
-        assert config.llm.provider == "anthropic"
+        assert config.llm.provider == "dofe"
+        assert config.llm.base_url == "https://model.local.dofe.ai/api"
+        assert config.llm.api_key_env == "DOFE_MODEL_API_KEY"
         assert config.budget.mode.value == "warn"
         assert config.checkpoint.policy.value == "guided"
 

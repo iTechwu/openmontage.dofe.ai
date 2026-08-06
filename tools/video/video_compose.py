@@ -230,19 +230,26 @@ class VideoCompose(BaseTool):
     ]
 
     def _remotion_available(self) -> bool:
-        """Check if Remotion rendering is available (requires npx + composer project + node_modules)."""
+        """Check whether the lockfile-installed Remotion CLI is callable."""
         import shutil as _shutil
 
-        if not _shutil.which("npx"):
+        if not _shutil.which("node"):
             return False
         composer_dir = Path(__file__).resolve().parent.parent.parent / "remotion-composer"
         if not composer_dir.exists() or not (composer_dir / "package.json").exists():
             return False
-        # Check that node_modules are actually installed — without this,
-        # npx remotion render will fail even though the project exists.
-        if not (composer_dir / "node_modules").exists():
-            return False
-        return True
+        bin_dir = composer_dir / "node_modules" / ".bin"
+        return (bin_dir / "remotion").is_file() or (bin_dir / "remotion.cmd").is_file()
+
+    @staticmethod
+    def _remotion_command(composer_dir: Path, args: list[str]) -> list[str]:
+        """Resolve the project-local CLI so renders never trigger an npx fetch."""
+        bin_dir = composer_dir / "node_modules" / ".bin"
+        candidates = [bin_dir / "remotion", bin_dir / "remotion.cmd"]
+        local_cli = next((path.resolve() for path in candidates if path.is_file()), None)
+        if local_cli is not None:
+            return [str(local_cli), *args]
+        return ["npx", "remotion", *args]
 
     def _ffmpeg_available(self) -> bool:
         """Check if the ffmpeg binary is actually resolvable on PATH."""
@@ -254,7 +261,7 @@ class VideoCompose(BaseTool):
         """Check if HyperFrames rendering is available.
 
         Delegates to the dedicated tool so the availability check stays in
-        one place (node 22 floor, ffmpeg + npx on PATH).
+        one place (Node 22 floor, FFmpeg, and the project-local CLI).
         """
         try:
             from tools.video.hyperframes_compose import HyperFramesCompose
@@ -968,7 +975,10 @@ class VideoCompose(BaseTool):
         output_path = Path(inputs.get("output_path", "renders/output.mp4")).resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        cmd = ["npx", "remotion", "render", str(effective_entry), str(comp_id), str(output_path)]
+        cmd = self._remotion_command(
+            composer_dir,
+            ["render", str(effective_entry), str(comp_id), str(output_path)],
+        )
 
         props_path = bespoke.get("props_path")
         if props_path:
@@ -1942,8 +1952,8 @@ class VideoCompose(BaseTool):
         with open(props_path, "w", encoding="utf-8") as f:
             json.dump(props, f)
 
-        cmd = [
-            "npx", "remotion", "render",
+        cmd = self._remotion_command(composer_dir, [
+            "render",
             str(composer_dir / "src" / "index.tsx"),
             composition_id,
             str(output_path),
@@ -1953,7 +1963,7 @@ class VideoCompose(BaseTool):
             # with "neither valid JSON nor a file path". The equals form is the
             # API Remotion recommends for file paths and is cross-platform safe.
             f"--props={props_path}",
-        ]
+        ])
         if public_dir is not None:
             cmd.append(f"--public-dir={public_dir}")
 

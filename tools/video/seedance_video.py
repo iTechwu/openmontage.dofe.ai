@@ -41,7 +41,7 @@ class SeedanceVideo(BaseTool):
         "Set FAL_KEY to your fal.ai API key.\n"
         "  Get one at https://fal.ai/dashboard/keys"
     )
-    agent_skills = ["seedance-2-0", "ai-video-gen"]
+    agent_skills = ["seedance-provider", "seedance-prompting", "ai-video-gen"]
 
     capabilities = ["text_to_video", "image_to_video", "reference_to_video"]
     supports = {

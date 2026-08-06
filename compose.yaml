@@ -1,0 +1,66 @@
+name: openmontage
+
+x-openmontage-common: &openmontage-common
+  platform: ${OPENMONTAGE_PLATFORM:-linux/amd64}
+  build:
+    context: .
+  image: openmontage:local
+  shm_size: "512mb"
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    OPENMONTAGE_PROJECTS_DIR: /data/projects
+    OPENMONTAGE_JOB_DB: /data/projects/.openmontage/jobs.sqlite3
+    OPENMONTAGE_MCP_HOST: 0.0.0.0
+    OPENMONTAGE_MCP_PORT: 8765
+    OPENMONTAGE_SERVICE_TOKEN: ${OPENMONTAGE_SERVICE_TOKEN:?Set OPENMONTAGE_SERVICE_TOKEN in .env}
+    OPENMONTAGE_EVENT_ENDPOINT: ${OPENMONTAGE_EVENT_ENDPOINT:-http://host.docker.internal:1455/api/internal/openmontage/events}
+    OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL: ${OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL:-http://host.docker.internal:1455}
+    OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL: ${OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL:-http://host.docker.internal:1455}
+    OPENMONTAGE_AGENT_EXECUTOR_JSON: '${OPENMONTAGE_AGENT_EXECUTOR_JSON:-["codex","exec","--skip-git-repo-check","--ephemeral","--ignore-user-config","-s","workspace-write","-C","/app","--add-dir","{project_dir}","-"]}'
+    OPENMONTAGE_AGENT_TIMEOUT_SECONDS: ${OPENMONTAGE_AGENT_TIMEOUT_SECONDS:-3600}
+    OPENMONTAGE_EVENT_SIGNING_SECRET: ${OPENMONTAGE_EVENT_SIGNING_SECRET:?Set OPENMONTAGE_EVENT_SIGNING_SECRET in .env}
+    DOFE_ENABLED: "true"
+    DOFE_CA_BUNDLE: ${DOFE_CA_BUNDLE:-}
+  volumes:
+    - ./projects:/data/projects
+    - ./music_library:/data/music_library
+  networks:
+    - dofe-models
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+services:
+  openmontage-mcp:
+    <<: *openmontage-common
+    command: ["mcp", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8765"]
+    ports:
+      - "${OPENMONTAGE_MCP_PORT:-8765}:8765"
+    restart: unless-stopped
+
+  openmontage-cli:
+    <<: *openmontage-common
+    profiles: ["tools"]
+    command: ["--help"]
+
+  openmontage-events:
+    <<: *openmontage-common
+    profiles: ["agentspace"]
+    command: ["events", "publish", "--interval", "2", "--json"]
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+
+  openmontage-worker:
+    <<: *openmontage-common
+    profiles: ["agentspace"]
+    command: ["worker", "run", "--interval", "2", "--json"]
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+
+networks:
+  dofe-models:
+    external: true
+    name: ${DOFE_DOCKER_NETWORK:-modelsdofeai_default}

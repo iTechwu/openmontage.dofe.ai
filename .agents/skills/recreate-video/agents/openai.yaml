@@ -1,0 +1,4 @@
+interface:
+  display_name: "Recreate Video"
+  short_description: "Turn a video link into a differentiated new production"
+  default_prompt: "Use $recreate-video to analyze this video link and create a differentiated new video."

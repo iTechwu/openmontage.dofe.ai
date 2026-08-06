@@ -308,7 +308,8 @@ class AudioMixer(BaseTool):
         # Amix all processed streams
         mix_inputs = "".join(f"[a{i}]" for i in range(len(tracks)))
         filter_parts.append(
-            f"{mix_inputs}amix=inputs={len(tracks)}:duration=longest:dropout_transition=2[mixed]"
+            f"{mix_inputs}amix=inputs={len(tracks)}:duration=longest:"
+            "dropout_transition=2:normalize=0[mixed]"
         )
 
         if normalize:
@@ -560,7 +561,8 @@ class AudioMixer(BaseTool):
 
             if len(speech_tracks) > 1:
                 filter_parts.append(
-                    f"{speech_labels}amix=inputs={len(speech_tracks)}:duration=longest[speech_all]"
+                    f"{speech_labels}amix=inputs={len(speech_tracks)}:"
+                    "duration=longest:normalize=0[speech_all]"
                 )
             else:
                 filter_parts.append(f"[a{speech_indices[0]}]acopy[speech_all]")
@@ -580,7 +582,8 @@ class AudioMixer(BaseTool):
 
             if len(music_tracks) > 1:
                 filter_parts.append(
-                    f"{music_labels}amix=inputs={len(music_tracks)}:duration=longest[music_mix]"
+                    f"{music_labels}amix=inputs={len(music_tracks)}:"
+                    "duration=longest:normalize=0[music_mix]"
                 )
                 music_in = "[music_mix]"
             else:
@@ -600,7 +603,10 @@ class AudioMixer(BaseTool):
             )
 
             # Final mix: the other speech branch + ducked music
-            mix_label = "[speech_out][music_out]amix=inputs=2:duration=longest[premix]"
+            mix_label = (
+                "[speech_out][music_out]amix=inputs=2:duration=longest:"
+                "normalize=0[premix]"
+            )
 
             # Add SFX if present
             sfx_start = len(speech_tracks) + len(music_tracks)
@@ -608,7 +614,8 @@ class AudioMixer(BaseTool):
                 sfx_labels = "".join(f"[a{i}]" for i in range(sfx_start, sfx_start + len(sfx_tracks)))
                 filter_parts.append(mix_label.replace("[premix]", "[pressfx]"))
                 filter_parts.append(
-                    f"[pressfx]{sfx_labels}amix=inputs={1 + len(sfx_tracks)}:duration=longest[premix]"
+                    f"[pressfx]{sfx_labels}amix=inputs={1 + len(sfx_tracks)}:"
+                    "duration=longest:normalize=0[premix]"
                 )
             else:
                 filter_parts.append(mix_label)
@@ -617,7 +624,8 @@ class AudioMixer(BaseTool):
             # No ducking: simple amix of all tracks
             all_labels = "".join(f"[a{i}]" for i in range(len(all_tracks)))
             filter_parts.append(
-                f"{all_labels}amix=inputs={len(all_tracks)}:duration=longest:dropout_transition=2[premix]"
+                f"{all_labels}amix=inputs={len(all_tracks)}:duration=longest:"
+                "dropout_transition=2:normalize=0[premix]"
             )
 
         # A ducked music stream is gated by the speech sidechain, so its tail

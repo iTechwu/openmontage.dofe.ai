@@ -169,7 +169,18 @@ make setup
 ```bash
 # .env — 每个密钥都是可选的，只需添加您拥有的即可
 
-# 图像 + 视频网关:
+# 统一 DoFe.AI 模型网关（推荐）:
+DOFE_ENABLED=true
+DOFE_MODEL_BASE_URL=https://model.local.dofe.ai/api
+DOFE_MODEL_API_KEY=your-key
+DOFE_IMAGE_MODEL=seedream-5.0
+DOFE_VIDEO_MODEL=seedance-2.0-fast
+DOFE_STT_MODEL=openspeech-auc
+DOFE_INTERNAL_API_BASE_URL=https://model.local.dofe.ai
+DOFE_TENANT_ID=your-tenant-uuid
+INTERNAL_API_SECRET=your-internal-service-secret
+
+# 可选的直连供应商兼容路径:
 FAL_KEY=your-key               # FLUX 图像 + Google Veo、Kling、MiniMax 视频 + Recraft 图像
 
 # 免费素材库:
@@ -675,3 +686,9 @@ make test
 **OpenMontage** — 拥有真正质量把控、由您的 AI 助手编排的生产级视频制作系统。
 
 如果这个项目对您有帮助，点一个 Star 对我们意义重大 —— 这也能帮助其他人发现它。
+### Docker、MCP 与视频链接复刻
+
+OpenMontage 现在可以作为 Docker 化的 MCP 服务供 Codex 或 Claude 调用，并提供
+`$recreate-video` Skill。支持 YouTube、TikTok、Instagram、**抖音**（包括
+`v.douyin.com` 短链和完整分享文本）以及本地视频作为参考。部署与调用方式见
+[Docker 与智能体集成](docs/DOCKER_AND_AGENTS.md)。

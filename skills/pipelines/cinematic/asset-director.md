@@ -30,6 +30,10 @@ Before authoring title cards, name plates, or SVG overlays, read **`skills/meta/
 | Tools | `subtitle_gen`, `audio_enhance`, `image_selector`, `video_selector`, `pixabay_music` (free, default), `freesound_music` (free), `music_gen` (ElevenLabs, paid) — selectors auto-discover all available providers from the registry. **Default to `pixabay_music` before reaching for `music_gen`.** | Optional support asset creation |
 | Playbook | Active style playbook | Brand and typography consistency |
 
+For a selected Seedance provider, read its declared `agent_skills` plus
+`seedance-directing`, `seedance-continuity` when the scene is connected, and
+`seedance-quality` before the paid call.
+
 ## Process
 
 ### 1. Prioritize Source Selects
@@ -117,6 +121,18 @@ Recommended metadata keys:
 >
 > Log the (pre, critique, post) triplet in the asset metadata for traceability. This mirrors the CHAI workflow and creates a record the reviewer can audit.
 
+For Seedance, compile the post-caption from the scene's `generation_contract`
+with `seedance-prompting`. Store the result as `asset.prompt_review`, including
+the draft, concrete critique findings, final prompt, skills applied, and boolean
+continuity/reference-role checks. Do not generate when the contract has no
+completed endpoint, references have overlapping authority, or a continuation
+has no accepted source state.
+
+After every generated Seedance clip, inspect it with `seedance-quality` and set
+`asset.take_review` to one of `keep`, `post_fix`, `reroll`, `rewrite`, `reanchor`,
+or `reject`. Only an explicitly accepted take may update connected-scene canon;
+record the observed end state, not the planned endpoint.
+
 ### 5. Quality Gate
 
 - source and support assets are clearly distinguished,
@@ -124,6 +140,8 @@ Recommended metadata keys:
 - audio plan matches the beat map,
 - every referenced file exists.
 - if motion is required, the asset set contains actual video clips for the motion-led beats.
+- every Seedance asset contains a prompt audit and a take review; accepted
+  connected clips contain an observed end state.
 
 ### Mid-Production Fact Verification
 

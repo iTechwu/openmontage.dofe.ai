@@ -1,0 +1,4 @@
+interface:
+  display_name: "Seedance Prompting"
+  short_description: "Compile production-ready Seedance prompts"
+  default_prompt: "Use $seedance-prompting to compile this shot contract into a precise Seedance prompt."

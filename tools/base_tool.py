@@ -133,6 +133,11 @@ class ToolResult:
     artifacts: list[str] = field(default_factory=list)
     error: Optional[str] = None
     cost_usd: float = 0.0
+    # Native provider billing. Keep cost_usd for legacy USD-only consumers,
+    # but never put CNY or an unknown currency into it.
+    cost_amount: Optional[float] = None
+    cost_currency: Optional[str] = None
+    cost_source: Optional[str] = None
     duration_seconds: float = 0.0
     seed: Optional[int] = None
     model: Optional[str] = None
@@ -210,12 +215,18 @@ def _instrument_execute(fn: Callable) -> Callable:
             project_dir = infer_project_dir(inputs)
         if project_dir is not None:
             cost = getattr(result, "cost_usd", None)
+            cost_amount = getattr(result, "cost_amount", None)
             emit_event(project_dir, {
                 **base, "event": "finish",
                 "output_path": str(output_path) if output_path else None,
                 "success": getattr(result, "success", None),
                 # NOTE: 0.0 is meaningful (ran for free) — only None is dropped.
                 "cost_usd": cost if isinstance(cost, (int, float)) else None,
+                "cost_amount": (
+                    cost_amount if isinstance(cost_amount, (int, float)) else None
+                ),
+                "cost_currency": getattr(result, "cost_currency", None),
+                "cost_source": getattr(result, "cost_source", None),
                 "duration_s": round(time.monotonic() - started, 2),
             })
         return result
@@ -312,10 +323,11 @@ class BaseTool(ABC):
                         f"Command {cmd_name!r} not found. {self.install_instructions}"
                     )
             elif dep.startswith("env:"):
-                env_name = dep[4:]
-                if not os.environ.get(env_name):
+                env_names = [name.strip() for name in dep[4:].split("|") if name.strip()]
+                if not any(os.environ.get(name) for name in env_names):
+                    env_label = " or ".join(repr(name) for name in env_names)
                     raise DependencyError(
-                        f"Environment variable {env_name!r} not set. {self.install_instructions}"
+                        f"Environment variable {env_label} not set. {self.install_instructions}"
                     )
             elif dep.startswith("python:"):
                 module_name = dep[7:]

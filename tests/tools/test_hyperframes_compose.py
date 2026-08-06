@@ -9,6 +9,7 @@ in tests/qa/test_09_hyperframes_compose.py and are opt-in.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -224,6 +225,9 @@ def test_runtime_check_fails_when_npm_package_unresolvable(monkeypatch):
         HyperFramesCompose, "_npm_resolve_cache", None, raising=False
     )
     monkeypatch.setattr(
+        HyperFramesCompose, "_local_package", classmethod(lambda cls: {})
+    )
+    monkeypatch.setattr(
         HyperFramesCompose,
         "_resolve_npm_package",
         classmethod(lambda cls: {"error": "npm package `hyperframes` not found (404)"}),
@@ -246,6 +250,9 @@ def test_runtime_check_succeeds_when_npm_resolves(monkeypatch):
         HyperFramesCompose, "_npm_resolve_cache", None, raising=False
     )
     monkeypatch.setattr(
+        HyperFramesCompose, "_local_package", classmethod(lambda cls: {})
+    )
+    monkeypatch.setattr(
         HyperFramesCompose,
         "_resolve_npm_package",
         classmethod(lambda cls: {"version": "0.4.5"}),
@@ -265,6 +272,9 @@ def test_runtime_check_succeeds_when_npm_resolves(monkeypatch):
 
 
 def test_runtime_check_fails_when_published_cli_crashes(monkeypatch):
+    monkeypatch.setattr(
+        HyperFramesCompose, "_local_package", classmethod(lambda cls: {})
+    )
     monkeypatch.setattr(
         HyperFramesCompose,
         "_resolve_npm_package",
@@ -298,6 +308,9 @@ def test_video_compose_render_engines_follow_hyperframes_runtime_check(monkeypat
         HyperFramesCompose, "_npm_resolve_cache", None, raising=False
     )
     monkeypatch.setattr(
+        HyperFramesCompose, "_local_package", classmethod(lambda cls: {})
+    )
+    monkeypatch.setattr(
         HyperFramesCompose,
         "_resolve_npm_package",
         classmethod(lambda cls: {"error": "npm package not found (404)"}),
@@ -307,6 +320,53 @@ def test_video_compose_render_engines_follow_hyperframes_runtime_check(monkeypat
         "video_compose must mark hyperframes as unavailable when the real "
         "runtime check fails. Otherwise the HARD RULE lies."
     )
+
+
+def test_runtime_check_prefers_project_local_cli_without_registry(monkeypatch):
+    monkeypatch.setattr(HyperFramesCompose, "_node_major_version", classmethod(lambda cls: 22))
+    monkeypatch.setattr(
+        HyperFramesCompose,
+        "_local_package",
+        classmethod(
+            lambda cls: {
+                "version": "0.7.92",
+                "cli_path": "/project/node_modules/.bin/hyperframes",
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        HyperFramesCompose,
+        "_resolve_npm_package",
+        classmethod(lambda cls: pytest.fail("local installs must not query npm")),
+    )
+    monkeypatch.setattr(
+        HyperFramesCompose, "_probe_cli", classmethod(lambda cls: {"status": "ok"})
+    )
+
+    rc = HyperFramesCompose()._runtime_check()
+
+    if not rc["ffmpeg_available"]:
+        pytest.skip("FFmpeg is not installed on this machine")
+    assert rc["runtime_available"] is True
+    assert rc["installation_source"] == "project-local"
+    assert rc["npm_package_version"] == "0.7.92"
+
+
+def test_cli_disables_experimental_parallel_router_by_default(monkeypatch, tmp_path):
+    captured: dict[str, Any] = {}
+
+    def fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.delenv("HF_DE_PARALLEL_ROUTER", raising=False)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    HyperFramesCompose()._run_hf(
+        ["lint"], cwd=tmp_path, timeout=10, check=False
+    )
+
+    assert captured["env"]["HF_DE_PARALLEL_ROUTER"] == "false"
 
 
 def test_provider_menu_summary_returns_expected_shape():

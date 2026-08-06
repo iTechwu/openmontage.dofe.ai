@@ -31,6 +31,36 @@
           "quality_score": { "type": "number", "minimum": 0, "maximum": 1 },
           "subtype": { "type": "string", "description": "Sub-classification (e.g. 'background', 'stock', 'generated')" },
           "generation_summary": { "type": "string", "description": "Brief summary of how the asset was generated or sourced" },
+          "prompt_review": {
+            "type": "object",
+            "description": "Generation prompt compilation and preflight audit trail.",
+            "required": ["draft", "final", "skills_applied", "continuity_checked", "reference_roles_checked"],
+            "properties": {
+              "draft": { "type": "string" },
+              "critique": { "type": "array", "items": { "type": "string" } },
+              "final": { "type": "string" },
+              "skills_applied": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+              "continuity_checked": { "type": "boolean" },
+              "reference_roles_checked": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          },
+          "take_review": {
+            "type": "object",
+            "description": "Post-generation review and sequence-canon decision.",
+            "required": ["decision", "issues", "accepted_as_canon", "next_action"],
+            "properties": {
+              "decision": {
+                "type": "string",
+                "enum": ["keep", "post_fix", "reroll", "rewrite", "reanchor", "reject"]
+              },
+              "issues": { "type": "array", "items": { "type": "string" } },
+              "accepted_as_canon": { "type": "boolean" },
+              "observed_end_state": { "type": "string" },
+              "next_action": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          },
           "provider": { "type": "string", "description": "Provider name (e.g. pixabay, google_imagen)" },
           "license": { "type": "string", "description": "License type (e.g. Pixabay License, CC0)" },
           "original_url": { "type": "string", "description": "Source URL if downloaded from a stock service" },

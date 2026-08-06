@@ -1,5 +1,4 @@
 import React from "react";
-import { loadFont } from "@remotion/google-fonts/SpaceGrotesk";
 import {
   AbsoluteFill,
   Audio,
@@ -15,13 +14,11 @@ import {
 import { CinematicRendererProps, CinematicTone, CinematicVideoScene } from "./cinematic/types";
 import { CaptionOverlay } from "./components/CaptionOverlay";
 import { resolveAsset } from "./lib/resolveAsset";
+import { spaceGroteskFamily } from "./localFonts";
 
 const FPS = 30;
 
-const { fontFamily } = loadFont("normal", {
-  weights: ["400", "500", "700"],
-  subsets: ["latin"],
-});
+const fontFamily = spaceGroteskFamily;
 
 const toneGradient = (tone: CinematicTone) => {
   switch (tone) {

@@ -18,16 +18,25 @@ Everything you need to know about every provider in OpenMontage — setup instru
 | 6 | **~$0.05/image** | OpenAI | GPT Image 2 images + OpenAI TTS |
 | 7 | **~$0.04/image** | Google Imagen | Imagen 4 images (shares the Google API key) |
 | 8 | **pay-as-you-go** | Kling Official | Official direct Kling video, image, TTS, avatar, and lip-sync API, separate from fal.ai Kling |
-| 9 | **$12/month** | Runway | Gen-4 video — highest quality AI video |
-| 10 | **pay-as-you-go** | HeyGen | Avatar videos, multi-model video gateway |
-| 11 | **pay-as-you-go** | Suno | Full song generation with vocals and lyrics |
-| 12 | **$0 + GPU** | Local video gen | WAN 2.1, Hunyuan, CogVideo, LTX — free, offline |
-| 13 | **$0 + GPU** | Local Diffusion | Stable Diffusion images — free, offline |
+| 9 | **pay-as-you-go** | DoFe.AI Gateway | One key routes image, video, TTS, music, and avatar model work through `model.local.dofe.ai/api` |
+| 10 | **$12/month** | Runway | Gen-4 video — highest quality AI video |
+| 11 | **pay-as-you-go** | HeyGen | Avatar videos, multi-model video gateway |
+| 12 | **pay-as-you-go** | Suno | Full song generation with vocals and lyrics |
+| 13 | **$0 + GPU** | Local video gen | WAN 2.1, Hunyuan, CogVideo, LTX — free, offline |
+| 14 | **$0 + GPU** | Local Diffusion | Stable Diffusion images — free, offline |
 
 ### Environment Variable Summary
 
 ```bash
 # .env — add your keys here
+
+# DOFE.AI UNIFIED MODEL GATEWAY (recommended)
+DOFE_ENABLED=true
+DOFE_MODEL_BASE_URL=https://model.local.dofe.ai/api
+DOFE_MODEL_API_KEY=          # Team-level sk-... key
+DOFE_IMAGE_MODEL=seedream-5.0
+DOFE_VIDEO_MODEL=seedance-2.0-fast
+DOFE_STT_MODEL=openspeech-auc
 
 # FREE (no cost, ever)
 PEXELS_API_KEY=              # Stock photos + videos
@@ -68,6 +77,55 @@ VIDEO_GEN_LOCAL_MODEL=       # wan2.1-1.3b, wan2.1-14b, hunyuan-1.5, ltx2-local,
 ---
 
 ## Cloud Providers
+
+### DoFe.AI Gateway — Unified Model Router
+
+> **One API key and one task protocol for model-backed production.** With
+> `DOFE_ENABLED=true`, the image, video, and TTS selectors prefer the DoFe tools;
+> music and avatar capabilities use the same shared client when explicitly chosen.
+
+**Tools unlocked:** `dofe_image`, `dofe_video`, `dofe_tts`, `dofe_music`, `dofe_avatar`
+
+**Env vars:** `DOFE_MODEL_BASE_URL`, `DOFE_MODEL_API_KEY`, `DOFE_*_MODEL`,
+`DOFE_INTERNAL_API_BASE_URL`, `DOFE_TENANT_ID`, `INTERNAL_API_SECRET`
+
+```bash
+DOFE_ENABLED=true
+DOFE_MODEL_BASE_URL=https://model.local.dofe.ai/api
+DOFE_MODEL_API_KEY=sk-your-key
+DOFE_IMAGE_MODEL=seedream-5.0
+DOFE_VIDEO_MODEL=seedance-2.0-fast
+DOFE_STT_MODEL=openspeech-auc
+DOFE_INTERNAL_API_BASE_URL=https://model.local.dofe.ai
+DOFE_TENANT_ID=your-tenant-uuid
+INTERNAL_API_SECRET=your-internal-service-secret
+```
+
+The gateway also exposes OpenAI/OpenAI Responses at `/v1`, Anthropic at
+`/anthropic`, and Gemini at `/gemini`. Model values are tenant-visible aliases
+from `GET /v1/models` and are matched exactly. A failed DoFe task is surfaced to
+the caller; OpenMontage does not silently substitute another provider.
+
+The configured image and video aliases are `seedream-5.0` and `seedance-2.0-fast`.
+Although the capability projection previously marked
+Seedance billing/smoke readiness as blocked, a five-second text-to-video task
+completed successfully; readiness is therefore treated as a diagnostic soft
+signal. `openspeech-auc` is restricted and must be granted to the tenant before
+STT can run. It also needs a positive tenant-effective `PER_MINUTE` price;
+zero-priced or unresolved models are hidden and rejected before provider
+submission. No TTS alias was visible, so leave `DOFE_TTS_MODEL` blank until the
+gateway publishes one.
+
+Seedance preflight pricing is read from AIRouter's tenant-effective conditional
+rate card through `POST /internal/pricing/quote`; OpenMontage does not keep a
+second price table. For the currently configured tenant, `seedance-2.0-fast`
+is CNY 37 per million output tokens without video input and CNY 22 per million
+output tokens with video/image input. Pass `estimated_output_tokens` to obtain
+an estimated amount; otherwise dry-run returns the unit rate and waits for the
+provider's actual `usage.completion_tokens`. The completed task's `finalCost`,
+currency, and pricing breakdown are authoritative.
+
+---
 
 ### xAI — Grok Image + Video
 
@@ -595,6 +653,9 @@ Google TTS offers 700+ voices across 50+ languages. Voice names follow the patte
 
 > **Multi-model video gateway.** Access VEO, Sora, Runway, Kling, and Seedance through a single API.
 
+HeyGen is optional and is not used by the AIRouter-only reference-clone example.
+Use it only for avatar/presenter/lip-sync workflows that explicitly select it.
+
 **Tools unlocked:** `heygen_video`
 **Env var:** `HEYGEN_API_KEY`
 
@@ -724,7 +785,7 @@ These providers run entirely on your machine. No network, no API key, no cost. S
 
 ```bash
 # Included in make setup, or install manually:
-cd remotion-composer && npm install && cd ..
+make install-runtimes
 ```
 
 Requires **Node.js 18+** and `npx`. The `remotion-composer/` project is included in the repo.
@@ -771,7 +832,7 @@ ffmpeg -version
 npx --yes hyperframes doctor
 ```
 
-The CLI is consumed as `npx hyperframes`. Do not use `npx @hyperframes/cli`; that package name is not the OpenMontage runtime path.
+The CLI is pinned in `remotion-composer/package-lock.json` and invoked from the project-local `node_modules/.bin`. Install both local composition runtimes with `make install-runtimes`, then verify them with `make runtimes-doctor`. `npx hyperframes` remains a compatibility fallback; do not use `npx @hyperframes/cli`, because that is not the published package name.
 
 #### What HyperFrames Renders
 
