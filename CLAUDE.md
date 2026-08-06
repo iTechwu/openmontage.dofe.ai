@@ -8,4 +8,10 @@ Skipping it WILL cause you to take the wrong action.
 
 There are no instructions in this file. All instructions are in AGENT_GUIDE.md.
 
-Git 工作流约定（提交信息用中文、每次实施完成即提交推送）详见 AGENT_GUIDE.md 的「Git 提交约定」。
+## Git 提交规则（强制）
+
+- **每一轮修改完成即提交**：一轮改动落地（功能实现、问题修复、文档更新等）后，立即提交所有更改，不要攒批。
+- **提交信息一律使用中文**，采用 Conventional Commits 风格（`feat:` / `fix:` / `refactor:` / `docs:` / `test:` / `chore:`），正文说明本次实际完成的内容。
+- **提交后推送到远端**；提交前先跑相关测试，确认改动可用。
+
+更详细的约定见 `AGENT_GUIDE.md` 的「Git 提交约定」。
