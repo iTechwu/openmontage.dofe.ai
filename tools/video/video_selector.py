@@ -153,7 +153,11 @@ class VideoSelector(BaseTool):
             },
             "model_name": {
                 "type": "string",
-                "description": "Provider-specific model name passed through when supported.",
+                "description": "Compatibility alias for model. Adapted to the selected provider's model field.",
+            },
+            "model": {
+                "type": "string",
+                "description": "Underlying model identifier. Adapted to model_name for providers that use that field.",
             },
             "mode": {
                 "type": "string",
@@ -262,14 +266,14 @@ class VideoSelector(BaseTool):
         if not candidates:
             return 0.0
         tool, _ = self._select_best_tool(inputs, candidates, self._prepare_task_context(inputs))
-        return tool.estimate_cost(inputs) if tool else 0.0
+        return tool.estimate_cost(self._adapt_inputs_for_tool(tool, inputs)) if tool else 0.0
 
     def estimate_runtime(self, inputs: dict[str, object]) -> float:
         candidates = self._providers()
         if not candidates:
             return 0.0
         tool, _ = self._select_best_tool(inputs, candidates, self._prepare_task_context(inputs))
-        return tool.estimate_runtime(inputs) if tool else 0.0
+        return tool.estimate_runtime(self._adapt_inputs_for_tool(tool, inputs)) if tool else 0.0
 
     def execute(self, inputs: dict[str, object]) -> ToolResult:
         from lib.scoring import rank_providers
@@ -304,12 +308,7 @@ class VideoSelector(BaseTool):
         if tool is None:
             return ToolResult(success=False, error="No video generation provider available.")
 
-        # Adapt input keys: stock tools use 'query' while generators use 'prompt'
-        adapted = dict(inputs)
-        if hasattr(tool, 'input_schema'):
-            required = tool.input_schema.get("properties", {})
-            if "query" in required and "query" not in adapted:
-                adapted["query"] = adapted.get("prompt", "")
+        adapted = self._adapt_inputs_for_tool(tool, inputs)
 
         # Auto-resolve reference_image_path to a URL for providers that need it
         if adapted.get("operation") == "image_to_video" and adapted.get("reference_image_path"):
@@ -329,7 +328,7 @@ class VideoSelector(BaseTool):
             result.data["selection_reason"] = score.explain() if score else f"Selected {tool.provider} ({tool.name})"
             if score:
                 result.data["provider_score"] = score.to_dict()
-            result.data.update(self._tool_context_payload(tool, inputs))
+            result.data.update(self._tool_context_payload(tool, adapted))
             result.data["alternatives_considered"] = [
                 t.name for t in candidates
                 if t.name != tool.name and t.get_status().value == "available"
@@ -444,6 +443,35 @@ class VideoSelector(BaseTool):
             "selected_tool_best_for": info.get("best_for", []),
         }
 
+    @staticmethod
+    def _adapt_inputs_for_tool(
+        tool: BaseTool,
+        inputs: dict[str, object],
+    ) -> dict[str, object]:
+        """Map selector aliases to the concrete provider's declared fields."""
+        adapted = dict(inputs)
+        properties = getattr(tool, "input_schema", {}).get("properties", {})
+
+        aliases = (
+            ("prompt", "query"),
+            ("model_name", "model"),
+            ("aspect_ratio", "ratio"),
+            ("reference_image_url", "image_url"),
+        )
+        for source, target in aliases:
+            if target in properties and target not in adapted and adapted.get(source) is not None:
+                adapted[target] = adapted[source]
+            if source in properties and source not in adapted and adapted.get(target) is not None:
+                adapted[source] = adapted[target]
+
+        for field, contract in properties.items():
+            if contract.get("type") == "integer" and isinstance(adapted.get(field), str):
+                value = str(adapted[field])
+                if value.isdigit():
+                    adapted[field] = int(value)
+
+        return adapted
+
     def _serialize_rankings(
         self,
         candidates: list[BaseTool],
@@ -458,8 +486,9 @@ class VideoSelector(BaseTool):
             if tool:
                 info = tool.get_info()
                 skills_for = getattr(tool, "agent_skills_for", None)
+                adapted = self._adapt_inputs_for_tool(tool, inputs or {})
                 item["agent_skills"] = (
-                    skills_for(inputs) if callable(skills_for) else info.get("agent_skills", [])
+                    skills_for(adapted) if callable(skills_for) else info.get("agent_skills", [])
                 )
                 item["usage_location"] = info.get("usage_location")
                 item["best_for"] = info.get("best_for", [])

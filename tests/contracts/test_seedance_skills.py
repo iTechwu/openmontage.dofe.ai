@@ -87,12 +87,32 @@ def test_dofe_gateway_selects_skills_from_model_alias(monkeypatch):
 
 def test_selector_exposes_input_aware_skills_in_execution_context():
     tool = RunwayVideo()
-    native = VideoSelector._tool_context_payload(tool, {"model": "gen4_turbo"})
-    seedance = VideoSelector._tool_context_payload(tool, {"model": "seedance_2.0"})
+    native_inputs = VideoSelector._adapt_inputs_for_tool(tool, {"model_name": "gen4_turbo"})
+    seedance_inputs = VideoSelector._adapt_inputs_for_tool(tool, {"model": "seedance_2.0"})
+    native = VideoSelector._tool_context_payload(tool, native_inputs)
+    seedance = VideoSelector._tool_context_payload(tool, seedance_inputs)
 
     assert native["required_agent_skills"] == ["ai-video-gen"]
     assert seedance["required_agent_skills"][:5] == list(SKILL_NAMES)
     assert tool.get_info()["agent_skills"][:5] == list(SKILL_NAMES)
+
+
+def test_selector_adapts_shared_fields_to_runway_contract():
+    adapted = VideoSelector._adapt_inputs_for_tool(
+        RunwayVideo(),
+        {
+            "prompt": "A car enters frame.",
+            "model_name": "gen4_turbo",
+            "aspect_ratio": "9:16",
+            "duration": "10",
+            "reference_image_url": "https://example.com/car.png",
+        },
+    )
+
+    assert adapted["model"] == "gen4_turbo"
+    assert adapted["ratio"] == "9:16"
+    assert adapted["duration"] == 10
+    assert adapted["image_url"] == "https://example.com/car.png"
 
 
 def test_scene_plan_accepts_seedance_generation_contract():
