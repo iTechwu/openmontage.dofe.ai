@@ -1445,6 +1445,21 @@ def test_two_clip_seedance_golden_trace_validates_scene_asset_and_handoff():
     }
     assert fixture["asset_manifest"]["lineage_review"]["checks"]["temporal_structure"]["status"] == "pass"
 
+    # Cross-artifact handoff: the child must build on the accepted parent's observed state.
+    parent = assets["clip-01-take-01"]
+    parent_take = parent["take_review"]
+    child_contract = scenes["clip-02"]["generation_contract"]
+    child_continuity = child_contract["seedance_contract"]["continuity_state"]
+    child_take = assets["clip-02-take-01"]["take_review"]
+
+    assert parent_take["accepted_as_canon"] is True
+    assert parent_take["canon_status"] in ("accepted", "accepted_with_deviation")
+    assert child_take["parent_asset_id"] == parent["id"] == "clip-01-take-01"
+    assert child_continuity["parent_asset_id"] == parent["id"]
+    assert child_continuity["extension_depth"] == parent_take["extension_depth"] + 1
+    # Dimension-for-dimension transfer (observation vs handoff phrasing differ, so compare keys).
+    assert set(parent_take["observed_state"]) == set(child_continuity["handoff_state"])
+
 
 def test_generation_contract_requires_explicit_model_family():
     schema = json.loads(
