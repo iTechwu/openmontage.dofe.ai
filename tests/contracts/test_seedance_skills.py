@@ -105,6 +105,15 @@ def test_seedance_skill_chain_defines_deep_control_artifacts():
         assert token in prompting
         assert token in production
 
+    provider = (ROOT / ".agents/skills/seedance-provider/SKILL.md").read_text()
+    migration = (
+        ROOT
+        / ".agents/skills/seedance-provider/references/contract-versioning.md"
+    ).read_text()
+    assert 'seedance_contract_version="2.0"' in provider
+    assert "missing `seedance_contract_version` as legacy `1.0`" in migration
+    assert "must not invent" in migration
+
 
 @pytest.mark.parametrize("director_path", SEEDANCE_PIPELINE_DIRECTORS)
 def test_video_pipelines_route_seedance_through_shared_production_contract(director_path: str):
@@ -429,6 +438,7 @@ def test_scene_plan_accepts_seedance_generation_contract():
                 "end_seconds": 6,
                 "generation_contract": {
                     "model_family": "seedance",
+                    "seedance_contract_version": "2.0",
                     "mode": "reference_to_video",
                     "shot_structure": "single_take",
                     "continuation_type": "sequence_first_clip",
@@ -617,6 +627,7 @@ def _standalone_lineage_review(asset_id: str) -> dict:
         "evidence": f"{asset_id} is a standalone root with no parent edge.",
     }
     return {
+        "seedance_contract_version": "2.0",
         "decision": "pass",
         "reviewed_asset_ids": [asset_id],
         "roots": [asset_id],
@@ -673,6 +684,7 @@ def test_asset_manifest_accepts_prompt_and_take_reviews():
                 "source_tool": "dofe_video",
                 "scene_id": "clip-01",
                 "model_family": "seedance",
+                "seedance_contract_version": "2.0",
                 "provider": "dofe",
                 "model": "seedance-2.0-fast",
                 "prompt_review": {
@@ -723,6 +735,7 @@ def test_seedance_asset_requires_provider_preflight_and_lineage_review():
         "source_tool": "dofe_video",
         "scene_id": "clip-01",
         "model_family": "seedance",
+        "seedance_contract_version": "2.0",
         "provider": "dofe",
         "model": "seedance-2.0-fast",
         "prompt_review": {
@@ -806,6 +819,7 @@ def test_seedance_generation_contract_rejects_incomplete_directors_read():
                 "end_seconds": 5,
                 "generation_contract": {
                     "model_family": "seedance",
+                    "seedance_contract_version": "2.0",
                     "mode": "text_to_video",
                     "shot_structure": "single_take",
                     "continuation_type": "standalone",
@@ -861,6 +875,7 @@ def test_seedance_keep_decision_must_enter_canon():
                 "source_tool": "seedance_video",
                 "scene_id": "clip-01",
                 "model_family": "seedance",
+                "seedance_contract_version": "2.0",
                 "provider": "fal",
                 "model": "seedance-2.0",
                 "prompt_review": {
@@ -928,6 +943,7 @@ def test_generic_asset_reviews_do_not_require_seedance_specific_fields():
 def _minimal_seedance_scene_contract() -> dict:
     return {
         "model_family": "seedance",
+        "seedance_contract_version": "2.0",
         "mode": "image_to_video",
         "shot_structure": "single_take",
         "continuation_type": "standalone",
@@ -1011,6 +1027,70 @@ def _scene_artifact(contract: dict) -> dict:
             }
         ],
     }
+
+
+def test_legacy_seedance_scene_contract_remains_readable():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "scene_plan.schema.json").read_text()
+    )
+    contract = _minimal_seedance_scene_contract()
+    del contract["seedance_contract_version"]
+    del contract["identity_ids"]
+    seedance = contract["seedance_contract"]
+    del seedance["temporal_beats"]
+    for field in ("lens", "blocking", "camera_axis", "screen_direction"):
+        del seedance["shot_design"][field]
+    artifact = _scene_artifact(contract)
+    del artifact["identity_registry"]
+
+    Draft202012Validator(schema).validate(artifact)
+
+
+def test_legacy_seedance_asset_contract_remains_readable():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "asset_manifest.schema.json").read_text()
+    )
+    lineage_review = _standalone_lineage_review("legacy-take-01")
+    del lineage_review["seedance_contract_version"]
+    del lineage_review["checks"]["identity_registry_consistency"]
+    del lineage_review["checks"]["prompt_compilation_trace"]
+    artifact = {
+        "version": "1.0",
+        "assets": [
+            {
+                "id": "legacy-take-01",
+                "type": "video",
+                "path": "assets/video/legacy-take-01.mp4",
+                "source_tool": "seedance_video",
+                "scene_id": "legacy-clip-01",
+                "model_family": "seedance",
+                "provider": "fal",
+                "model": "seedance-2.0",
+                "prompt_review": {
+                    "draft": "draft",
+                    "final": "final",
+                    "skills_applied": list(SKILL_NAMES),
+                    "continuity_checked": True,
+                    "reference_roles_checked": True,
+                    "provider_preflight": _provider_preflight_report(),
+                },
+                "take_review": {
+                    "decision": "keep",
+                    "issues": [],
+                    "accepted_as_canon": True,
+                    "canon_status": "accepted",
+                    "observed_end_state": "The legacy shot reaches its endpoint.",
+                    "extension_depth": 0,
+                    "observation_confidence": "high",
+                    "uncertainties": [],
+                    "next_action": "Migrate before another generation.",
+                },
+            }
+        ],
+        "lineage_review": lineage_review,
+    }
+
+    Draft202012Validator(schema).validate(artifact)
 
 
 def test_generation_contract_requires_explicit_model_family():
@@ -1114,6 +1194,7 @@ def test_seedance_asset_requires_full_skill_and_check_audit():
                 "source_tool": "seedance_video",
                 "scene_id": "clip-01",
                 "model_family": "seedance",
+                "seedance_contract_version": "2.0",
                 "provider": "fal",
                 "model": "seedance-2.0",
                 "prompt_review": {

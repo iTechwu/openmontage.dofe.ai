@@ -13,6 +13,12 @@ Use this skill for execution facts. Use
 
 ## Provider Contract
 
+For new work, set `seedance_contract_version="2.0"` on the scene contract,
+generated asset, and lineage review. When opening an existing Seedance project
+whose marker is missing or `1.0`, read
+[references/contract-versioning.md](references/contract-versioning.md) before
+resuming generation.
+
 1. Discover the tool through the registry and prefer `video_selector` unless a
    provider was explicitly approved.
 2. Announce the exact tool, provider, model/variant, operation, and whether the

@@ -156,6 +156,11 @@
                 "enum": ["seedance", "generic"],
                 "description": "Model family selected by video_selector; seedance enables the structured production contract."
               },
+              "seedance_contract_version": {
+                "type": "string",
+                "enum": ["1.0", "2.0"],
+                "description": "Version of the Seedance sub-contract. Missing is treated as legacy 1.0; all new or resumed work must use 2.0."
+              },
               "mode": {
                 "type": "string",
                 "enum": ["text_to_video", "image_to_video", "reference_to_video", "first_last_frame", "video_to_video", "edit", "extend"]
@@ -229,7 +234,6 @@
                   "authoring_state",
                   "primary_action",
                   "shot_design",
-                  "temporal_beats",
                   "sound_intent",
                   "prompt_carriers",
                   "exclusions",
@@ -262,7 +266,7 @@
                   "primary_action": { "type": "string", "minLength": 1 },
                   "shot_design": {
                     "type": "object",
-                    "required": ["framing", "lens", "blocking", "camera", "camera_axis", "screen_direction", "lighting", "behavior"],
+                    "required": ["framing", "camera", "lighting", "behavior"],
                     "properties": {
                       "framing": { "type": "string", "minLength": 1 },
                       "lens": { "type": "string", "minLength": 1 },
@@ -357,11 +361,7 @@
                             "subtext",
                             "suppressed_behavior",
                             "specific_detail",
-                            "specific_detail_provenance",
-                            "specific_detail_source",
-                            "stock_solution_refused",
-                            "value_before",
-                            "value_after"
+                            "stock_solution_refused"
                           ]
                         }
                       }
@@ -391,10 +391,48 @@
                     "continuation_type",
                     "planned_start_state",
                     "identity_anchors",
-                    "identity_ids",
                     "prompt_budget",
                     "seedance_contract"
                   ]
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "model_family": { "const": "seedance" },
+                    "seedance_contract_version": { "const": "2.0" }
+                  },
+                  "required": ["model_family", "seedance_contract_version"]
+                },
+                "then": {
+                  "required": ["identity_ids"],
+                  "properties": {
+                    "seedance_contract": {
+                      "required": ["temporal_beats"],
+                      "properties": {
+                        "shot_design": {
+                          "required": ["lens", "blocking", "camera_axis", "screen_direction"]
+                        }
+                      },
+                      "allOf": [
+                        {
+                          "if": { "properties": { "lane": { "const": "narrative" } }, "required": ["lane"] },
+                          "then": {
+                            "properties": {
+                              "authoring_state": {
+                                "required": [
+                                  "specific_detail_provenance",
+                                  "specific_detail_source",
+                                  "value_before",
+                                  "value_after"
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
                 }
               },
               {
@@ -417,7 +455,7 @@
                     "seedance_contract": {
                       "properties": {
                         "continuity_state": {
-                          "required": ["parent_asset_id", "observed_start_state", "handoff_state"],
+                          "required": ["parent_asset_id", "observed_start_state"],
                           "properties": {
                             "source_status": {
                               "enum": ["accepted", "accepted_with_deviation"]
@@ -510,8 +548,11 @@
               "properties": {
                 "generation_contract": {
                   "type": "object",
-                  "properties": { "model_family": { "const": "seedance" } },
-                  "required": ["model_family"]
+                  "properties": {
+                    "model_family": { "const": "seedance" },
+                    "seedance_contract_version": { "const": "2.0" }
+                  },
+                  "required": ["model_family", "seedance_contract_version"]
                 }
               },
               "required": ["generation_contract"]

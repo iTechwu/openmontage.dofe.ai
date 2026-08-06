@@ -212,6 +212,11 @@
             "enum": ["seedance", "generic"],
             "description": "Generation model family used to activate family-specific audit requirements."
           },
+          "seedance_contract_version": {
+            "type": "string",
+            "enum": ["1.0", "2.0"],
+            "description": "Version of the Seedance sub-contract. Missing is treated as legacy 1.0; all new or resumed work must use 2.0."
+          },
           "cost_usd": { "type": "number", "minimum": 0 },
           "duration_seconds": { "type": "number", "minimum": 0 },
           "resolution": { "type": "string" },
@@ -277,7 +282,7 @@
               {
                 "if": { "properties": { "accepted_as_canon": { "const": true } }, "required": ["accepted_as_canon"] },
                 "then": {
-                  "required": ["observed_end_state", "observed_state"],
+                  "required": ["observed_end_state"],
                   "properties": {
                     "canon_status": { "enum": ["accepted", "accepted_with_deviation"] }
                   }
@@ -338,7 +343,7 @@
               "required": ["provider", "model", "prompt_review", "take_review"],
               "properties": {
                 "prompt_review": {
-                  "required": ["compile_spec", "provider_preflight"],
+                  "required": ["provider_preflight"],
                   "properties": {
                     "provider_preflight": {
                       "properties": {
@@ -364,8 +369,30 @@
                     "canon_status",
                     "extension_depth",
                     "observation_confidence",
-                    "uncertainties",
-                    "identity_observations"
+                    "uncertainties"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "model_family": { "const": "seedance" },
+                "seedance_contract_version": { "const": "2.0" }
+              },
+              "required": ["model_family", "seedance_contract_version"]
+            },
+            "then": {
+              "properties": {
+                "prompt_review": { "required": ["compile_spec"] },
+                "take_review": {
+                  "required": ["identity_observations"],
+                  "allOf": [
+                    {
+                      "if": { "properties": { "accepted_as_canon": { "const": true } }, "required": ["accepted_as_canon"] },
+                      "then": { "required": ["observed_state"] }
+                    }
                   ]
                 }
               }
@@ -381,6 +408,7 @@
       "description": "Reviewer-authored cross-asset graph inventory and evidence. The schema validates the record shape, not the truth of the graph claims.",
       "required": ["decision", "reviewed_asset_ids", "roots", "edges", "checks", "findings"],
       "properties": {
+        "seedance_contract_version": { "type": "string", "enum": ["1.0", "2.0"] },
         "decision": { "type": "string", "enum": ["pass", "revise", "pass_with_warnings"] },
         "reviewed_asset_ids": {
           "type": "array",
@@ -423,8 +451,6 @@
             "observed_state_handoff",
             "extension_depth_and_reanchor",
             "beat_and_identity_continuity",
-            "identity_registry_consistency",
-            "prompt_compilation_trace",
             "reference_binding_matches_preflight"
           ],
           "properties": {
@@ -459,6 +485,17 @@
         }
       },
       "allOf": [
+        {
+          "if": {
+            "properties": { "seedance_contract_version": { "const": "2.0" } },
+            "required": ["seedance_contract_version"]
+          },
+          "then": {
+            "properties": {
+              "checks": { "required": ["identity_registry_consistency", "prompt_compilation_trace"] }
+            }
+          }
+        },
         {
           "if": { "properties": { "decision": { "const": "pass" } }, "required": ["decision"] },
           "then": {
@@ -501,6 +538,31 @@
         "required": ["assets"]
       },
       "then": { "required": ["lineage_review"] }
+    },
+    {
+      "if": {
+        "properties": {
+          "assets": {
+            "contains": {
+              "type": "object",
+              "properties": {
+                "model_family": { "const": "seedance" },
+                "seedance_contract_version": { "const": "2.0" }
+              },
+              "required": ["model_family", "seedance_contract_version"]
+            }
+          }
+        },
+        "required": ["assets"]
+      },
+      "then": {
+        "properties": {
+          "lineage_review": {
+            "required": ["seedance_contract_version"],
+            "properties": { "seedance_contract_version": { "const": "2.0" } }
+          }
+        }
+      }
     }
   ],
   "additionalProperties": false

@@ -6,6 +6,11 @@ pipeline, not only cinematic.
 
 ## Before Scene Planning
 
+For all new or resumed Seedance work, use `seedance_contract_version="2.0"` on
+the scene generation contract, generated asset, and lineage review. A missing
+marker is readable legacy v1; follow the provider skill's contract-versioning
+reference before editing it or making another paid call.
+
 1. Call `video_selector` with `operation="rank"` using a brief draft prompt and
    the intended operation/model constraints. Do not spend from rank mode.
 2. Inspect the finalist's input-aware `agent_skills`. Read all declared Layer 3
