@@ -102,14 +102,18 @@ def _build_job_worker(args: argparse.Namespace):
     from openmontage.job_api import default_job_service
     from openmontage.job_worker import JobWorker
     from openmontage.model_credential_bridge import ModelCredentialBridgeClient
+    from openmontage.invocation_store import ModelInvocationStore
     from openmontage.pipeline_executor import AgentCommandPipelineExecutor
 
     worker_id = os.environ.get("OPENMONTAGE_WORKER_ID", "").strip()
     if not worker_id:
         worker_id = f"{socket.gethostname()}-{os.getpid()}"
+    service = default_job_service()
     return JobWorker(
-        default_job_service(),
-        AgentCommandPipelineExecutor.from_environment(),
+        service,
+        AgentCommandPipelineExecutor.from_environment(
+            invocation_store=ModelInvocationStore(service.database_path),
+        ),
         projects_dir=PROJECTS_DIR,
         worker_id=worker_id,
         lease_duration=timedelta(seconds=args.lease_seconds),

@@ -20,6 +20,8 @@ from tools.dofe.errors import DofeError
 from tools.dofe.models import resolve_alias
 from tools.tool_registry import registry
 
+from openmontage.capabilities import job_submission_capability
+
 
 _PROJECT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$|^[a-z0-9]$")
 
@@ -158,8 +160,7 @@ class ReferenceCloneService:
         canonical_brief.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(analysis_dir / "video_analysis_brief.json", canonical_brief)
 
-        registry.discover()
-        preflight = registry.provider_menu_summary()
+        preflight = capability_summary()
         preflight["airouter"] = _airouter_model_preflight()
         request = {
             "version": "1.0",
@@ -195,6 +196,7 @@ class ReferenceCloneService:
                 "Read skills/meta/video-reference-analyst.md and inspect the extracted keyframes.",
                 "Present a five-aspect reference analysis and 2-3 differentiated concepts; do not make a carbon copy.",
                 "Run the selected pipeline stage by stage and honor every manifest approval gate.",
+                "Before submitting a Job, follow preflight.job_submission; workflow is the pipeline name, not a stage such as compose.",
                 "Use only source material the user is authorized to reference or transform.",
                 "Route every model call through provider=dofe at https://model.local.dofe.ai/api; block instead of using a direct provider fallback.",
             ],
@@ -230,4 +232,6 @@ class ReferenceCloneService:
 
 def capability_summary() -> dict[str, Any]:
     registry.discover()
-    return registry.provider_menu_summary()
+    summary = registry.provider_menu_summary()
+    summary["job_submission"] = job_submission_capability()
+    return summary

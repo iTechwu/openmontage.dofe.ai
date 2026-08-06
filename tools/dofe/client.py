@@ -94,7 +94,12 @@ class DofeClient:
 
     # ------------------------------------------------------------------ headers
 
-    def _headers(self, *, model_invocation_id: str | None = None) -> dict[str, str]:
+    def _headers(
+        self,
+        *,
+        model_invocation_id: str | None = None,
+        logical_call_id: str | None = None,
+    ) -> dict[str, str]:
         if not self.api_key:
             raise DofeAuthError("DOFE_MODEL_API_KEY / DOFE_API_KEY is not set.")
         headers = {
@@ -102,6 +107,8 @@ class DofeClient:
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
+        if logical_call_id:
+            headers["X-OpenMontage-Logical-Call-Id"] = logical_call_id
         if self.delegation is not None:
             headers.update(
                 self.delegation.signed_headers(model_invocation_id=model_invocation_id)
@@ -215,13 +222,14 @@ class DofeClient:
         read_timeout: int | None = None,
         allow_retry: bool = True,
         accept_raw_success: bool = False,
+        logical_call_id: str | None = None,
     ) -> dict[str, Any]:
         url = self._url(path)
         timeout = (self._connect_timeout, read_timeout or self._read_timeout)
         rate_attempts = 0
         server_attempts = 0
         network_attempts = 0
-        request_headers = self._headers()
+        request_headers = self._headers(logical_call_id=logical_call_id)
 
         while True:
             try:
@@ -282,12 +290,26 @@ class DofeClient:
     def create_task(self, payload: dict[str, Any]) -> dict[str, Any]:
         """POST /v1/generation/tasks. Not retried (avoid double charge)."""
 
+        metadata = payload.get("metadata")
+        metadata_call_id = (
+            str(metadata.get("openmontage_idempotency_key") or "").strip()
+            if isinstance(metadata, dict)
+            else ""
+        )
+        payload_call_id = str(payload.get("idempotencyKey") or "").strip()
+        if payload_call_id and metadata_call_id and payload_call_id != metadata_call_id:
+            raise DofeAPIError("dofe generation idempotency keys do not match")
+        logical_call_id = payload_call_id or metadata_call_id
+        request_payload = dict(payload)
+        if logical_call_id:
+            request_payload["idempotencyKey"] = logical_call_id
         body = self._request(
             "post",
             "/v1/generation/tasks",
-            json=payload,
+            json=request_payload,
             read_timeout=self._create_read_timeout,
             allow_retry=False,
+            logical_call_id=logical_call_id or None,
         )
         data = self._unwrap(body)
         if not data or not data.get("taskId"):

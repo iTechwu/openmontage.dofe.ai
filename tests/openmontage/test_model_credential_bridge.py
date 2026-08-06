@@ -80,7 +80,7 @@ def test_fetches_a_stage_credential_with_service_auth_and_trusted_attribution() 
     assert call["headers"]["Authorization"] == "Bearer service-token"
     decoded = json.loads(base64.urlsafe_b64decode(call["headers"]["X-Dofe-Job-Attribution"] + "=="))
     assert decoded["employeeId"] == "employee-1"
-    assert call["json"] == {"stage": "research"}
+    assert call["json"] == {"stage": "research", "stageAttempt": 1}
 
 
 def test_rejects_a_mismatched_or_malformed_credential_response() -> None:

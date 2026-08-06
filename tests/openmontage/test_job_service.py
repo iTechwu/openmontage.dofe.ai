@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import json
 from pathlib import Path
+import sqlite3
 from threading import Barrier
 
 import pytest
@@ -125,6 +128,62 @@ def test_create_job_is_idempotent_for_the_same_workspace_and_request(tmp_path: P
 
     assert second.job_id == first.job_id
     assert [event.sequence for event in service.list_events(first.job_id)] == [1]
+
+
+def test_existing_v1_job_with_legacy_nested_shapes_remains_readable(tmp_path: Path) -> None:
+    service = _service(tmp_path / "jobs.sqlite3")
+    created = service.create_job(_request(), _attribution())
+    legacy = created.to_wire()
+    legacy["request"]["brief"] = {}
+    legacy["request"]["output"] = {}
+    legacy["request"]["budget"] = {}
+
+    with sqlite3.connect(service.database_path) as connection:
+        connection.execute(
+            "UPDATE openmontage_job SET snapshot_json = ? WHERE job_id = ?",
+            (json.dumps(legacy), created.job_id),
+        )
+
+    restored = service.get_job(created.job_id)
+
+    assert restored.request.brief == {}
+    assert restored.request.output == {}
+    assert restored.request.budget == {}
+
+
+def test_idempotent_retry_matches_legacy_numeric_budget_hash(tmp_path: Path) -> None:
+    service = _service(tmp_path / "jobs.sqlite3")
+    request = _request()
+    created = service.create_job(request, _attribution())
+    legacy = created.to_wire()
+    legacy["request"]["budget"]["maxAmount"] = 20.0
+    legacy_identity = {
+        "request": legacy["request"],
+        "attribution": _attribution().to_wire(),
+    }
+    legacy_hash = hashlib.sha256(
+        json.dumps(
+            legacy_identity,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+    with sqlite3.connect(service.database_path) as connection:
+        connection.execute(
+            """
+            UPDATE openmontage_job
+            SET request_hash = ?, snapshot_json = ?
+            WHERE job_id = ?
+            """,
+            (legacy_hash, json.dumps(legacy), created.job_id),
+        )
+
+    repeated = service.create_job(request, _attribution())
+
+    assert repeated.job_id == created.job_id
+    assert [event.sequence for event in service.list_events(created.job_id)] == [1]
 
 
 def test_create_job_rejects_an_idempotency_key_with_a_different_request(tmp_path: Path) -> None:

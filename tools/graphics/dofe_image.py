@@ -58,7 +58,7 @@ class DofeImage(BaseTool):
     supports = {
         "text_to_image": True,
         "image_edit": True,
-        "negative_prompt": True,
+        "negative_prompt": "model_scoped",
         "seed": True,
         "custom_size": True,
         "aspect_ratio": True,
@@ -78,7 +78,10 @@ class DofeImage(BaseTool):
         "required": ["prompt"],
         "properties": {
             "prompt": {"type": "string", "description": "Image description / prompt."},
-            "negative_prompt": {"type": "string", "description": "What to avoid in the image."},
+            "negative_prompt": {
+                "type": "string",
+                "description": "What to avoid; omitted for Seedream aliases, which do not accept it.",
+            },
             "width": {"type": "integer", "default": 1024},
             "height": {"type": "integer", "default": 1024},
             "size": {
@@ -112,7 +115,17 @@ class DofeImage(BaseTool):
         cpu_cores=1, ram_mb=512, vram_mb=0, disk_mb=200, network_required=True
     )
     retry_policy = RetryPolicy(max_retries=2, retryable_errors=["rate_limit", "timeout"])
-    idempotency_key_fields = ["prompt", "negative_prompt", "width", "height", "size", "resolution", "n", "seed", "model_name"]
+    idempotency_key_fields = [
+        "prompt",
+        "negative_prompt",
+        "width",
+        "height",
+        "size",
+        "resolution",
+        "n",
+        "seed",
+        "model_name",
+    ]
     side_effects = ["paid remote generation via models.dofe.ai gateway", "writes image file to output_path"]
     user_visible_verification = ["Inspect generated image for relevance, quality, and prompt adherence"]
 
@@ -132,6 +145,11 @@ class DofeImage(BaseTool):
         return resolve_alias("image", "generate", explicit=inputs.get("model_name"))
 
     # ---------------------------------------------------------------- payload
+
+    @staticmethod
+    def _supports_negative_prompt(model: str) -> bool:
+        model_family = model.rsplit("/", 1)[-1].lower()
+        return not model_family.startswith("seedream-")
 
     @staticmethod
     def _resolution(inputs: dict[str, Any]) -> str:
@@ -164,7 +182,7 @@ class DofeImage(BaseTool):
             "resolution": self._resolution(inputs),
             "outputCount": max(1, int(inputs.get("n") or 1)),
         }
-        if inputs.get("negative_prompt"):
+        if inputs.get("negative_prompt") and self._supports_negative_prompt(model):
             params["negativePrompt"] = inputs["negative_prompt"]
         if inputs.get("quality"):
             params["quality"] = inputs["quality"]

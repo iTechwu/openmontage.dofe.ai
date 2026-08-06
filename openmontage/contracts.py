@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from decimal import Decimal
 from enum import Enum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+import jsonschema
+import yaml
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationError,
+    field_validator,
+)
 
-from lib.pipeline_loader import get_stage_order, load_pipeline_readonly
+from lib.pipeline_loader import get_stage_order, list_pipelines, load_pipeline_readonly
 
 
 def _to_camel(value: str) -> str:
@@ -73,7 +84,115 @@ class JobAttribution(WireModel):
     trace_id: str = Field(min_length=1)
 
 
+ClientRequestId = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=256),
+]
+WorkflowName = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=128),
+]
+InlineJobText = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=100_000),
+]
+ArtifactId = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=256),
+]
+JobTitle = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=512),
+]
+AudienceDescription = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=2_000),
+]
+
+
+class WorkflowConfigurationError(RuntimeError):
+    """Raised when a listed workflow cannot be loaded from its manifest."""
+
+
+def _invalid_workflow_manifest(workflow: str) -> WorkflowConfigurationError:
+    return WorkflowConfigurationError(
+        f"Workflow {workflow!r} is unavailable because its manifest is invalid"
+    )
+
+
+class TextJobInput(WireModel):
+    type: Literal["text"]
+    inline_text: InlineJobText
+
+
+class ArtifactJobInput(WireModel):
+    type: Literal["artifact"]
+    artifact_id: ArtifactId
+
+
+JobInput = Annotated[TextJobInput | ArtifactJobInput, Field(discriminator="type")]
+
+
+class JobBrief(WireModel):
+    title: JobTitle
+    duration_seconds: int | None = Field(default=None, gt=0, le=86_400, strict=True)
+    audience: AudienceDescription | None = None
+
+
+class JobOutput(WireModel):
+    container: Literal["mp4"]
+    resolution: str | None = Field(
+        default=None,
+        max_length=20,
+        pattern=r"^[1-9][0-9]*x[1-9][0-9]*$",
+    )
+    fps: int | None = Field(default=None, gt=0, le=240, strict=True)
+
+    @field_validator("resolution")
+    @classmethod
+    def validate_resolution_bounds(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        width, height = (int(part) for part in value.split("x"))
+        if width > 8192 or height > 8192:
+            raise ValueError("resolution dimensions must not exceed 8192 pixels")
+        return value
+
+
+class JobBudget(WireModel):
+    max_amount: Decimal = Field(ge=0, allow_inf_nan=False)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+
+
 class JobCreateRequest(WireModel):
+    schema_version: Literal[1] = 1
+    client_request_id: ClientRequestId = Field(
+        description=(
+            "Idempotency key for one business submission; reuse it for retries and change it "
+            "for a new Job."
+        ),
+    )
+    workflow: WorkflowName = Field(
+        description=(
+            "Pipeline manifest name from pipeline_defs; stage names such as compose are invalid."
+        ),
+    )
+    input: JobInput
+    brief: JobBrief
+    output: JobOutput
+    budget: JobBudget
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def validate_schema_version_type(cls, value: Any) -> Any:
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError("schemaVersion must be the integer 1")
+        return value
+
+
+class JobRequestSnapshot(WireModel):
+    """Backward-compatible persisted v1 request payload."""
+
     schema_version: Literal[1] = 1
     client_request_id: str = Field(min_length=1)
     workflow: str = Field(min_length=1)
@@ -92,7 +211,7 @@ class ApprovalStatus(str, Enum):
 
 
 class StageDefinition(WireModel):
-    code: str = Field(min_length=1)
+    code: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
     label_code: str = Field(min_length=1)
     approval_required: bool = False
 
@@ -100,27 +219,54 @@ class StageDefinition(WireModel):
 class WorkflowDefinition(WireModel):
     name: str = Field(min_length=1)
     version: str = Field(min_length=1)
-    stages: tuple[StageDefinition, ...]
+    stages: tuple[StageDefinition, ...] = Field(min_length=1)
 
     @classmethod
     def from_pipeline(cls, pipeline_type: str) -> "WorkflowDefinition":
-        manifest = load_pipeline_readonly(pipeline_type)
-        approval_by_stage = {
-            stage["name"]: bool(stage.get("human_approval_default", False))
-            for stage in manifest["stages"]
-        }
-        return cls(
-            name=manifest["name"],
-            version=manifest["version"],
-            stages=tuple(
-                StageDefinition(
-                    code=stage,
-                    label_code=f"openmontage.stage.{stage}",
-                    approval_required=approval_by_stage[stage],
-                )
-                for stage in get_stage_order(manifest)
-            ),
-        )
+        supported = sorted(list_pipelines())
+        if pipeline_type not in supported:
+            choices = ", ".join(supported)
+            raise ValueError(
+                f"Unknown workflow {pipeline_type!r}; known workflow names: {choices}. "
+                "Call openmontage_capabilities for current availability"
+            )
+        try:
+            manifest = load_pipeline_readonly(pipeline_type)
+            if manifest["name"] != pipeline_type:
+                raise _invalid_workflow_manifest(pipeline_type)
+            stage_order = get_stage_order(manifest)
+            if len(stage_order) != len(set(stage_order)):
+                raise _invalid_workflow_manifest(pipeline_type)
+            approval_by_stage = {
+                stage["name"]: bool(stage.get("human_approval_default", False))
+                for stage in manifest["stages"]
+            }
+            return cls(
+                name=manifest["name"],
+                version=manifest["version"],
+                stages=tuple(
+                    StageDefinition(
+                        code=stage,
+                        label_code=f"openmontage.stage.{stage}",
+                        approval_required=approval_by_stage[stage],
+                    )
+                    for stage in stage_order
+                ),
+            )
+        except WorkflowConfigurationError:
+            raise
+        except (
+            jsonschema.ValidationError,
+            jsonschema.SchemaError,
+            json.JSONDecodeError,
+            yaml.YAMLError,
+            OSError,
+            UnicodeError,
+            ValidationError,
+            KeyError,
+            TypeError,
+        ) as exc:
+            raise _invalid_workflow_manifest(pipeline_type) from exc
 
 
 class StageSnapshot(WireModel):
@@ -154,7 +300,7 @@ class JobSnapshot(WireModel):
     status: JobStatus
     workflow: WorkflowDefinition
     attribution: JobAttribution
-    request: JobCreateRequest
+    request: JobRequestSnapshot
     stages: tuple[StageSnapshot, ...]
     artifacts: tuple[PublishedArtifact, ...] = ()
     current_stage: str | None = None

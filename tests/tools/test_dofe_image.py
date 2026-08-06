@@ -9,6 +9,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -66,15 +67,48 @@ def test_reference_image_https_url_passthrough():
     assert payload["content"][1]["part"]["image_url"]["url"] == "https://cdn.test/r.png"
 
 
-def test_optional_params_mapped():
-    payload = _payload({
-        "prompt": "x", "negative_prompt": "blurry", "seed": 7, "quality": "high", "style": "cinematic",
-    })
+@pytest.mark.parametrize("model", ["seedream-5.0", "seedream-5.0-lite", "seedream-5.0-pro"])
+def test_seedream_payload_never_sends_negative_prompt(model):
+    payload = DofeImage()._build_payload(
+        {
+            "prompt": "x",
+            "negative_prompt": "blurry",
+            "seed": 7,
+            "quality": "high",
+            "style": "cinematic",
+        },
+        model,
+    )
     p = payload["params"]
-    assert p["negativePrompt"] == "blurry"
+    assert "negativePrompt" not in p
     assert p["seed"] == 7
     assert p["quality"] == "high"
     assert p["style"] == "cinematic"
+
+
+def test_non_seedream_payload_preserves_negative_prompt():
+    payload = DofeImage()._build_payload(
+        {"prompt": "x", "negative_prompt": "blurry"},
+        "flux-pro-1.1",
+    )
+
+    assert payload["params"]["negativePrompt"] == "blurry"
+
+
+def test_dofe_contract_advertises_model_scoped_negative_prompt():
+    tool = DofeImage()
+    assert tool.supports["negative_prompt"] == "model_scoped"
+    assert "negative_prompt" in tool.input_schema["properties"]
+    assert "negative_prompt" in tool.idempotency_key_fields
+
+
+def test_negative_prompt_changes_dofe_idempotency_key():
+    tool = DofeImage()
+    base = {"prompt": "x", "model_name": "flux-pro-1.1"}
+
+    assert tool.idempotency_key(base) != tool.idempotency_key(
+        {**base, "negative_prompt": "blurry"}
+    )
 
 
 def test_metadata_carries_idempotency_key():

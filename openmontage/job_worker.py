@@ -18,7 +18,13 @@ from lib.checkpoint import (
     read_checkpoint,
 )
 from openmontage.artifact_bridge import ArtifactBridgeClient, ArtifactBridgeError
-from openmontage.contracts import ApprovalStatus, JobSnapshot, JobStatus, StageSnapshot, StageStatus
+from openmontage.contracts import (
+    ApprovalStatus,
+    JobSnapshot,
+    JobStatus,
+    StageSnapshot,
+    StageStatus,
+)
 from openmontage.job_service import JobLease, JobLeaseError, JobService
 from openmontage.model_credential_bridge import (
     ModelCredentialBridgeClient,
@@ -257,6 +263,7 @@ class JobWorker:
                 credential = self.model_credential_bridge.issue(
                     job_id=latest.job_id,
                     stage=stage.code,
+                    stage_attempt=self._stage(latest, stage.code).attempt,
                     attribution=latest.attribution,
                 )
             except ModelCredentialBridgeError:
@@ -424,10 +431,14 @@ class JobWorker:
         project_dir = self.projects_dir / snapshot.job_id
         if (project_dir / PROJECT_MARKER_FILENAME).is_file():
             return
-        title = snapshot.request.brief.get("title")
         init_project(
             snapshot.job_id,
-            title=title if isinstance(title, str) and title.strip() else snapshot.job_id,
+            title=(
+                snapshot.request.brief.get("title")
+                if isinstance(snapshot.request.brief.get("title"), str)
+                and snapshot.request.brief["title"].strip()
+                else snapshot.job_id
+            ),
             pipeline_type=snapshot.workflow.name,
             pipeline_dir=self.projects_dir,
         )

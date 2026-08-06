@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from typing import Any
 from urllib.parse import urlparse
-from uuid import uuid4
-
 import requests
 
+from openmontage.invocation_store import InvocationRequestConflictError, ModelInvocationStore
 from tools.dofe.delegation import DelegatedModelCredential
 
 
@@ -28,11 +28,66 @@ _HOP_HEADERS = {
     "upgrade",
 }
 _MAX_REQUEST_BYTES = 32 * 1024 * 1024
+_MAX_CACHED_RESPONSE_BYTES = 8 * 1024 * 1024
+_LOGICAL_CALL_HEADERS = (
+    "X-OpenMontage-Logical-Call-Id",
+    "Idempotency-Key",
+    "X-Request-Id",
+)
+
+
+def _request_fingerprint(method: str, path: str, body: bytes | None, content_type: str) -> str:
+    normalized_body = body or b""
+    if normalized_body and "json" in content_type.lower():
+        try:
+            parsed = json.loads(normalized_body)
+            normalized_body = json.dumps(
+                parsed,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            pass
+    digest = hashlib.sha256()
+    digest.update(method.upper().encode("ascii"))
+    digest.update(b"\n")
+    digest.update(path.encode("utf-8"))
+    digest.update(b"\n")
+    digest.update(normalized_body)
+    return digest.hexdigest()
+
+
+def _send_response(
+    handler: BaseHTTPRequestHandler,
+    status_code: int,
+    headers: dict[str, str],
+    body: bytes,
+) -> None:
+    handler.send_response(status_code)
+    for key, value in headers.items():
+        if key.lower() not in _HOP_HEADERS:
+            handler.send_header(key, value)
+    handler.send_header("Connection", "close")
+    handler.end_headers()
+    handler.wfile.write(body)
 
 
 class DelegationSigningProxy:
-    def __init__(self, credential: DelegatedModelCredential) -> None:
+    def __init__(
+        self,
+        credential: DelegatedModelCredential,
+        *,
+        invocation_store: ModelInvocationStore | None = None,
+        job_id: str | None = None,
+        stage: str | None = None,
+        stage_attempt: int = 1,
+    ) -> None:
         self.credential = credential
+        self.invocation_store = invocation_store
+        self.job_id = job_id or credential.external_job_id
+        self.stage = stage or credential.pipeline_stage
+        self.stage_attempt = stage_attempt
         parsed = urlparse(credential.models_base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError("Delegated models base URL is invalid")
@@ -77,17 +132,45 @@ class DelegationSigningProxy:
         return f"http://{host}:{port}{self._upstream_prefix}"
 
     def _forward(self, handler: BaseHTTPRequestHandler) -> None:
+        response_cached = False
         try:
             length = int(handler.headers.get("Content-Length", "0"))
             if length < 0 or length > _MAX_REQUEST_BYTES:
                 handler.send_error(413)
                 return
             body = handler.rfile.read(length) if length else None
-            incoming_request_id = handler.headers.get("X-Request-Id", "").strip()
-            seed = incoming_request_id or uuid4().hex
-            invocation_id = "om-" + hashlib.sha256(
-                f"{self.credential.external_job_id}\n{self.credential.pipeline_stage}\n{seed}".encode()
-            ).hexdigest()[:32]
+            fingerprint = _request_fingerprint(
+                handler.command,
+                handler.path,
+                body,
+                handler.headers.get("Content-Type", ""),
+            )
+            seed = next(
+                (
+                    value
+                    for name in _LOGICAL_CALL_HEADERS
+                    if (value := handler.headers.get(name, "").strip())
+                ),
+                fingerprint,
+            )
+            if self.invocation_store is None:
+                invocation_id = "om-" + hashlib.sha256(
+                    f"{self.credential.external_job_id}\n{self.credential.pipeline_stage}\n{seed}".encode()
+                ).hexdigest()[:32]
+            else:
+                record = self.invocation_store.get_or_create(
+                    job_id=self.job_id,
+                    stage=self.stage,
+                    attempt=self.stage_attempt,
+                    request_id=seed,
+                    request_fingerprint=fingerprint,
+                )
+                invocation_id = record.model_invocation_id
+                cached = self.invocation_store.get_cached_response(invocation_id)
+                if cached is not None:
+                    _send_response(handler, cached.status_code, cached.headers, cached.body)
+                    return
+                self.invocation_store.mark(invocation_id, "in_flight")
             headers = {
                 key: value
                 for key, value in handler.headers.items()
@@ -104,14 +187,59 @@ class DelegationSigningProxy:
                 allow_redirects=False,
                 timeout=(10, 3600),
             )
-            handler.send_response(upstream.status_code)
-            for key, value in upstream.headers.items():
-                if key.lower() not in _HOP_HEADERS:
+            response_headers = {
+                key: value
+                for key, value in upstream.headers.items()
+                if key.lower() not in _HOP_HEADERS
+            }
+            content_type = upstream.headers.get("Content-Type", "").lower()
+            content_length = upstream.headers.get("Content-Length", "")
+            can_buffer = "text/event-stream" not in content_type
+            if content_length.isdigit() and int(content_length) > _MAX_CACHED_RESPONSE_BYTES:
+                can_buffer = False
+            if can_buffer:
+                response_body = upstream.raw.read(
+                    _MAX_CACHED_RESPONSE_BYTES + 1,
+                    decode_content=False,
+                )
+                can_buffer = len(response_body) <= _MAX_CACHED_RESPONSE_BYTES
+            else:
+                response_body = b""
+            if can_buffer:
+                if self.invocation_store is not None and upstream.status_code < 400:
+                    self.invocation_store.save_response(
+                        invocation_id,
+                        status_code=upstream.status_code,
+                        headers=response_headers,
+                        body=response_body,
+                    )
+                    response_cached = True
+                _send_response(handler, upstream.status_code, response_headers, response_body)
+            else:
+                handler.send_response(upstream.status_code)
+                for key, value in response_headers.items():
                     handler.send_header(key, value)
-            handler.send_header("Connection", "close")
-            handler.end_headers()
-            for chunk in upstream.raw.stream(64 * 1024, decode_content=False):
-                handler.wfile.write(chunk)
+                handler.send_header("Connection", "close")
+                handler.end_headers()
+                if response_body:
+                    handler.wfile.write(response_body)
+                for chunk in upstream.raw.stream(64 * 1024, decode_content=False):
+                    handler.wfile.write(chunk)
             upstream.close()
+            if self.invocation_store is not None:
+                cached_success = upstream.status_code < 400 and can_buffer
+                if not cached_success:
+                    self.invocation_store.mark(
+                        invocation_id,
+                        "succeeded" if upstream.status_code < 400 else "failed",
+                    )
+        except InvocationRequestConflictError as exc:
+            handler.send_error(409, str(exc))
         except Exception:
+            if (
+                self.invocation_store is not None
+                and "invocation_id" in locals()
+                and not response_cached
+            ):
+                self.invocation_store.mark(invocation_id, "unknown")
             handler.send_error(502)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Literal
 
+from openmontage.contracts import JobCreateRequest
 from openmontage.reference_clone import ReferenceCloneService, capability_summary
 
 try:
@@ -29,7 +30,9 @@ def create_server(
         instructions=(
             "Use prepare_reference_clone when a user provides a video URL and wants a new, "
             "creatively differentiated video. Then follow the returned agent_instructions "
-            "and the OpenMontage pipeline approval gates."
+            "and the OpenMontage pipeline approval gates. Before submit_video_job, call "
+            "openmontage_capabilities and follow its job_submission contract; workflow is a "
+            "pipeline name, never a stage name such as compose."
         ),
         version="0.3.0",
     )
@@ -86,12 +89,10 @@ def create_server(
         return ReferenceCloneService().status(project_id)
 
     @server.tool()
-    def submit_video_job(request: dict[str, Any], ctx: Context) -> dict[str, Any]:
-        """Create an asynchronous video Job using trusted Gateway attribution."""
-        from openmontage.contracts import JobCreateRequest
-
+    def submit_video_job(request: JobCreateRequest, ctx: Context) -> dict[str, Any]:
+        """Create a video Job; request.workflow must name a pipeline, not a stage."""
         attribution = resolve_attribution(ctx.headers)
-        return jobs().create_job(JobCreateRequest.model_validate(request), attribution).to_wire()
+        return jobs().create_job(request, attribution).to_wire()
 
     @server.tool()
     def get_video_job(job_id: str, ctx: Context) -> dict[str, Any]:

@@ -15,6 +15,7 @@ from lib.checkpoint import CheckpointValidationError, read_checkpoint
 from lib.pipeline_loader import get_stage_skill, load_pipeline_readonly
 from openmontage.contracts import JobSnapshot
 from openmontage.delegation_proxy import DelegationSigningProxy
+from openmontage.invocation_store import ModelInvocationStore
 from tools.dofe.delegation import DelegatedModelCredential
 
 
@@ -135,14 +136,20 @@ class AgentCommandPipelineExecutor:
         command: Sequence[str],
         *,
         timeout_seconds: float = 3600,
+        invocation_store: ModelInvocationStore | None = None,
     ) -> None:
         self.command = _validate_command(command)
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise PipelineExecutionError("timeout_seconds must be greater than zero")
         self.timeout_seconds = timeout_seconds
+        self.invocation_store = invocation_store
 
     @classmethod
-    def from_environment(cls) -> "AgentCommandPipelineExecutor":
+    def from_environment(
+        cls,
+        *,
+        invocation_store: ModelInvocationStore | None = None,
+    ) -> "AgentCommandPipelineExecutor":
         raw = os.environ.get("OPENMONTAGE_AGENT_EXECUTOR_JSON", "")
         try:
             command = json.loads(raw)
@@ -161,7 +168,7 @@ class AgentCommandPipelineExecutor:
             raise PipelineExecutionError(
                 "OPENMONTAGE_AGENT_TIMEOUT_SECONDS must be a positive number"
             ) from exc
-        return cls(command, timeout_seconds=timeout_seconds)
+        return cls(command, timeout_seconds=timeout_seconds, invocation_store=invocation_store)
 
     def execute(
         self,
@@ -186,7 +193,13 @@ class AgentCommandPipelineExecutor:
             if credential is None:
                 completed = self._run(command, prompt, environment=None)
             else:
-                with DelegationSigningProxy(credential) as proxy:
+                with DelegationSigningProxy(
+                    credential,
+                    invocation_store=self.invocation_store,
+                    job_id=assignment.job_id,
+                    stage=assignment.stage,
+                    stage_attempt=assignment.stage_attempt,
+                ) as proxy:
                     environment = {
                         key: value
                         for key, value in os.environ.items()
@@ -194,7 +207,10 @@ class AgentCommandPipelineExecutor:
                         and not _SECRET_ENV_SUFFIX.search(key)
                     }
                     environment.update(
-                        credential.agent_environment(openai_base_url=f"{proxy.base_url}/v1")
+                        credential.agent_environment(
+                            openai_base_url=f"{proxy.base_url}/v1",
+                            dofe_base_url=proxy.base_url,
+                        )
                     )
                     completed = self._run(command, prompt, environment=environment)
         except subprocess.TimeoutExpired as exc:
