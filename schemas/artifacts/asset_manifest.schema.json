@@ -97,6 +97,95 @@
         "evidence": { "type": "string", "minLength": 1 }
       },
       "additionalProperties": false
+    },
+    "observedContinuityState": {
+      "type": "object",
+      "description": "Observed state dimensions from the returned take. Unknown dimensions must not be copied from the plan.",
+      "required": ["subjects", "props", "environment", "camera", "lighting", "audio", "open_motion"],
+      "properties": {
+        "subjects": { "type": "string", "minLength": 1 },
+        "props": { "type": "string", "minLength": 1 },
+        "environment": { "type": "string", "minLength": 1 },
+        "camera": { "type": "string", "minLength": 1 },
+        "lighting": { "type": "string", "minLength": 1 },
+        "audio": { "type": "string", "minLength": 1 },
+        "open_motion": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "identityObservation": {
+      "type": "object",
+      "required": ["identity_id", "status", "evidence"],
+      "properties": {
+        "identity_id": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "enum": ["preserved", "deviated", "unverifiable"] },
+        "evidence": { "type": "string", "minLength": 1 },
+        "deviation": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "deviated" } }, "required": ["status"] },
+          "then": { "required": ["deviation"] }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "promptCompileSpec": {
+      "type": "object",
+      "description": "Provider-neutral prompt intermediate representation. Provider syntax remains owned by preflight.",
+      "required": ["language", "structure", "source_state_policy", "surface_profile", "ordered_sections", "carrier_coverage", "compression_decisions", "endpoint_clause"],
+      "properties": {
+        "language": { "type": "string", "minLength": 1 },
+        "structure": { "type": "string", "enum": ["continuous_take", "multi_shot"] },
+        "source_state_policy": { "type": "string", "enum": ["first_clip_planned_opening", "accepted_source_carries_state", "final_frame_carries_static_state", "no_visual_source_describe_observed"] },
+        "surface_profile": {
+          "type": "object",
+          "required": ["name", "verification", "constraints"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "verification": { "type": "string", "enum": ["provider_preflight", "conservative"] },
+            "constraints": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "uniqueItems": true }
+          },
+          "additionalProperties": false
+        },
+        "ordered_sections": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["reference_roles", "opening_delta", "identity_locks", "action_beats", "camera", "environment_light", "dialogue_audio", "exclusions", "endpoint"] },
+          "minItems": 5,
+          "uniqueItems": true
+        },
+        "reference_emissions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["tag", "binding_mode", "emitted"],
+            "properties": {
+              "tag": { "type": "string", "minLength": 1 },
+              "binding_mode": { "type": "string", "enum": ["prompt_token", "input_parameter", "internal_only"] },
+              "emitted": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          },
+          "uniqueItems": true
+        },
+        "carrier_coverage": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["carrier", "emitted_as"],
+            "properties": {
+              "carrier": { "type": "string", "minLength": 1 },
+              "emitted_as": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "compression_decisions": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "endpoint_clause": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
     }
   },
   "properties": {
@@ -146,6 +235,7 @@
               },
               "continuity_checked": { "type": "boolean" },
               "reference_roles_checked": { "type": "boolean" },
+              "compile_spec": { "$ref": "#/$defs/promptCompileSpec" },
               "provider_preflight": { "$ref": "#/$defs/providerPreflight" }
             },
             "additionalProperties": false
@@ -166,6 +256,13 @@
                 "enum": ["not_accepted", "accepted", "accepted_with_deviation"]
               },
               "observed_end_state": { "type": "string", "minLength": 1 },
+              "observed_state": { "$ref": "#/$defs/observedContinuityState" },
+              "identity_observations": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/identityObservation" },
+                "minItems": 1,
+                "uniqueItems": true
+              },
               "parent_asset_id": { "type": "string", "minLength": 1 },
               "extension_depth": { "type": "integer", "minimum": 0, "maximum": 3 },
               "observation_confidence": { "type": "string", "enum": ["high", "medium", "low"] },
@@ -180,7 +277,7 @@
               {
                 "if": { "properties": { "accepted_as_canon": { "const": true } }, "required": ["accepted_as_canon"] },
                 "then": {
-                  "required": ["observed_end_state"],
+                  "required": ["observed_end_state", "observed_state"],
                   "properties": {
                     "canon_status": { "enum": ["accepted", "accepted_with_deviation"] }
                   }
@@ -241,7 +338,7 @@
               "required": ["provider", "model", "prompt_review", "take_review"],
               "properties": {
                 "prompt_review": {
-                  "required": ["provider_preflight"],
+                  "required": ["compile_spec", "provider_preflight"],
                   "properties": {
                     "provider_preflight": {
                       "properties": {
@@ -267,7 +364,8 @@
                     "canon_status",
                     "extension_depth",
                     "observation_confidence",
-                    "uncertainties"
+                    "uncertainties",
+                    "identity_observations"
                   ]
                 }
               }
@@ -325,6 +423,8 @@
             "observed_state_handoff",
             "extension_depth_and_reanchor",
             "beat_and_identity_continuity",
+            "identity_registry_consistency",
+            "prompt_compilation_trace",
             "reference_binding_matches_preflight"
           ],
           "properties": {
@@ -336,6 +436,8 @@
             "observed_state_handoff": { "$ref": "#/$defs/lineageCheck" },
             "extension_depth_and_reanchor": { "$ref": "#/$defs/lineageCheck" },
             "beat_and_identity_continuity": { "$ref": "#/$defs/lineageCheck" },
+            "identity_registry_consistency": { "$ref": "#/$defs/lineageCheck" },
+            "prompt_compilation_trace": { "$ref": "#/$defs/lineageCheck" },
             "reference_binding_matches_preflight": { "$ref": "#/$defs/lineageCheck" }
           },
           "additionalProperties": false
@@ -371,6 +473,8 @@
                   "observed_state_handoff": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
                   "extension_depth_and_reanchor": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
                   "beat_and_identity_continuity": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
+                  "identity_registry_consistency": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
+                  "prompt_compilation_trace": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } },
                   "reference_binding_matches_preflight": { "properties": { "status": { "enum": ["pass", "not_applicable"] } } }
                 }
               }

@@ -532,6 +532,66 @@ def _provider_preflight_report() -> dict:
     }
 
 
+def _prompt_compile_spec() -> dict:
+    return {
+        "language": "zh-CN",
+        "structure": "continuous_take",
+        "source_state_policy": "first_clip_planned_opening",
+        "surface_profile": {
+            "name": "provider-preflight-contract",
+            "verification": "provider_preflight",
+            "constraints": ["reference bindings follow the selected tool contract"],
+        },
+        "ordered_sections": [
+            "reference_roles",
+            "identity_locks",
+            "action_beats",
+            "camera",
+            "environment_light",
+            "dialogue_audio",
+            "exclusions",
+            "endpoint",
+        ],
+        "reference_emissions": [
+            {
+                "tag": "vehicle-identity-reference",
+                "binding_mode": "input_parameter",
+                "emitted": False,
+            }
+        ],
+        "carrier_coverage": [
+            {
+                "carrier": "suspension compresses once",
+                "emitted_as": "the suspension compresses once under braking",
+            }
+        ],
+        "compression_decisions": ["omit background traffic detail"],
+        "endpoint_clause": "Stop when the SUV is stationary at the lane marker.",
+    }
+
+
+def _observed_state() -> dict:
+    return {
+        "subjects": "The white compact SUV keeps its silhouette and stops square to camera.",
+        "props": "No controlled prop changes.",
+        "environment": "The tunnel exit and wet lane markers remain fixed.",
+        "camera": "The lateral track settles into a locked medium-wide endpoint.",
+        "lighting": "Cold tunnel practicals remain overhead.",
+        "audio": "Tire water ends and the engine settles to idle.",
+        "open_motion": "No subject or camera motion remains open at the endpoint.",
+    }
+
+
+def _identity_observations() -> list[dict]:
+    return [
+        {
+            "identity_id": "vehicle-white-suv",
+            "status": "preserved",
+            "evidence": "Silhouette, white paint, split lamps, and wheels match the identity registry.",
+        }
+    ]
+
+
 def _standalone_lineage_review(asset_id: str) -> dict:
     not_applicable = {
         "status": "not_applicable",
@@ -562,6 +622,14 @@ def _standalone_lineage_review(asset_id: str) -> dict:
             "beat_and_identity_continuity": {
                 "status": "pass",
                 "evidence": f"{asset_id} establishes canon and does not replay a prior beat.",
+            },
+            "identity_registry_consistency": {
+                "status": "pass",
+                "evidence": f"{asset_id} reports the registered vehicle-white-suv identity without an unapproved deviation.",
+            },
+            "prompt_compilation_trace": {
+                "status": "pass",
+                "evidence": f"{asset_id} records surface constraints, carrier coverage, compression, and endpoint before generation.",
             },
             "reference_binding_matches_preflight": {
                 "status": "pass",
@@ -601,6 +669,7 @@ def test_asset_manifest_accepts_prompt_and_take_reviews():
                     ],
                     "continuity_checked": True,
                     "reference_roles_checked": True,
+                    "compile_spec": _prompt_compile_spec(),
                     "provider_preflight": _provider_preflight_report(),
                 },
                 "take_review": {
@@ -609,6 +678,8 @@ def test_asset_manifest_accepts_prompt_and_take_reviews():
                     "accepted_as_canon": True,
                     "canon_status": "accepted",
                     "observed_end_state": "SUV stops square to camera at the exit.",
+                    "observed_state": _observed_state(),
+                    "identity_observations": _identity_observations(),
                     "extension_depth": 0,
                     "observation_confidence": "high",
                     "uncertainties": [],
@@ -641,6 +712,7 @@ def test_seedance_asset_requires_provider_preflight_and_lineage_review():
             "skills_applied": list(SKILL_NAMES),
             "continuity_checked": True,
             "reference_roles_checked": True,
+            "compile_spec": _prompt_compile_spec(),
             "provider_preflight": _provider_preflight_report(),
         },
         "take_review": {
@@ -649,6 +721,8 @@ def test_seedance_asset_requires_provider_preflight_and_lineage_review():
             "accepted_as_canon": True,
             "canon_status": "accepted",
             "observed_end_state": "SUV stops at the tunnel exit.",
+            "observed_state": _observed_state(),
+            "identity_observations": _identity_observations(),
             "extension_depth": 0,
             "observation_confidence": "high",
             "uncertainties": [],
@@ -667,6 +741,20 @@ def test_seedance_asset_requires_provider_preflight_and_lineage_review():
     assert any(
         "provider_preflight" in error.message
         for error in Draft202012Validator(schema).iter_errors(missing_preflight)
+    )
+
+    missing_compile_spec = deepcopy(valid)
+    del missing_compile_spec["assets"][0]["prompt_review"]["compile_spec"]
+    assert any(
+        "compile_spec" in error.message
+        for error in Draft202012Validator(schema).iter_errors(missing_compile_spec)
+    )
+
+    missing_identity_observation = deepcopy(valid)
+    del missing_identity_observation["assets"][0]["take_review"]["identity_observations"]
+    assert any(
+        "identity_observations" in error.message
+        for error in Draft202012Validator(schema).iter_errors(missing_identity_observation)
     )
 
     missing_lineage = deepcopy(valid)
@@ -762,6 +850,7 @@ def test_seedance_keep_decision_must_enter_canon():
                     "skills_applied": list(SKILL_NAMES),
                     "continuity_checked": True,
                     "reference_roles_checked": True,
+                    "compile_spec": _prompt_compile_spec(),
                     "provider_preflight": _provider_preflight_report(),
                 },
                 "take_review": {
@@ -769,6 +858,7 @@ def test_seedance_keep_decision_must_enter_canon():
                     "issues": [],
                     "accepted_as_canon": False,
                     "canon_status": "not_accepted",
+                    "identity_observations": _identity_observations(),
                     "extension_depth": 0,
                     "observation_confidence": "high",
                     "uncertainties": [],
@@ -1013,6 +1103,7 @@ def test_seedance_asset_requires_full_skill_and_check_audit():
                     "skills_applied": ["seedance-prompting", "seedance-quality"],
                     "continuity_checked": False,
                     "reference_roles_checked": False,
+                    "compile_spec": _prompt_compile_spec(),
                     "provider_preflight": _provider_preflight_report(),
                 },
                 "take_review": {
@@ -1020,6 +1111,7 @@ def test_seedance_asset_requires_full_skill_and_check_audit():
                     "issues": ["identity drift"],
                     "accepted_as_canon": False,
                     "canon_status": "not_accepted",
+                    "identity_observations": _identity_observations(),
                     "extension_depth": 0,
                     "observation_confidence": "high",
                     "uncertainties": [],
