@@ -44,13 +44,25 @@ def test_seedance_derivatives_retain_upstream_mit_license():
 
 @pytest.mark.parametrize(
     "tool_class",
-    [DofeVideo, SeedanceVideo, SeedanceReplicate, RunwayVideo, HiggsFieldVideo],
+    [SeedanceVideo, SeedanceReplicate],
 )
-def test_seedance_provider_tools_load_execution_and_prompting_skills(tool_class):
-    assert tool_class().agent_skills[:2] == [
-        "seedance-provider",
-        "seedance-prompting",
-    ]
+def test_seedance_provider_tools_load_full_production_skill_chain(tool_class):
+    skills = tool_class().agent_skills
+    assert skills[:5] == list(SKILL_NAMES)
+
+
+@pytest.mark.parametrize("tool_class", [RunwayVideo, HiggsFieldVideo])
+def test_multi_model_gateways_only_expose_seedance_skills_for_seedance(tool_class):
+    tool = tool_class()
+    assert tool.agent_skills_for({"model": "seedance_2.0"})[:5] == list(SKILL_NAMES)
+    assert tool.agent_skills_for({"model": "kling_3.0"}) == ["ai-video-gen"]
+
+
+def test_dofe_gateway_selects_skills_from_model_alias(monkeypatch):
+    tool = DofeVideo()
+    monkeypatch.setenv("DOFE_VIDEO_MODEL", "kling-3.0")
+    assert tool.agent_skills_for({}) == ["ai-video-gen"]
+    assert tool.agent_skills_for({"model_name": "seedance-2.0-fast"})[:5] == list(SKILL_NAMES)
 
 
 def test_scene_plan_accepts_seedance_generation_contract():

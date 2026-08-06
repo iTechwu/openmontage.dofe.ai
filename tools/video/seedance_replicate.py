@@ -46,7 +46,14 @@ class SeedanceReplicate(BaseTool):
         "Set REPLICATE_API_TOKEN to your Replicate API token.\n"
         "  Get one at https://replicate.com/account/api-tokens"
     )
-    agent_skills = ["seedance-provider", "seedance-prompting", "ai-video-gen"]
+    agent_skills = [
+        "seedance-provider",
+        "seedance-directing",
+        "seedance-continuity",
+        "seedance-prompting",
+        "seedance-quality",
+        "ai-video-gen",
+    ]
 
     capabilities = ["text_to_video", "image_to_video"]
     supports = {

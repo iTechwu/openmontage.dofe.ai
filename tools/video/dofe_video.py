@@ -8,6 +8,7 @@ operations default to ``seedance-2.0-fast``. See dev-guide §5.2.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from tools.base_tool import (
@@ -52,7 +53,20 @@ class DofeVideo(BaseTool):
         "Set DOFE_ENABLED=true to make selectors prefer the dofe chain. "
         "Override the default model with DOFE_VIDEO_MODEL (default seedance-2.0-fast)."
     )
-    agent_skills = ["seedance-provider", "seedance-prompting", "ai-video-gen"]
+    agent_skills = ["ai-video-gen"]
+
+    _SEEDANCE_SKILLS = [
+        "seedance-provider",
+        "seedance-directing",
+        "seedance-continuity",
+        "seedance-prompting",
+        "seedance-quality",
+        "ai-video-gen",
+    ]
+
+    def agent_skills_for(self, inputs: dict[str, Any] | None = None) -> list[str]:
+        selected = str((inputs or {}).get("model_name") or os.environ.get("DOFE_VIDEO_MODEL", "seedance-2.0-fast"))
+        return list(self._SEEDANCE_SKILLS if "seedance" in selected.lower() else self.agent_skills)
 
     dofe_spec = DofeToolSpec(
         capability="video",

@@ -69,7 +69,20 @@ class RunwayVideo(BaseTool):
         "Set RUNWAY_API_KEY to your Runway API secret.\n"
         "  Get one at https://dev.runwayml.com/"
     )
-    agent_skills = ["seedance-provider", "seedance-prompting", "ai-video-gen"]
+    agent_skills = ["ai-video-gen"]
+
+    _SEEDANCE_SKILLS = [
+        "seedance-provider",
+        "seedance-directing",
+        "seedance-continuity",
+        "seedance-prompting",
+        "seedance-quality",
+        "ai-video-gen",
+    ]
+
+    def agent_skills_for(self, inputs: dict[str, Any] | None = None) -> list[str]:
+        model = str((inputs or {}).get("model", _DEFAULT_MODEL)).lower()
+        return list(self._SEEDANCE_SKILLS if model.startswith("seedance") else self.agent_skills)
 
     capabilities = ["text_to_video", "image_to_video"]
     supports = {

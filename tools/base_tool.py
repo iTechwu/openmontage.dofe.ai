@@ -291,6 +291,15 @@ class BaseTool(ABC):
     # API knowledge when planning tool usage.
     agent_skills: list[str] = []
 
+    def agent_skills_for(self, inputs: Optional[dict[str, Any]] = None) -> list[str]:
+        """Return Layer 3 skills for the concrete operation/model.
+
+        Most tools have one stable skill set. Multi-model gateways may override
+        this method so the selector does not expose Seedance guidance when a
+        different model family was explicitly selected.
+        """
+        return list(self.agent_skills)
+
     # --- Verification ---
     user_visible_verification: list[str] = []
 

@@ -285,7 +285,7 @@ class VideoSelector(BaseTool):
             return ToolResult(
                 success=True,
                 data={
-                    "rankings": self._serialize_rankings(candidates, rankings),
+                    "rankings": self._serialize_rankings(candidates, rankings, rank_inputs),
                     "explanation": "\n".join(r.explain() for r in rankings[:5]),
                     "normalized_task_context": task_context,
                 },
@@ -329,7 +329,7 @@ class VideoSelector(BaseTool):
             result.data["selection_reason"] = score.explain() if score else f"Selected {tool.provider} ({tool.name})"
             if score:
                 result.data["provider_score"] = score.to_dict()
-            result.data.update(self._tool_context_payload(tool))
+            result.data.update(self._tool_context_payload(tool, inputs))
             result.data["alternatives_considered"] = [
                 t.name for t in candidates
                 if t.name != tool.name and t.get_status().value == "available"
@@ -433,16 +433,23 @@ class VideoSelector(BaseTool):
         return rank_inputs
 
     @staticmethod
-    def _tool_context_payload(tool: BaseTool) -> dict[str, object]:
+    def _tool_context_payload(tool: BaseTool, inputs: dict[str, object] | None = None) -> dict[str, object]:
         info = tool.get_info()
+        skills_for = getattr(tool, "agent_skills_for", None)
+        skills = skills_for(inputs) if callable(skills_for) else info.get("agent_skills", [])
         return {
-            "selected_tool_agent_skills": info.get("agent_skills", []),
-            "required_agent_skills": info.get("agent_skills", []),
+            "selected_tool_agent_skills": skills,
+            "required_agent_skills": skills,
             "selected_tool_usage_location": info.get("usage_location"),
             "selected_tool_best_for": info.get("best_for", []),
         }
 
-    def _serialize_rankings(self, candidates: list[BaseTool], rankings: list[object]) -> list[dict[str, object]]:
+    def _serialize_rankings(
+        self,
+        candidates: list[BaseTool],
+        rankings: list[object],
+        inputs: dict[str, object] | None = None,
+    ) -> list[dict[str, object]]:
         tool_by_name = {tool.name: tool for tool in candidates}
         serialized: list[dict[str, object]] = []
         for score in rankings:
@@ -450,7 +457,10 @@ class VideoSelector(BaseTool):
             tool = tool_by_name.get(score.tool_name)
             if tool:
                 info = tool.get_info()
-                item["agent_skills"] = info.get("agent_skills", [])
+                skills_for = getattr(tool, "agent_skills_for", None)
+                item["agent_skills"] = (
+                    skills_for(inputs) if callable(skills_for) else info.get("agent_skills", [])
+                )
                 item["usage_location"] = info.get("usage_location")
                 item["best_for"] = info.get("best_for", [])
                 item["supports"] = info.get("supports", {})
