@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from lib.pipeline_loader import get_stage_order, load_pipeline_readonly
+from lib.pipeline_loader import get_stage_order, list_pipelines, load_pipeline_readonly
 
 
 def _to_camel(value: str) -> str:
@@ -75,12 +75,45 @@ class JobAttribution(WireModel):
 
 class JobCreateRequest(WireModel):
     schema_version: Literal[1] = 1
-    client_request_id: str = Field(min_length=1)
-    workflow: str = Field(min_length=1)
+    client_request_id: str = Field(
+        min_length=1,
+        description=(
+            "Idempotency key for one business submission; reuse it for retries and change it "
+            "for a new Job."
+        ),
+    )
+    workflow: str = Field(
+        min_length=1,
+        description=(
+            "Pipeline manifest name from pipeline_defs; stage names such as compose are invalid."
+        ),
+    )
     input: dict[str, Any]
     brief: dict[str, Any]
     output: dict[str, Any]
     budget: dict[str, Any]
+
+
+def job_submission_capability() -> dict[str, Any]:
+    """Return the agent-facing submission contract from canonical runtime sources."""
+    request_schema = JobCreateRequest.model_json_schema(by_alias=True)
+    return {
+        "workflow_field_is_pipeline": True,
+        "workflow_stage_warning": "compose is a stage, not a workflow; use a pipeline name",
+        "supported_workflows": sorted(list_pipelines()),
+        "request_schema": request_schema,
+        "request_example": {
+            "schemaVersion": 1,
+            "clientRequestId": "<unique-per-business-attempt>",
+            "workflow": "animated-explainer",
+            "input": {"type": "text", "inlineText": "Create a concise product video"},
+            "brief": {"title": "Product video", "durationSeconds": 12},
+            "output": {"container": "mp4", "resolution": "1280x720", "fps": 30},
+            "budget": {"maxAmount": "1.00", "currency": "CNY"},
+        },
+        "required_fields": request_schema.get("required", []),
+        "idempotency": "Reuse clientRequestId when retrying the same business submission; change it for a new Job.",
+    }
 
 
 class ApprovalStatus(str, Enum):

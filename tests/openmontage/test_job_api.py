@@ -194,5 +194,29 @@ async def test_mcp_job_tools_do_not_expose_trusted_attribution_as_model_input(tm
     serialized_schema = json.dumps(submit_schema)
     assert "workspaceId" not in serialized_schema
     assert "employeeId" not in serialized_schema
+    request_schema = submit_schema["properties"]["request"]
+    if "$ref" in request_schema:
+        request_schema = submit_schema["$defs"][request_schema["$ref"].rsplit("/", 1)[-1]]
+    assert request_schema["required"] == [
+        "clientRequestId",
+        "workflow",
+        "input",
+        "brief",
+        "output",
+        "budget",
+    ]
+    assert set(request_schema["properties"]) == {
+        "schemaVersion",
+        "clientRequestId",
+        "workflow",
+        "input",
+        "brief",
+        "output",
+        "budget",
+    }
+    assert "stage names such as compose are invalid" in request_schema["properties"]["workflow"][
+        "description"
+    ]
+    assert request_schema["additionalProperties"] is False
     assert created.structured_content["status"] == "QUEUED"
     assert artifacts.structured_content["artifacts"] == []

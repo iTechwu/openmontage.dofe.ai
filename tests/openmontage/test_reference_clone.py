@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from lib.pipeline_loader import list_pipelines
 from tools.base_tool import ToolResult
 
 from openmontage import reference_clone
+from openmontage.contracts import JobCreateRequest
 
 
 def test_prepare_creates_agent_ready_airouter_project(monkeypatch, tmp_path):
@@ -68,6 +70,8 @@ def test_prepare_creates_agent_ready_airouter_project(monkeypatch, tmp_path):
     }
     assert result["preflight"]["airouter"]["status"] == "blocked"
     assert result["preflight"]["airouter"]["missing_required_models"] == ["openspeech-auc"]
+    assert result["preflight"]["job_submission"]["workflow_field_is_pipeline"] is True
+    assert any("preflight.job_submission" in item for item in result["agent_instructions"])
     assert Path(result["analysis"]["brief_path"]).is_file()
     assert Path(result["request_path"]).is_file()
     assert result["next_stage"] == "research"
@@ -95,3 +99,26 @@ def test_prepare_fails_when_download_did_not_complete(monkeypatch, tmp_path):
         assert "cookies needed" in str(exc)
     else:
         raise AssertionError("Expected preparation to fail without a downloaded reference")
+
+
+def test_capabilities_include_replayable_job_submission_contract(monkeypatch):
+    monkeypatch.setattr(
+        reference_clone.registry,
+        "provider_menu_summary",
+        lambda: {"composition_runtimes": {}, "capabilities": []},
+    )
+    summary = reference_clone.capability_summary()
+    contract = summary["job_submission"]
+    assert contract["workflow_field_is_pipeline"] is True
+    assert "compose is a stage" in contract["workflow_stage_warning"]
+    assert contract["supported_workflows"] == sorted(list_pipelines())
+    assert contract["required_fields"] == [
+        "clientRequestId",
+        "workflow",
+        "input",
+        "brief",
+        "output",
+        "budget",
+    ]
+    assert contract["request_schema"] == JobCreateRequest.model_json_schema(by_alias=True)
+    assert JobCreateRequest.model_validate(contract["request_example"]).workflow == "animated-explainer"
