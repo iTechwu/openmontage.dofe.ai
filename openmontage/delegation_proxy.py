@@ -33,6 +33,13 @@ _HOP_HEADERS = {
 _MAX_REQUEST_BYTES = 32 * 1024 * 1024
 _MAX_CACHED_RESPONSE_BYTES = 8 * 1024 * 1024
 _LOGGER = logging.getLogger("openmontage.delegation_proxy")
+# The Codex CLI revision the external-blocker analysis below was verified
+# against. This is the single code-side source of that version: it is kept in
+# sync with Dockerfile's CODEX_CLI_VERSION (the canonical build-time pin) and
+# with docs/DOCKER_AND_AGENTS.md by test_codex_version_pin_is_the_single_source.
+# Bumping the pin MUST trigger re-verification of the per-call-identity claim in
+# the TRACKED EXTERNAL BLOCKER comment, and a re-run of the capability probe.
+PINNED_CODEX_CLI_VERSION = "0.146.0"
 # ---------------------------------------------------------------------------
 # TRACKED EXTERNAL BLOCKER — Responses same-content wrong-merge is NOT closed.
 #
@@ -44,9 +51,10 @@ _LOGGER = logging.getLogger("openmontage.delegation_proxy")
 # fingerprint-keyed replay is logged (replay_key_source="content_fingerprint"),
 # and Fix A (cli._configure_logging) makes that record emit under the default
 # Worker/CLI config. The real fix needs a stable per-call identity
-# (stage + attempt + call_sequence) that the CALLER supplies; Codex 0.146.0
-# (the pinned revision, verified in the shipped binary) cannot inject one — see
-# the policy below. Until Codex exposes that capability, this stays open.
+# (stage + attempt + call_sequence) that the CALLER supplies; this pinned Codex
+# revision (PINNED_CODEX_CLI_VERSION, verified in the shipped binary) cannot
+# inject one — see the policy below. Until Codex exposes that capability, this
+# stays open.
 # ---------------------------------------------------------------------------
 # Logical-call identity policy (deliberate, audited — not a heuristic).
 #
@@ -78,8 +86,8 @@ _LOGGER = logging.getLogger("openmontage.delegation_proxy")
 # by bytes alone. Codex owns its HTTP client, so the question is whether the
 # model-provider config OpenMontage sets via
 # pipeline_executor._configure_agent_command_for_delegation can carry a value
-# that varies per call. Verified against codex-cli 0.146.0 (the pinned revision,
-# inspected in the shipped binary): ModelProviderInfo exposes only
+# that varies per call. Verified against codex-cli == PINNED_CODEX_CLI_VERSION
+# (the pinned revision, inspected in the shipped binary): ModelProviderInfo exposes only
 # base_url / query_params / env_key / wire_api / auth flags — there is NO
 # per-request header field (http_headers / env_http_headers exist only for HTTP
 # MCP servers, resolved once "executor-side", i.e. static-per-process), and no

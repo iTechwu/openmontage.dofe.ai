@@ -192,7 +192,9 @@ employee attribution.
 **Known limitation — Codex Responses same-content wrong-merge (tracked external
 blocker, NOT closed).** Native tool paths supply a stable logical-call identity,
 so the proxy keys replay strictly on it. Codex cannot: verified against codex-cli
-0.146.0 (the pinned revision, inspected in the shipped binary), the model-provider
+0.146.0 (the Dockerfile `CODEX_CLI_VERSION` pin — the single source of this
+version, mirrored in `delegation_proxy.PINNED_CODEX_CLI_VERSION`, inspected in
+the shipped binary), the model-provider
 config exposes only static-per-invocation knobs (`base_url`, `query_params`,
 `env_key`) and no per-call header or Idempotency-Key. With no caller-supplied
 per-call identity available, the proxy dedups Codex Responses on the content

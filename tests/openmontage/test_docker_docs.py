@@ -18,6 +18,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 _DOC = (PROJECT_ROOT / "docs" / "DOCKER_AND_AGENTS.md").read_text()
 _COMPOSE = (PROJECT_ROOT / "compose.yaml").read_text()
+_DOCKERFILE = (PROJECT_ROOT / "Dockerfile").read_text()
 
 
 def _container_query_body() -> str:
@@ -82,3 +83,47 @@ def test_host_model_query_documents_env_loading() -> None:
     assert "set -a; . ./.env; set +a" in _DOC
     # The host curl still reaches a host-reachable endpoint.
     assert "${DOFE_MODEL_BASE_URL:-https://model.local.dofe.ai/api}/v1/models" in _DOC
+
+
+def test_codex_version_pin_is_the_single_source() -> None:
+    """The Codex CLI pin must be identical wherever it is referenced.
+
+    The canonical pin is the Dockerfile ``CODEX_CLI_VERSION`` build arg; the
+    delegation proxy's ``PINNED_CODEX_CLI_VERSION`` constant is the code-side
+    source the external-blocker analysis is verified against, and the docs state
+    the same revision in prose. A bump in any one without the others is a silent
+    drift — and the blocker tracking is only correct while these agree, so the
+    test fails until all three (and the blocker re-verification) move together.
+    """
+    dockerfile_match = re.search(
+        r"^ARG CODEX_CLI_VERSION=(?P<v>\d+\.\d+\.\d+)\s*$",
+        _DOCKERFILE,
+        re.MULTILINE,
+    )
+    assert dockerfile_match, "Dockerfile must declare ARG CODEX_CLI_VERSION=<semver>"
+    dockerfile_version = dockerfile_match.group("v")
+
+    from openmontage.delegation_proxy import PINNED_CODEX_CLI_VERSION
+
+    assert PINNED_CODEX_CLI_VERSION == dockerfile_version, (
+        f"delegation_proxy.PINNED_CODEX_CLI_VERSION ({PINNED_CODEX_CLI_VERSION}) "
+        f"must match Dockerfile CODEX_CLI_VERSION ({dockerfile_version}); bumping "
+        "the pin must re-verify the per-call-identity blocker claim."
+    )
+
+    doc_versions = set(re.findall(r"codex-cli\s+(?P<v>\d+\.\d+\.\d+)", _DOC))
+    assert doc_versions, "DOCKER_AND_AGENTS.md must state the codex-cli pin version"
+    assert doc_versions == {dockerfile_version}, (
+        f"docs codex-cli version(s) {doc_versions} must match the Dockerfile pin "
+        f"({dockerfile_version})"
+    )
+    # The proxy module body must not re-literal the version outside the constant,
+    # so the constant is the sole in-file source.
+    proxy_src = (PROJECT_ROOT / "openmontage" / "delegation_proxy.py").read_text()
+    literal_occurrences = re.findall(rf"\b{re.escape(dockerfile_version)}\b", proxy_src)
+    assert literal_occurrences == [dockerfile_version], (
+        "delegation_proxy.py must contain the pinned Codex version exactly once "
+        "(in PINNED_CODEX_CLI_VERSION); comments must reference the constant by "
+        f"name, not re-literal it. Found {len(literal_occurrences)} occurrence(s)."
+    )
+
