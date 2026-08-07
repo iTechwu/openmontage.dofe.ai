@@ -88,7 +88,16 @@ class VideoSelector(BaseTool):
             "live_preflight": {
                 "type": "boolean",
                 "default": True,
-                "description": "Request a side-effect-free live provider contract probe when available.",
+                # Deprecated/ignored: live preflight is now unconditionally
+                # enforced on the production path (the selector always probes
+                # live, and each provider's execute() fail-closes on a blocked
+                # preflight). Retained only for backward compatibility — setting
+                # it False has no effect and cannot disable the mandatory probe.
+                "description": (
+                    "Deprecated and ignored. Live provider preflight is always "
+                    "enforced; this flag is kept for backward compatibility and "
+                    "can no longer disable it."
+                ),
             },
             "execution_scope": {
                 "type": "string",
