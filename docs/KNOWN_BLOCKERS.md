@@ -13,7 +13,7 @@ and is enforced by an automated capability probe so it cannot drift into silence
 | --- | --- |
 | **Status** | OPEN (accepted, documented limitation — not a completed feature) |
 | **Owner** | OpenMontage backend maintainer (delegation proxy / worker executor) |
-| **External tracker** | Upstream: <https://github.com/openai/codex/issues> — capability request: *"model-request per-call identity (per-call header interpolation, or a stable per-call `Idempotency-Key` on the Responses request)"*. File/subscribe there if not already; record the issue number in this row when filed. |
+| **External tracker** | **PENDING** — no upstream `openai/codex` issue is known to track this (issue [#1194](https://github.com/openai/codex/issues/1194) is alt-provider auth, not per-call identity). Upstream issues search: <https://github.com/openai/codex/issues?q=is%3Aissue+idempotency>. Owner must **file** an issue requesting *"model-request per-call identity (per-call header interpolation, or a stable per-call `Idempotency-Key` on the Responses request)"* before **Next review**, then set the tracker to FILED with the issue URL here and in `docs/codex_capability_probe.json`. The structured/test-enforced tracker state lives in `docs/codex_capability_probe.json` → `external_tracker`; `test_external_tracker_is_concrete_not_a_placeholder` fails if this stays an unactioned placeholder or if the date lapses. |
 | **First verified** | codex-cli 0.146.0 (the `CODEX_CLI_VERSION` Dockerfile pin) |
 | **Next review** | On every `CODEX_CLI_VERSION` bump (enforced by `test_codex_capability_probe.py`) **and** no later than 2026-11-07, whichever comes first |
 | **Probe** | `tests/openmontage/test_codex_capability_probe.py` + audited manifest `docs/codex_capability_probe.json` |
@@ -51,11 +51,22 @@ record emits under the default Worker/CLI config.
 
 Codex model-provider config or the model request carries a value that **varies
 per call**: per-call header interpolation, or a stable per-call `Idempotency-Key`
-on the Responses request. The capability probe detects this by searching the
-shipped native codex binary for the audited unblock signal(s) recorded in the
-manifest (currently the hyphenated `idempotency-key`; the underscore
-`idempotency_key` billing field and the MCP `idempotent_hint` annotation are
-explicitly excluded).
+on the Responses request — **and** a behavioral probe confirms it varies across
+two distinct same-stage calls.
+
+The capability probe is a **schema-integrity change detector**, not a behavioral
+proof. The shipped native codex binary emits `struct ModelProviderInfo with <N>
+elements` (a Rust Debug impl string) — the authoritative structural signature of
+what a model-provider config can carry. The audited baseline is `N = 18`
+(`docs/codex_capability_probe.json` → `model_provider_info_elements`); the manual
+audit established those fields include no per-call header (`http_headers` belongs
+to `RawMcpServerConfig` / MCP servers, resolved once executor-side, not to
+`ModelProviderInfo`). If a Codex bump changes `N`, the probe fails and forces a
+manual behavioral re-audit (run Codex through `DelegationSigningProxy` against a
+mock Responses upstream, diff the per-call headers) before this entry can be
+touched. A named-substring search is deliberately not used: field names live as
+contiguous string-table internings (partial, with false neighbors), so it both
+misses unnamed fields and false-positives on unrelated strings.
 
 ### When unblocked
 

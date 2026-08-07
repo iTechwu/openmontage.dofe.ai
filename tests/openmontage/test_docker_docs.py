@@ -9,6 +9,7 @@ file rather than requiring a running Docker daemon.
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -117,6 +118,13 @@ def test_codex_version_pin_is_the_single_source() -> None:
         f"docs codex-cli version(s) {doc_versions} must match the Dockerfile pin "
         f"({dockerfile_version})"
     )
+    # KB-001 records the revision the blocker was first verified against; that
+    # literal must move with the pin or the tracking goes stale.
+    known_blockers = (PROJECT_ROOT / "docs" / "KNOWN_BLOCKERS.md").read_text()
+    assert f"codex-cli {dockerfile_version}" in known_blockers, (
+        f"KNOWN_BLOCKERS.md must reference the pinned codex-cli {dockerfile_version} "
+        "(KB-001 First verified revision)"
+    )
     # The proxy module body must not re-literal the version outside the constant,
     # so the constant is the sole in-file source.
     proxy_src = (PROJECT_ROOT / "openmontage" / "delegation_proxy.py").read_text()
@@ -127,3 +135,23 @@ def test_codex_version_pin_is_the_single_source() -> None:
         f"name, not re-literal it. Found {len(literal_occurrences)} occurrence(s)."
     )
 
+
+def test_known_blockers_next_review_matches_manifest() -> None:
+    """KB-001's Next review date in KNOWN_BLOCKERS.md must equal the manifest's
+    next_review_by. The manifest value is enforced as not-past-due by
+    test_external_tracker_is_concrete_not_a_placeholder; this test keeps the
+    human-readable doc from drifting out of sync with that enforced value, so the
+    date the reviewer reads is the date the test guards."""
+    known_blockers = (PROJECT_ROOT / "docs" / "KNOWN_BLOCKERS.md").read_text()
+    manifest = json.loads(
+        (PROJECT_ROOT / "docs" / "codex_capability_probe.json").read_text()
+    )
+    md_match = re.search(r"no later than (?P<d>\d{4}-\d{2}-\d{2})", known_blockers)
+    assert md_match, (
+        "KNOWN_BLOCKERS.md must state a parseable 'no later than YYYY-MM-DD' "
+        "next-review date"
+    )
+    assert md_match.group("d") == manifest["next_review_by"], (
+        f"KNOWN_BLOCKERS.md next-review {md_match.group('d')!r} must equal the "
+        f"manifest next_review_by {manifest['next_review_by']!r}"
+    )

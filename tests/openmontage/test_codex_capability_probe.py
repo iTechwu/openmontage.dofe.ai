@@ -7,14 +7,20 @@ make the blocker non-drifting:
 
 * the audited manifest stays in sync with the pinned Codex version (so a bump
   forces a re-probe and a re-verified blocker status);
+* the external tracker is a concrete, test-enforced closed loop (PENDING needs a
+  real upstream search URL + next action; FILED needs a real issue URL) and the
+  next-review date cannot lapse into a stale green;
 * while the capability is absent, the content-fingerprint fallback MUST still be
   present in the proxy (we rely on it);
-* when the pinned Codex binary is discoverable, a live probe re-asserts that no
-  unblock signal has appeared — and FAILS if one has, demanding the fingerprint
-  fallback be removed and KB-001 closed.
+* when the pinned Codex binary is discoverable, a live schema probe asserts the
+  ``ModelProviderInfo`` element count still matches the audited baseline — and
+  FAILS if it changes, because a new field may carry per-call identity, forcing a
+  manual behavioral re-audit before KB-001 can be touched.
 
-The live probe is best-effort (generic CI may not have Codex installed); the
-manifest invariants run unconditionally.
+The live schema probe is best-effort in generic CI (Codex may be absent). The
+dedicated CI job sets ``OPENMONTAGE_CODEX_PROBE_STRICT=1`` so the probe
+FAILS instead of skipping — a missing binary or a changed schema breaks the job,
+it does not slip past unnoticed. The manifest invariants run unconditionally.
 """
 
 from __future__ import annotations
@@ -24,7 +30,9 @@ import os
 import re
 import shutil
 import subprocess
+from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 
@@ -32,6 +40,20 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _MANIFEST_PATH = PROJECT_ROOT / "docs" / "codex_capability_probe.json"
 _MANIFEST = json.loads(_MANIFEST_PATH.read_text())
 _DOCKERFILE = (PROJECT_ROOT / "Dockerfile").read_text()
+
+
+def _strict() -> bool:
+    """The dedicated CI job opts in with OPENMONTAGE_CODEX_PROBE_STRICT=1 so the
+    live probe fails (not skips) when the pinned Codex binary is missing or the
+    schema has changed. Generic CI leaves it unset and the probe skips."""
+    return os.environ.get("OPENMONTAGE_CODEX_PROBE_STRICT", "").strip().lower() in {"1", "true"}
+
+
+def _bail(message: str) -> NoReturn:
+    """Fail under the strict gate (dedicated CI), skip otherwise. Always raises."""
+    if _strict():
+        pytest.fail(message)
+    pytest.skip(message)
 
 
 def _dockerfile_codex_version() -> str:
@@ -57,8 +79,48 @@ def test_manifest_tracks_the_pinned_codex_version() -> None:
         "manifest must match delegation_proxy.PINNED_CODEX_CLI_VERSION"
     )
     assert _MANIFEST["blocker_id"] == "KB-001"
-    assert _MANIFEST["unblock_signals"], (
-        "manifest must record at least one audited unblock signal for the probe"
+    baseline = _MANIFEST["model_provider_info_elements"]
+    assert isinstance(baseline, int) and baseline > 0, (
+        "manifest must record a positive model_provider_info_elements baseline "
+        "(the audited ModelProviderInfo struct size the live schema probe checks)"
+    )
+    date.fromisoformat(_MANIFEST["next_review_by"])  # parseable ISO date
+
+
+def test_external_tracker_is_concrete_not_a_placeholder() -> None:
+    """The KB-001 external tracker must be a concrete, test-enforced closed loop,
+    not a vague 'file if not already' placeholder.
+
+    PENDING is allowed only with a concrete upstream issues-search URL and a
+    non-empty next action; FILED requires a real ``openai/codex`` issue URL. The
+    next-review date must not have lapsed — once it passes, this fails until
+    KB-001 is re-probed and either closed or given a new future date.
+    """
+    tracker = _MANIFEST["external_tracker"]
+    status = tracker["status"]
+    assert status in {"PENDING", "FILED"}, f"unknown tracker status {status!r}"
+    if status == "FILED":
+        filed = tracker["filed_issue"]
+        assert isinstance(filed, str) and re.match(
+            r"^https://github\.com/openai/codex/issues/\d+$", filed
+        ), (
+            "FILED tracker needs a concrete issue URL "
+            "(https://github.com/openai/codex/issues/<number>)"
+        )
+    else:  # PENDING
+        assert tracker["search"].startswith("https://github.com/openai/codex/issues"), (
+            "PENDING tracker needs a concrete upstream issues-search URL, not a homepage"
+        )
+        assert tracker["filed_issue"] is None, (
+            "PENDING tracker must have filed_issue=null; set status=FILED when an issue exists"
+        )
+        assert tracker["next_action"].strip(), "PENDING tracker needs a non-empty next action"
+
+    next_review = date.fromisoformat(_MANIFEST["next_review_by"])
+    today = datetime.now(timezone.utc).date()
+    assert today <= next_review, (
+        f"KB-001 next_review_by {next_review} has passed (today {today}); re-probe "
+        "and either close KB-001 or set a new future date."
     )
 
 
@@ -114,53 +176,64 @@ def _find_native_codex_binary(pkg_root: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
-def test_live_probe_fails_when_codex_gains_per_call_identity() -> None:
-    """Live capability probe. When the pinned Codex binary is discoverable, it
-    must NOT carry any audited unblock signal. If it does, the content-fingerprint
-    fallback is the wrong design and this fails loudly until KB-001 is closed.
+def test_live_schema_probe_detects_model_provider_info_change() -> None:
+    """Live schema-integrity probe. When the pinned Codex binary is discoverable,
+    its ``struct ModelProviderInfo with <N> elements`` Debug signature must equal
+    the audited baseline. A change means Codex grew/removed a model-provider
+    config field — which could carry per-call identity — so the probe FAILS,
+    forcing a manual behavioral re-audit before KB-001 can be touched.
 
-    Skipped (not failed) only when Codex is not installed or is a different
-    version than the pin: the manifest invariants above still enforce the
-    audited state unconditionally.
+    This is a schema change-detector, not a behavioral proof: it cannot show a
+    new field varies per call. Per-call proof is the gated behavioral probe in
+    the manifest (drive two distinct Codex Responses calls through
+    DelegationSigningProxy, diff the per-call headers). The element count is
+    exact and zero-false-positive, unlike a named-substring search: field names
+    live as contiguous string-table internings (partial, with false neighbors),
+    so substring hunting both misses unnamed fields and false-positives on
+    unrelated strings.
+
+    Under the strict gate (OPENMONTAGE_CODEX_PROBE_STRICT=1, the dedicated CI
+    job) every 'cannot run' condition FAILS the job instead of skipping.
     """
     if shutil.which("strings") is None:
-        pytest.skip("`strings` not available; manifest invariants still enforced")
+        _bail("`strings` unavailable; schema probe cannot run")
 
     pkg_root = _resolve_codex_package_root()
     if pkg_root is None:
-        pytest.skip("codex CLI not installed; manifest invariants still enforced")
+        _bail("codex CLI not installed; schema probe cannot run")
 
     installed_version = json.loads((pkg_root / "package.json").read_text()).get("version")
     if installed_version != _MANIFEST["pinned_codex_version"]:
-        pytest.skip(
+        _bail(
             f"installed codex {installed_version} != pinned "
             f"{_MANIFEST['pinned_codex_version']}; probe applies only to the pin"
         )
 
     binary = _find_native_codex_binary(pkg_root)
     if binary is None:
-        pytest.skip("native codex binary not found under the package; manifest enforced")
+        _bail("native codex binary not found under the package; schema probe cannot run")
 
     result = subprocess.run(
         ["strings", str(binary)], capture_output=True, text=True, check=False
     )
     if result.returncode != 0:
-        pytest.skip(f"`strings` failed on {binary}; manifest invariants still enforced")
+        _bail(f"`strings` failed on {binary}; schema probe cannot run")
 
-    haystack = result.stdout.lower()
-    exclusions = {e.lower() for e in _MANIFEST.get("unblock_signal_exclusions", [])}
-    gained = []
-    for signal in _MANIFEST["unblock_signals"]:
-        token = signal.lower()
-        if token in haystack and token not in exclusions:
-            gained.append(signal)
-
-    assert not gained, (
-        f"codex {installed_version} now carries per-call identity signal(s) "
-        f"{gained} (excluded tokens {sorted(exclusions)}). The content-fingerprint "
-        "replay fallback in openmontage/delegation_proxy.py is no longer the right "
-        "design: remove it, key all replay on per-call identity, set "
-        "capability_present=true is NOT sufficient — close KB-001 in "
-        "docs/KNOWN_BLOCKERS.md and update docs/codex_capability_probe.json after "
-        "the fallback is gone."
+    counts = [
+        int(n)
+        for n in re.findall(r"ModelProviderInfo with (\d+) elements", result.stdout)
+    ]
+    baseline = _MANIFEST["model_provider_info_elements"]
+    assert counts, (
+        "ModelProviderInfo element-count signature is missing from the binary; "
+        "the probe can no longer detect a schema change. Re-audit manually."
+    )
+    assert all(c == baseline for c in counts), (
+        f"ModelProviderInfo element count changed: binary reports {sorted(set(counts))}, "
+        f"audited baseline is {baseline}. A model-provider config field was added or "
+        "removed — it may carry per-call identity. Run the gated behavioral probe "
+        "(manifest behavioral_probe): drive two distinct Codex Responses calls through "
+        "DelegationSigningProxy and diff the per-call headers. Only if no per-call "
+        "identity appears, update model_provider_info_elements and re-record; if one "
+        "does, remove the content_fingerprint fallback and close KB-001."
     )
