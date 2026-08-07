@@ -31,7 +31,7 @@ from .errors import (
 )
 from .media import sanitize_for_log
 from .models import catalog_model_ids, config_env_name, validate_catalog_alias
-from .status import catalog_snapshot
+from .status import catalog_snapshot, resolve_catalog
 
 ARTIFACT_MIN_BYTES = 1024  # dev-guide §4.4: image/audio/video ≥ 1KB
 
@@ -278,36 +278,27 @@ def _error_result(
 
 # ----------------------------------------------------------------- main entry
 
-def run_dofe_generation(
-    tool: Any,
-    inputs: dict[str, Any],
-    *,
-    catalog: Any = None,
-) -> ToolResult:
+def run_dofe_generation(tool: Any, inputs: dict[str, Any]) -> ToolResult:
     """Execute a dofe generation end-to-end inside a shared catalog snapshot.
 
     The snapshot lets selection, preflight, and execution reuse a single
     ``GET /v1/models`` response within one generation request.
     """
     with catalog_snapshot():
-        return _run_dofe_generation_impl(tool, inputs, catalog=catalog)
+        return _run_dofe_generation_impl(tool, inputs)
 
 
-def _run_dofe_generation_impl(
-    tool: Any,
-    inputs: dict[str, Any],
-    *,
-    catalog: Any | None,
-) -> ToolResult:
+def _run_dofe_generation_impl(tool: Any, inputs: dict[str, Any]) -> ToolResult:
     """Execute a dofe generation end-to-end.
 
     ``tool`` must expose: ``dofe_spec`` (DofeToolSpec), ``resolve_model(inputs)``,
     ``_build_payload(inputs, model)``, ``estimate_cost(inputs)``, ``name``,
     ``install_instructions``.
 
-    ``catalog`` may carry a tenant ``GET /v1/models`` snapshot that a caller
-    already fetched (e.g. for a live preflight). When provided, the paid-boundary
-    catalog check reuses it instead of fetching again.
+    The paid-boundary model catalog is ALWAYS fetched through the authenticated
+    :func:`resolve_catalog` entry point — never from a caller-supplied argument —
+    so a forgeable catalog cannot unlock paid generation. The snapshot opened by
+    :func:`run_dofe_generation` lets selection and preflight share this fetch.
     """
 
     api_key = cfg.dofe_api_key()
@@ -335,8 +326,9 @@ def _run_dofe_generation_impl(
 
     client = DofeClient(api_key=api_key)
     try:
-        if catalog is None:
-            catalog = client.list_models()
+        catalog, ok = resolve_catalog()
+        if not ok or catalog is None:
+            raise DofeError("DoFe model catalog unavailable")
         model = validate_catalog_alias(requested_model, catalog)
     except DofeError as exc:
         return _error_result(tool, exc, requested_model, spec, start)
@@ -345,7 +337,7 @@ def _run_dofe_generation_impl(
     # dofe tool. Video tools perform a real capability probe; other capabilities
     # honestly report "not_supported" and degrade rather than block. A blocked
     # probe fail-closes before any paid submit_and_collect.
-    probe = tool.probe_provider_contract(inputs, catalog=catalog)
+    probe = tool.probe_provider_contract(inputs)
     if probe.get("status") == "blocked":
         errors = probe.get("errors") or ["DoFe live provider preflight blocked paid generation"]
         return ToolResult(

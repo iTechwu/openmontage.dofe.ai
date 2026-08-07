@@ -218,17 +218,13 @@ class DofeVideo(BaseTool):
             else ToolStatus.UNAVAILABLE
         )
 
-    def probe_provider_contract(
-        self,
-        inputs: dict[str, Any],
-        *,
-        catalog: Any = None,
-    ) -> dict[str, Any]:
+    def probe_provider_contract(self, inputs: dict[str, Any]) -> dict[str, Any]:
         """Validate the exact model and operation against DoFe's live projection.
 
-        ``catalog`` may carry a tenant ``GET /v1/models`` snapshot the caller
-        already fetched, so a live preflight + paid execution can share one
-        catalog read instead of fetching twice.
+        The tenant model catalog is fetched through the authenticated
+        :func:`resolve_catalog` entry point so preflight and paid execution share
+        one ``GET /v1/models`` read without ever trusting a caller-supplied
+        (potentially forged) catalog.
         """
 
         operation = str(inputs.get("operation") or "text_to_video")
@@ -241,10 +237,9 @@ class DofeVideo(BaseTool):
 
         try:
             client = DofeClient()
-            if catalog is None:
-                catalog, ok = resolve_catalog()
-                if not ok or catalog is None:
-                    raise DofeError("DoFe model catalog unavailable")
+            catalog, ok = resolve_catalog()
+            if not ok or catalog is None:
+                raise DofeError("DoFe model catalog unavailable")
             model = validate_catalog_alias(requested_model, catalog)
             capability = resolve_playground_capability(client, model)
         except DofeError as exc:
@@ -501,18 +496,12 @@ class DofeVideo(BaseTool):
             self.check_dependencies()
         except DependencyError as exc:
             return ToolResult(success=False, error=str(exc))
-        # The shared paid boundary in run_dofe_generation enforces the live
-        # provider preflight and validates the exact catalog model. Fetch the
-        # catalog here once so it can be reused by the boundary gate without a
-        # second GET /v1/models (dev-guide §model-catalog).
-        catalog, ok = resolve_catalog()
-        if not ok or catalog is None:
-            return ToolResult(
-                success=False,
-                data={"provider": "dofe"},
-                error="DoFe live model catalog is unavailable",
-            )
-        return run_dofe_generation(self, inputs, catalog=catalog)
+        # The shared paid boundary in run_dofe_generation fetches the
+        # authenticated catalog, validates the exact model, and enforces the
+        # live provider preflight. execute() never accepts or forwards a
+        # caller-supplied catalog — a forgeable snapshot cannot unlock paid
+        # generation (dev-guide §model-catalog).
+        return run_dofe_generation(self, inputs)
 
 
 def _parse_duration(value: Any, default: int = 5) -> int:

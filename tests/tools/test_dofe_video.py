@@ -553,7 +553,7 @@ def test_execute_blocks_paid_generation_when_live_probe_is_blocked(monkeypatch):
         lambda self, *a, **k: submit_calls.append(1),
     )
 
-    def blocked_probe(self, inputs, *, catalog=None):
+    def blocked_probe(self, inputs):
         return {
             "status": "blocked",
             "errors": ["operation reference_to_video is not supported by model catalog-video"],
@@ -569,6 +569,53 @@ def test_execute_blocks_paid_generation_when_live_probe_is_blocked(monkeypatch):
     assert "not supported" in result.error.lower()
     assert submit_calls == []
     assert len(list_calls) == 1
+
+
+def test_paid_boundary_rejects_a_caller_supplied_forged_catalog():
+    """A forgeable catalog can no longer be passed to the paid boundary.
+
+    ``run_dofe_generation`` and ``probe_provider_contract`` no longer accept a
+    ``catalog`` keyword: the boundary always fetches the authenticated tenant
+    catalog via ``resolve_catalog``. Passing one must be a hard error so a forged
+    snapshot can never unlock paid generation.
+    """
+    from tools.dofe.runtime import run_dofe_generation
+
+    forged = [{"id": "catalog-video"}]
+    tool = DofeVideo()
+    inputs = {"prompt": "a cat playing piano", "operation": "text_to_video"}
+
+    with pytest.raises(TypeError):
+        run_dofe_generation(tool, inputs, catalog=forged)
+    with pytest.raises(TypeError):
+        tool.probe_provider_contract(inputs, catalog=forged)
+
+
+def test_execute_consults_authenticated_catalog_not_any_caller_value(monkeypatch):
+    """Paid generation is gated on the authenticated catalog, not a forge.
+
+    The configured model is absent from the authenticated ``GET /v1/models``;
+    no caller can supply a catalog that lists it, so paid submit is refused.
+    """
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_VIDEO_MODEL", "catalog-video")
+
+    monkeypatch.setattr(
+        DofeClient,
+        "list_models",
+        lambda _self: [{"id": "some-other-model"}],
+    )
+    submit_calls: list[int] = []
+    monkeypatch.setattr(
+        DofeClient,
+        "submit_and_collect",
+        lambda self, *a, **k: submit_calls.append(1),
+    )
+
+    result = DofeVideo().execute({"prompt": "a cat playing piano"})
+
+    assert not result.success
+    assert submit_calls == []
 
 
 def test_video_selector_shares_one_catalog_and_capability_per_request(monkeypatch):
