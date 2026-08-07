@@ -60,15 +60,24 @@ _LOGGER = logging.getLogger("openmontage.delegation_proxy")
 # A true per-call identity (stage + attempt + call_sequence) is the only way to
 # fully close the wrong-merge case, but it must originate on the caller side:
 # this proxy cannot tell a retransmitted call from a distinct same-content call
-# by bytes alone. Codex owns its HTTP client and the only seam OpenMontage
-# controls (pipeline_executor._configure_agent_command_for_delegation) can set
-# at most a STATIC provider header, which would collapse every call in a stage
-# onto one id — strictly worse than the fingerprint. So the real fix is blocked
-# on a Codex capability (per-call header interpolation or a stable per-call
-# Idempotency-Key) that is not available today. Until then, every replay this
-# proxy serves is logged with replay_key_source = "logical_call_id" (the safe
-# case) or "content_fingerprint" (the wrong-merge-prone case), so the limitation
-# is observable and auditable rather than silent.
+# by bytes alone. Codex owns its HTTP client, so the question is whether the
+# model-provider config OpenMontage sets via
+# pipeline_executor._configure_agent_command_for_delegation can carry a value
+# that varies per call. Verified against codex-cli 0.146.0 (the pinned revision,
+# inspected in the shipped binary): ModelProviderInfo exposes only
+# base_url / query_params / env_key / wire_api / auth flags — there is NO
+# per-request header field (http_headers / env_http_headers exist only for HTTP
+# MCP servers, resolved once "executor-side", i.e. static-per-process), and no
+# model-request-level Idempotency-Key (the idempotency strings in the binary are
+# billing/credits internals and MCP tool annotations). Every knob OpenMontage
+# can turn is therefore static-per-invocation, so any identity derived from it
+# would collapse every call in a stage onto one id — strictly worse than the
+# content fingerprint, which at least distinguishes different-content calls. The
+# real fix is blocked on a Codex capability (per-call header interpolation or a
+# stable per-call Idempotency-Key) that is not available today. Until then,
+# every replay this proxy serves is logged with replay_key_source =
+# "logical_call_id" (the safe case) or "content_fingerprint" (the wrong-merge-
+# prone case), so the limitation is observable and auditable rather than silent.
 _LOGICAL_CALL_HEADERS = (
     "X-OpenMontage-Logical-Call-Id",
 )
