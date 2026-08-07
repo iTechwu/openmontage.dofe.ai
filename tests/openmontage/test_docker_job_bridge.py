@@ -30,6 +30,9 @@ def test_compose_wires_durable_jobs_and_a_dedicated_event_publisher() -> None:
     assert worker["environment"]["DOFE_MODEL_BASE_URL"] == (
         "${DOFE_DOCKER_MODEL_BASE_URL:-http://api:3101}"
     )
+    assert worker["environment"]["OPENMONTAGE_AGENT_MODEL_ID"] == (
+        "${OPENMONTAGE_AGENT_MODEL_ID:-}"
+    )
     assert worker["healthcheck"] == {"disable": True}
 
 
@@ -43,6 +46,7 @@ def test_example_environment_documents_all_agentspace_bridge_secrets() -> None:
         "OPENMONTAGE_JOB_DB",
         "OPENMONTAGE_AGENT_EXECUTOR_JSON",
         "OPENMONTAGE_AGENT_TIMEOUT_SECONDS",
+        "OPENMONTAGE_AGENT_MODEL_ID",
         "OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL",
     ):
         assert f"{name}=" in example
