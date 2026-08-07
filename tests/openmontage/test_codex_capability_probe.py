@@ -7,9 +7,14 @@ make the blocker non-drifting:
 
 * the audited manifest stays in sync with the pinned Codex version (so a bump
   forces a re-probe and a re-verified blocker status);
-* the external tracker is a concrete, test-enforced closed loop (PENDING needs a
-  real upstream search URL + next action; FILED needs a real issue URL) and the
-  next-review date cannot lapse into a stale green;
+* the external tracker is a concrete, test-enforced closed loop: PENDING must be
+  ready-to-file (a real upstream search URL + next action + a verbatim
+  issue_draft), FILED needs a real issue URL; and the review deadline cannot
+  lapse into a stale green NOR be pushed more than a quarter past the last probe
+  (extending it requires re-probing, which advances probed_at);
+* a CI workflow wiring test guarantees the behavioral probe actually runs against
+  the pinned Codex under the strict gate, so the evidence path cannot quietly
+  regress to skip-on-green drift;
 * while the capability is absent, the content-fingerprint fallback MUST still be
   present in the proxy (we rely on it);
 * when the pinned Codex binary is discoverable, a live BEHAVIORAL probe runs the
@@ -35,7 +40,7 @@ import shutil
 import socket
 import subprocess
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
@@ -136,12 +141,83 @@ def test_external_tracker_is_concrete_not_a_placeholder() -> None:
             "PENDING tracker must have filed_issue=null; set status=FILED when an issue exists"
         )
         assert tracker["next_action"].strip(), "PENDING tracker needs a non-empty next action"
+        # PENDING must be ready-to-file, not a vague intent: a concrete issue
+        # draft (title + body) the owner can paste upstream verbatim. This keeps
+        # "still PENDING" honest — it is one action away from FILED at all times.
+        draft = tracker.get("issue_draft")
+        assert isinstance(draft, dict), (
+            "PENDING tracker needs an issue_draft (ready-to-file title + body)"
+        )
+        assert draft.get("title", "").strip(), (
+            "issue_draft.title must be non-empty and file-ready"
+        )
+        assert draft.get("body", "").strip(), (
+            "issue_draft.body must be non-empty and file-ready"
+        )
 
     next_review = date.fromisoformat(_MANIFEST["next_review_by"])
     today = datetime.now(timezone.utc).date()
     assert today <= next_review, (
         f"KB-001 next_review_by {next_review} has passed (today {today}); re-probe "
         "and either close KB-001 or set a new future date."
+    )
+
+
+def test_review_deadline_window_bounds_probe_recency() -> None:
+    """The next_review_by deadline cannot be pushed more than one quarter (95
+    days) past probed_at, and probed_at cannot be in the future.
+
+    This closes the 'review deadline can be formally extended' gap: a maintainer
+    cannot keep the tracker perpetually green by bumping next_review_by forward
+    each time it nears expiry. Extending the window requires advancing
+    probed_at — i.e. actually re-running the behavioral probe — and the strict
+    CI job re-verifies the baseline against the (re)installed pinned binary, so a
+    version bump that did not undergo a real behavioral review cannot hide behind
+    a fresh deadline."""
+    probed_at = date.fromisoformat(_MANIFEST["probed_at"])
+    next_review = date.fromisoformat(_MANIFEST["next_review_by"])
+    today = datetime.now(timezone.utc).date()
+    assert probed_at <= today, (
+        f"probed_at {probed_at} is in the future (today {today}); a probe cannot "
+        "be dated ahead of when it ran"
+    )
+    assert probed_at <= next_review, (
+        f"next_review_by {next_review} is before probed_at {probed_at}"
+    )
+    window = next_review - probed_at
+    assert window <= timedelta(days=95), (
+        f"next_review_by is {window.days} days after probed_at (max 95). To extend "
+        "the review deadline, re-run the behavioral probe and advance probed_at — "
+        "do not just push next_review_by forward."
+    )
+
+
+def test_ci_wires_the_strict_capability_probe() -> None:
+    """The behavioral probe is real evidence ONLY while a CI job runs it against
+    the pinned Codex under the strict gate. Without Codex the probe silently
+    skips, so a changed request surface or stale pin would pass green.
+
+    This test pins that wiring in place: the workflow must install the
+    Dockerfile-pinned @openai/codex, set OPENMONTAGE_CODEX_PROBE_STRICT=1, and
+    run this probe module. Dropping the job or the strict flag would return the
+    probe to skip-on-green drift, so this fails until the wiring is restored —
+    making the behavioral-evidence path a durable, tested invariant rather than a
+    one-time setup that can quietly regress."""
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert "@openai/codex@" in workflow, (
+        "ci.yml must install the pinned @openai/codex via npm install -g @openai/codex@<pin>"
+    )
+    assert "CODEX_CLI_VERSION" in workflow and "${{ steps.pin.outputs.version }}" in workflow, (
+        "ci.yml must read the pin from the Dockerfile (ARG CODEX_CLI_VERSION) and install "
+        "that exact version, so a bump flows through automatically instead of drifting"
+    )
+    assert 'OPENMONTAGE_CODEX_PROBE_STRICT: "1"' in workflow, (
+        "ci.yml must set OPENMONTAGE_CODEX_PROBE_STRICT: \"1\" so the probe FAILS (not "
+        "skips) on a missing binary, an installed-vs-pinned version mismatch, or a "
+        "request surface that differs from the audited baseline"
+    )
+    assert "tests/openmontage/test_codex_capability_probe.py" in workflow, (
+        "ci.yml must run the capability probe test module in the strict job"
     )
 
 
