@@ -694,3 +694,40 @@ def probe_output(path: Path) -> dict[str, Any]:
     except Exception:
         pass
     return info
+
+
+def enforce_degraded_batch_approval(
+    *,
+    preflight: dict[str, Any],
+    execution_scope: str,
+    allow_degraded_preflight: bool,
+    provider: str | None = None,
+) -> ToolResult | None:
+    """Enforce the degraded-preflight batch approval gate.
+
+    A batch run whose live provider preflight is still ``degraded`` (the live
+    contract could not be verified) is blocked unless the caller explicitly
+    approved it via ``allow_degraded_preflight=True``. A sample run, a fully
+    verified (``passed``) preflight, or an explicit approval all pass through.
+
+    Shared by ``video_selector`` and direct provider tools (e.g.
+    ``seedance_video``) so the routed and direct paths enforce one identical
+    gate. Returns a failing ``ToolResult`` when blocked, else ``None``.
+    """
+    if (
+        preflight.get("status") == "degraded"
+        and execution_scope == "batch"
+        and not allow_degraded_preflight
+    ):
+        data: dict[str, Any] = {"provider_preflight": preflight}
+        if provider:
+            data["provider"] = provider
+        return ToolResult(
+            success=False,
+            data=data,
+            error=(
+                "Provider live contract is unverified; batch generation requires "
+                "allow_degraded_preflight=true after explicit approval."
+            ),
+        )
+    return None

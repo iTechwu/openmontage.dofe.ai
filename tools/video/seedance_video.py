@@ -23,6 +23,7 @@ from tools.base_tool import (
     ToolStatus,
     ToolTier,
 )
+from tools.video._shared import enforce_degraded_batch_approval
 
 
 class SeedanceVideo(BaseTool):
@@ -101,6 +102,17 @@ class SeedanceVideo(BaseTool):
                 "type": "string",
                 "enum": ["text_to_video", "image_to_video", "reference_to_video"],
                 "default": "text_to_video",
+            },
+            "execution_scope": {
+                "type": "string",
+                "enum": ["sample", "batch"],
+                "default": "sample",
+                "description": "Batch execution is blocked when live preflight remains degraded unless explicitly approved.",
+            },
+            "allow_degraded_preflight": {
+                "type": "boolean",
+                "default": False,
+                "description": "Explicit approval to run a batch when live provider verification is unavailable.",
             },
             "model_variant": {
                 "type": "string",
@@ -238,22 +250,17 @@ class SeedanceVideo(BaseTool):
                 + "; ".join(error["message"] for error in preflight["errors"]),
             )
         # A degraded preflight (no live probe) may proceed for a sample, but a
-        # batch run requires explicit approval — the same gate the selector
-        # enforces (video_selector._execute_impl). Without it a direct batch
-        # call would reach a paid fal.ai POST on an unverified contract.
-        if (
-            preflight["status"] == "degraded"
-            and preflight.get("execution_scope", "sample") == "batch"
-            and not preflight.get("degraded_preflight_approved", False)
-        ):
-            return ToolResult(
-                success=False,
-                data={"provider": "seedance", "provider_preflight": preflight},
-                error=(
-                    "Provider live contract is unverified; batch generation "
-                    "requires allow_degraded_preflight=true after explicit approval."
-                ),
-            )
+        # batch run requires explicit approval. This shares the exact gate the
+        # selector enforces so a direct batch call cannot reach a paid fal.ai
+        # POST on an unverified contract while the selector would have blocked.
+        degraded_gate = enforce_degraded_batch_approval(
+            preflight=preflight,
+            execution_scope=str(inputs.get("execution_scope", "sample")),
+            allow_degraded_preflight=bool(inputs.get("allow_degraded_preflight", False)),
+            provider="seedance",
+        )
+        if degraded_gate is not None:
+            return degraded_gate
 
         import requests
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 
 from tools.base_tool import BaseTool, ToolResult, ToolRuntime, ToolStability, ToolStatus, ToolTier
+from tools.video._shared import enforce_degraded_batch_approval
 
 
 class VideoSelector(BaseTool):
@@ -414,19 +415,13 @@ class VideoSelector(BaseTool):
                 data={"provider_preflight": preflight},
                 error="Provider preflight blocked video generation.",
             )
-        if (
-            preflight["status"] == "degraded"
-            and inputs.get("execution_scope", "sample") == "batch"
-            and not inputs.get("allow_degraded_preflight", False)
-        ):
-            return ToolResult(
-                success=False,
-                data={"provider_preflight": preflight},
-                error=(
-                    "Provider live contract is unverified; batch generation requires "
-                    "allow_degraded_preflight=true after explicit approval."
-                ),
-            )
+        degraded_gate = enforce_degraded_batch_approval(
+            preflight=preflight,
+            execution_scope=str(inputs.get("execution_scope", "sample")),
+            allow_degraded_preflight=bool(inputs.get("allow_degraded_preflight", False)),
+        )
+        if degraded_gate is not None:
+            return degraded_gate
 
         # Auto-resolve reference_image_path to a URL for providers that need it
         if adapted.get("operation") == "image_to_video" and adapted.get("reference_image_path"):

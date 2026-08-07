@@ -130,3 +130,62 @@ def test_seedance_batch_degraded_preflight_blocks_paid_post(monkeypatch) -> None
     assert result.data["provider_preflight"]["status"] == "degraded"
     assert "allow_degraded_preflight" in result.error
     assert submitted == []  # no paid fal.ai POST
+
+
+def test_seedance_batch_with_approval_proceeds_past_degraded_gate(monkeypatch, tmp_path) -> None:
+    """An explicit allow_degraded_preflight=true unblocks the degraded-batch gate.
+
+    The gate is an approval gate, not an absolute block: a batch call that carries
+    explicit approval proceeds to the paid fal.ai submit, mirroring the selector
+    contract. This is the proceeds counterpart to the blocked test above.
+    """
+    monkeypatch.setenv("FAL_KEY", "test-fal-key")
+    monkeypatch.delenv("DOFE_ENABLED", raising=False)
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+
+    submitted: list[str] = []
+
+    class _FakeResp:
+        def __init__(self, payload, content=b""):
+            self._payload = payload
+            self.content = content
+            self.status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    def fake_post(*args, **kwargs):
+        submitted.append(args[0] if args else kwargs.get("url"))
+        return _FakeResp(
+            {"status_url": "https://fal/status", "response_url": "https://fal/response"}
+        )
+
+    # Order matches seedance's submit → poll-status → fetch-result → download-video.
+    get_payloads = iter([
+        {"status": "COMPLETED"},
+        {"video": {"url": "https://fal/video.mp4"}},
+        {},
+    ])
+
+    def fake_get(*args, **kwargs):
+        return _FakeResp(next(get_payloads), content=b"video-bytes")
+
+    monkeypatch.setattr(_requests, "post", fake_post)
+    monkeypatch.setattr(_requests, "get", fake_get)
+
+    output_path = tmp_path / "seedance_output.mp4"
+    result = SeedanceVideo().execute(
+        {
+            "prompt": "a cat on Mars",
+            "execution_scope": "batch",
+            "allow_degraded_preflight": True,
+            "output_path": str(output_path),
+        },
+    )
+
+    assert submitted != []  # degraded-batch gate passed — the paid submit ran
+    assert result.success
+    assert output_path.exists()
