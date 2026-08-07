@@ -1,0 +1,18 @@
+{
+  "blocker_id": "KB-001",
+  "summary": "Codex CLI has no per-call model-request identity, so DelegationSigningProxy dedups Responses on the content fingerprint, which can wrong-merge two distinct same-content calls within one stage/attempt.",
+  "pinned_codex_version": "0.146.0",
+  "capability_present": false,
+  "probed_at": "2026-08-07",
+  "probe_method": "strings(1) of the shipped native codex binary. ModelProviderInfo exposes http_headers, but they are resolved once executor-side (static-per-process); there is no model-request-level per-call header or Idempotency-Key. The unblock signal is a hyphenated, model-request idempotency-key (HTTP header or request field).",
+  "unblock_signals": [
+    "idempotency-key"
+  ],
+  "unblock_signal_exclusions": [
+    "idempotency_key",
+    "idempotent_hint"
+  ],
+  "unblock_condition": "Codex model-provider config or model request carries a value that varies per call (per-call header interpolation, or a stable per-call Idempotency-Key on the Responses request). When the probe detects an unblock_signal, remove the content_fingerprint fallback in openmontage/delegation_proxy.py and close KB-001 in docs/KNOWN_BLOCKERS.md.",
+  "fallback_location": "openmontage/delegation_proxy.py content_fingerprint replay-key branch",
+  "tracking_entry": "docs/KNOWN_BLOCKERS.md#kb-001--codex-responses-same-content-wrong-merge"
+}

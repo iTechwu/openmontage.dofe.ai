@@ -41,7 +41,11 @@ _LOGGER = logging.getLogger("openmontage.delegation_proxy")
 # the TRACKED EXTERNAL BLOCKER comment, and a re-run of the capability probe.
 PINNED_CODEX_CLI_VERSION = "0.146.0"
 # ---------------------------------------------------------------------------
-# TRACKED EXTERNAL BLOCKER — Responses same-content wrong-merge is NOT closed.
+# TRACKED EXTERNAL BLOCKER (KB-001) — Responses same-content wrong-merge is NOT
+# closed. Referenceable tracking: docs/KNOWN_BLOCKERS.md#kb-001. Audited probe
+# state: docs/codex_capability_probe.json; enforced by
+# tests/openmontage/test_codex_capability_probe.py (fails if Codex gains a
+# per-call identity, demanding the fingerprint fallback below be removed).
 #
 # Without a caller-supplied per-call identity, two genuinely distinct same-
 # content Responses calls within one stage/attempt collapse onto one invocation
