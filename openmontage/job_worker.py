@@ -106,7 +106,18 @@ class JobWorker:
             )
             return JobWorkerResult(snapshot.job_id, snapshot.current_stage, "job_cancelled")
 
-        self._ensure_project(snapshot)
+        try:
+            self._ensure_project(snapshot)
+        except OSError:
+            # Disk permission/space/corruption during project init must not
+            # escape run_once and leave the lease to expire naturally.
+            return self._schedule_retry_or_confirm_cancel(
+                lease,
+                stage=None,
+                outcome="project_retry_scheduled",
+                now=now,
+                error="Project workspace initialization failed",
+            )
         stage = self._next_stage(snapshot)
         if stage is None:
             published = None

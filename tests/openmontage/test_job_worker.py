@@ -552,6 +552,37 @@ def test_worker_schedules_zero_delay_in_progress_retry_with_default_clock(
     assert reclaimed is not None and reclaimed.job_id == job.job_id
 
 
+def test_worker_releases_lease_when_project_init_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="init-fail"), _attribution())
+    executor = FakeExecutor(["completed"])  # must never run
+
+    def raise_oserror(*args, **kwargs):
+        raise OSError("disk permission denied")
+
+    monkeypatch.setattr("openmontage.job_worker.init_project", raise_oserror)
+
+    result = _worker(service, executor, tmp_path / "projects").run_once(now=NOW)
+
+    restored = service.get_job(job.job_id)
+    assert result is not None
+    assert result.outcome == "project_retry_scheduled"
+    assert result.stage is None
+    # The lease is deterministically released (job back to a claimable state),
+    # so another worker can reclaim it instead of waiting for natural expiry.
+    assert restored.status == JobStatus.QUEUED
+    assert restored.stages[0].status == StageStatus.PENDING
+    assert executor.assignments == []
+    reclaimed = service.claim_job(
+        worker_id="next-worker",
+        lease_duration=timedelta(seconds=30),
+    )
+    assert reclaimed is not None and reclaimed.job_id == job.job_id
+
+
 def test_worker_atomically_prefers_cancel_over_in_progress_retry(tmp_path: Path) -> None:
     service = InterleavingCancelJobService(tmp_path / "jobs.sqlite3")
     job = service.create_job(_request(request_id="in-progress-cancel-race"), _attribution())
