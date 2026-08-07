@@ -270,42 +270,54 @@ class ToolRegistry:
         # Skip selectors — they aggregate, they aren't providers themselves
         tools = [t for t in self._tools.values() if t.provider != "selector"]
 
-        for tool in tools:
-            cap = tool.capability
-            if cap not in menu:
-                menu[cap] = {"available": [], "unavailable": [], "total": 0, "configured": 0}
+        # Share one GET /v1/models across every dofe tool's status check in
+        # this enumeration. get_info() already embeds each tool's status (and
+        # the dofe tools' status + skills both consult the catalog), so without
+        # this a single menu fans out into one catalog call per dofe tool.
+        from tools.dofe.status import catalog_snapshot
 
-            info = tool.get_info()
-            status = tool.get_status()
-            entry = {
-                "name": tool.name,
-                "provider": tool.provider,
-                "runtime": tool.runtime.value,
-                "best_for": tool.best_for,
-                "dependencies": info.get("dependencies", []),
-                "install_instructions": tool.install_instructions,
-                "status": status.value,
-            }
-            for extra_key in (
-                "source_provider_menu",
-                "source_provider_summary",
-                "render_engines",
-                "remotion_note",
-                "provider_matrix",
-                "setup_offer",
-                "operation_statuses",
-                "resource_profiles",
-                "resource_profile_note",
-            ):
-                if extra_key in info:
-                    entry[extra_key] = info[extra_key]
+        with catalog_snapshot():
+            for tool in tools:
+                cap = tool.capability
+                if cap not in menu:
+                    menu[cap] = {
+                        "available": [],
+                        "unavailable": [],
+                        "total": 0,
+                        "configured": 0,
+                    }
 
-            if status == ToolStatus.AVAILABLE:
-                menu[cap]["available"].append(entry)
-                menu[cap]["configured"] += 1
-            else:
-                menu[cap]["unavailable"].append(entry)
-            menu[cap]["total"] += 1
+                info = tool.get_info()
+                status = ToolStatus(info["status"])
+                entry = {
+                    "name": tool.name,
+                    "provider": tool.provider,
+                    "runtime": tool.runtime.value,
+                    "best_for": tool.best_for,
+                    "dependencies": info.get("dependencies", []),
+                    "install_instructions": tool.install_instructions,
+                    "status": status.value,
+                }
+                for extra_key in (
+                    "source_provider_menu",
+                    "source_provider_summary",
+                    "render_engines",
+                    "remotion_note",
+                    "provider_matrix",
+                    "setup_offer",
+                    "operation_statuses",
+                    "resource_profiles",
+                    "resource_profile_note",
+                ):
+                    if extra_key in info:
+                        entry[extra_key] = info[extra_key]
+
+                if status == ToolStatus.AVAILABLE:
+                    menu[cap]["available"].append(entry)
+                    menu[cap]["configured"] += 1
+                else:
+                    menu[cap]["unavailable"].append(entry)
+                menu[cap]["total"] += 1
 
         for bucket in menu.values():
             bucket["available"].sort(key=lambda entry: (entry["provider"], entry["name"]))

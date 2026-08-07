@@ -35,7 +35,7 @@ from tools.dofe import (
 )
 from tools.dofe.models import resolve_alias, validate_catalog_alias
 from tools.dofe.runtime import build_metadata, run_dofe_generation
-from tools.dofe.status import configured_model_is_visible
+from tools.dofe.status import configured_model_is_visible, resolve_catalog
 
 MAX_REFERENCE_IMAGES = 9  # dev-guide §5.2: dofe enforces this server-side.
 
@@ -80,8 +80,11 @@ class DofeVideo(BaseTool):
         )
         if not selected:
             return list(self.agent_skills)
+        catalog, ok = resolve_catalog()
+        if not ok or catalog is None:
+            return list(self.agent_skills)
         try:
-            selected = validate_catalog_alias(selected, DofeClient().list_models())
+            selected = validate_catalog_alias(selected, catalog)
         except DofeError:
             return list(self.agent_skills)
         return list(
