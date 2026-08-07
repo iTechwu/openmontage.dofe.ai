@@ -518,3 +518,118 @@ def test_waiting_approval_and_terminal_jobs_are_not_claimed(tmp_path: Path) -> N
         lease_duration=timedelta(seconds=30),
         now=NOW,
     ) is None
+
+
+def _corrupt_lease_expiry(database_path: Path, job_id: str, value: object) -> None:
+    """Simulate a corrupted lease row: token present but expiry missing/illegal."""
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE openmontage_job_execution SET lease_expires_at = ? WHERE job_id = ?",
+            (value, job_id),
+        )
+
+
+def test_corrupted_null_expiry_record_is_rejected_and_reclaimable(
+    tmp_path: Path,
+) -> None:
+    """A lease row whose token is set but expiry is NULL cannot prove liveness,
+    so the active-lease check fails closed and claim_job reclaims the record.
+    This closes the fail-open gap where a stale owner kept writing while no new
+    Worker could take over."""
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request("corrupt-null"), _attribution())
+    lease = service.claim_job(
+        worker_id="worker-a",
+        lease_duration=timedelta(seconds=30),
+        now=NOW,
+    )
+    assert lease is not None
+    _corrupt_lease_expiry(service.database_path, job.job_id, None)
+
+    # Active check rejects: token matches, but no provable expiry (fail-closed).
+    with pytest.raises(JobLeaseError, match="no valid expiry"):
+        service.complete_stage(
+            job.job_id,
+            "research",
+            lease_token=lease.lease_token,
+            lease_now=NOW,
+        )
+
+    # The corrupted record is reclaimable: a new Worker takes over.
+    reclaimed = service.claim_job(
+        worker_id="worker-b",
+        lease_duration=timedelta(seconds=30),
+        now=NOW,
+    )
+    assert reclaimed is not None
+    assert reclaimed.job_id == job.job_id
+    assert reclaimed.lease_token != lease.lease_token
+
+
+def test_corrupted_illegal_expiry_record_is_rejected_and_reclaimable(
+    tmp_path: Path,
+) -> None:
+    """An unparseable expiry string parses to None, so the same fail-closed +
+    reclaimable contract applies as for a NULL expiry."""
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request("corrupt-illegal"), _attribution())
+    lease = service.claim_job(
+        worker_id="worker-a",
+        lease_duration=timedelta(seconds=30),
+        now=NOW,
+    )
+    assert lease is not None
+    _corrupt_lease_expiry(service.database_path, job.job_id, "not-a-timestamp")
+
+    with pytest.raises(JobLeaseError, match="no valid expiry"):
+        service.complete_stage(
+            job.job_id,
+            "research",
+            lease_token=lease.lease_token,
+            lease_now=NOW,
+        )
+
+    reclaimed = service.claim_job(
+        worker_id="worker-b",
+        lease_duration=timedelta(seconds=30),
+        now=NOW,
+    )
+    assert reclaimed is not None
+    assert reclaimed.job_id == job.job_id
+
+
+def test_expired_token_rejected_on_legacy_public_api_but_settlement_succeeds(
+    tmp_path: Path,
+) -> None:
+    """Legacy public mutation APIs require an ACTIVE lease: an expired token is
+    rejected. The atomic settlement path stays fencing-only, so the same expired
+    token can still settle. This is the active/fencing split for the public
+    surface — previously these legacy APIs were fencing-only and let an expired
+    token complete a stage or job."""
+    service = JobService(tmp_path / "jobs.sqlite3")
+    service.create_job(_request("legacy-active"), _attribution())
+    lease = service.claim_job(
+        worker_id="worker-a",
+        lease_duration=timedelta(seconds=30),
+        now=NOW,
+    )
+    assert lease is not None
+    expired_now = NOW + timedelta(seconds=31)
+
+    # Legacy public API (complete_stage) now enforces an active lease.
+    with pytest.raises(JobLeaseError, match="expired"):
+        service.complete_stage(
+            lease.job_id,
+            "research",
+            lease_token=lease.lease_token,
+            lease_now=expired_now,
+        )
+
+    # Settlement stays fencing-only: the expired-but-current token still settles.
+    settled = service.release_lease_or_confirm_cancel(
+        lease.job_id,
+        lease_token=lease.lease_token,
+        reset_attempts=True,
+        now=expired_now,
+    )
+    assert settled.status != JobStatus.CANCELLED

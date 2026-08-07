@@ -312,26 +312,41 @@ class JobService:
             expires_at = effective_now + lease_duration
             rows = connection.execute(
                 """
-                SELECT job.job_id, job.snapshot_json
+                SELECT job.job_id, job.snapshot_json,
+                       execution.lease_token AS exec_token,
+                       execution.lease_expires_at AS exec_expiry
                 FROM openmontage_job AS job
                 LEFT JOIN openmontage_job_execution AS execution
                   ON execution.job_id = job.job_id
-                WHERE (execution.lease_token IS NULL OR execution.lease_expires_at <= ?)
-                  AND (execution.next_attempt_at IS NULL OR execution.next_attempt_at <= ?)
+                WHERE (execution.next_attempt_at IS NULL OR execution.next_attempt_at <= ?)
                 ORDER BY job.created_at ASC
                 """,
-                (effective_now.isoformat(), effective_now.isoformat()),
+                (effective_now.isoformat(),),
             ).fetchall()
             selected: JobSnapshot | None = None
             for row in rows:
                 candidate = JobSnapshot.model_validate_json(row["snapshot_json"])
-                if candidate.status in {
+                if candidate.status not in {
                     JobStatus.QUEUED,
                     JobStatus.RUNNING,
                     JobStatus.CANCEL_REQUESTED,
                 }:
-                    selected = candidate
-                    break
+                    continue
+                # A lease is reclaimable exactly when it is not provably live:
+                # no token, or an expiry that is missing/illegal/past. Parsing
+                # here (rather than in SQL) keeps reclaim symmetric with the
+                # active-lease check in _require_active_lease, so a corrupted
+                # expiry row is recoverable instead of stranding the Job.
+                exec_token = row["exec_token"]
+                parsed_expiry = _parse_lease_expiry(row["exec_expiry"])
+                if (
+                    exec_token is not None
+                    and parsed_expiry is not None
+                    and parsed_expiry > effective_now
+                ):
+                    continue
+                selected = candidate
+                break
             if selected is None:
                 return None
 
@@ -520,7 +535,7 @@ class JobService:
     ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
-            self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=True)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=False)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             return self._publish_artifact_snapshot(connection, snapshot, artifact)
 
@@ -762,7 +777,7 @@ class JobService:
     ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
-            self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=True)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=False)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             return self._complete_stage_snapshot(connection, snapshot, stage_code)
 
@@ -845,7 +860,7 @@ class JobService:
     ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
-            self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=True)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=False)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             return self._request_stage_approval_snapshot(
                 connection,
@@ -970,7 +985,7 @@ class JobService:
 
         with self._connect() as connection:
             self._begin_write(connection)
-            self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=True)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=False)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             return self._fail_job_snapshot(
                 connection,
@@ -1064,7 +1079,7 @@ class JobService:
     ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
-            self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=True)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=False)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             return self._confirm_cancel_snapshot(connection, snapshot)
 
@@ -1077,7 +1092,7 @@ class JobService:
     ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
-            self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=True)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=False)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             return self._complete_job_snapshot(connection, snapshot)
 
@@ -1403,7 +1418,15 @@ class JobService:
         if row is None or row["lease_token"] != lease_token:
             raise JobLeaseError("Job lease token is no longer active")
         expires_at = _parse_lease_expiry(row["lease_expires_at"])
-        if expires_at is not None and expires_at <= now:
+        if expires_at is None:
+            # Fail-closed: a token is present but its expiry is missing or
+            # unparseable, so liveness cannot be proven. Honoring the token
+            # here would fail-open and let a stale owner keep driving the Job
+            # while a new Worker cannot reclaim it (claim_job treats this same
+            # token-with-no-expiry state as reclaimable). The corrupted lease
+            # is recovered by the next claim, not by trusting the stale token.
+            raise JobLeaseError("Job lease has no valid expiry")
+        if expires_at <= now:
             raise JobLeaseError("Job lease has expired")
         return row
 
