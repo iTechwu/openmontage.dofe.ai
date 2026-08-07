@@ -34,78 +34,52 @@ _HOP_HEADERS = {
 _MAX_REQUEST_BYTES = 32 * 1024 * 1024
 _MAX_CACHED_RESPONSE_BYTES = 8 * 1024 * 1024
 _LOGGER = logging.getLogger("openmontage.delegation_proxy")
-# The Codex CLI revision the external-blocker analysis below was verified
-# against. This is the single code-side source of that version: it is kept in
-# sync with Dockerfile's CODEX_CLI_VERSION (the canonical build-time pin) and
-# with docs/DOCKER_AND_AGENTS.md by test_codex_version_pin_is_the_single_source.
+# The Codex CLI revision the KB-001 analysis below was verified against. This is
+# the single code-side source of that version: it is kept in sync with
+# Dockerfile's CODEX_CLI_VERSION (the canonical build-time pin) and with
+# docs/DOCKER_AND_AGENTS.md by test_codex_version_pin_is_the_single_source.
 # Bumping the pin MUST trigger re-verification of the per-call-identity claim in
-# the TRACKED EXTERNAL BLOCKER comment, and a re-run of the capability probe.
+# the KB-001 comment, and a re-run of the capability probe.
 PINNED_CODEX_CLI_VERSION = "0.146.0"
 # ---------------------------------------------------------------------------
-# TRACKED EXTERNAL BLOCKER (KB-001) — Responses same-content wrong-merge is NOT
-# closed. Referenceable tracking: docs/KNOWN_BLOCKERS.md#kb-001. Audited probe
-# state: docs/codex_capability_probe.json; enforced by
-# tests/openmontage/test_codex_capability_probe.py (fails if Codex gains a
-# per-call identity, demanding the fingerprint fallback below be removed).
+# KB-001 — Responses same-content wrong-merge is MITIGATED (not an open bug).
+# Referenceable tracking: docs/KNOWN_BLOCKERS.md#kb-001. Audited probe state:
+# docs/codex_capability_probe.json; enforced by
+# tests/openmontage/test_codex_capability_probe.py.
 #
-# Without a caller-supplied per-call identity, two genuinely distinct same-
-# content Responses calls within one stage/attempt collapse onto one invocation
-# and the second replays the first cached response, losing the second call's
-# execution, billing, and attribution. This is an ACCEPTED, DOCUMENTED limitation
-# — not a completed feature. The interim mitigation is observability only: every
-# fingerprint-keyed replay is logged (replay_key_source="content_fingerprint"),
-# and Fix A (cli._configure_logging) makes that record emit under the default
-# Worker/CLI config. The real fix needs a stable per-call identity
-# (stage + attempt + call_sequence) that the CALLER supplies; this pinned Codex
-# revision (PINNED_CODEX_CLI_VERSION, verified in the shipped binary) cannot
-# inject one — see the policy below. Until Codex exposes that capability, this
-# stays open.
-# ---------------------------------------------------------------------------
-# Logical-call identity policy (deliberate, audited — not a heuristic).
-#
-# Codex is the only executor whose OpenAI-compatible traffic crosses this proxy,
-# and it does not emit an OpenMontage-specific logical-call header. Its own
+# Codex emits no OpenMontage-specific logical-call header, and its own
 # X-Request-Id / Idempotency-Key are regenerated per ephemeral session, so
 # honoring them would give every crash-restart a fresh invocation id and defeat
-# replay recovery. With no caller-supplied stable identity available, the proxy
-# must pick one of two failure modes and apply it consistently:
+# replay recovery. With no caller-supplied stable per-call identity, the proxy
+# keys replay on the content fingerprint. That ALONE would wrong-merge two
+# genuinely distinct same-content calls within one stage/attempt (the second
+# would replay the first cached response, losing its execution/billing/
+# attribution). The per-instance _locally_served guard in _forward closes that:
 #
-#   * wrong-merge — two genuinely distinct same-content calls within one
-#     stage/attempt collapse onto one invocation and the second replays the
-#     first cached response; vs.
-#   * double-bill — every call is a new invocation, so a crash-restart re-bills.
+#   * a same-content call re-arriving SEQUENTIALLY within ONE live proxy
+#     instance is treated as a distinct call — forwarded again with its own
+#     invocation id, never collapsed onto the first;
+#   * a same-content call re-arriving in a NEW instance (worker restart)
+#     replays the persisted response from the durable ledger (recovery, no
+#     re-bill), because each instance starts with an empty _locally_served;
+#   * CONCURRENT in-flight retries still dedup on the content fingerprint —
+#     the sibling has already committed to the shared seed before _locally_served
+#     is marked at serve completion.
 #
-# This proxy deliberately chooses dedup: when the logical-call header is absent
-# the stable content fingerprint below is the replay key, so a same-content
-# crash-replay recovers the cached response (no re-bill) and genuinely different
-# content gets a new invocation. The accepted, documented limitation is the
-# wrong-merge case above — bounded to a single stage/attempt and rare in
-# practice because Codex rarely issues byte-identical Responses calls twice in
-# one stage. Callers that CAN supply a stable identity (e.g. native tool paths)
-# set X-OpenMontage-Logical-Call-Id, which is then used strictly and never
-# falls back to the fingerprint.
+# Callers that CAN supply a stable identity (native tool paths) set
+# X-OpenMontage-Logical-Call-Id, which is used strictly and never falls back.
 #
-# A true per-call identity (stage + attempt + call_sequence) is the only way to
-# fully close the wrong-merge case, but it must originate on the caller side:
-# this proxy cannot tell a retransmitted call from a distinct same-content call
-# by bytes alone. Codex owns its HTTP client, so the question is whether the
-# model-provider config OpenMontage sets via
-# pipeline_executor._configure_agent_command_for_delegation can carry a value
-# that varies per call. Verified against codex-cli == PINNED_CODEX_CLI_VERSION
-# (the pinned revision, inspected in the shipped binary): ModelProviderInfo exposes only
-# base_url / query_params / env_key / wire_api / auth flags — there is NO
-# per-request header field (http_headers / env_http_headers exist only for HTTP
-# MCP servers, resolved once "executor-side", i.e. static-per-process), and no
-# model-request-level Idempotency-Key (the idempotency strings in the binary are
-# billing/credits internals and MCP tool annotations). Every knob OpenMontage
-# can turn is therefore static-per-invocation, so any identity derived from it
-# would collapse every call in a stage onto one id — strictly worse than the
-# content fingerprint, which at least distinguishes different-content calls. The
-# real fix is blocked on a Codex capability (per-call header interpolation or a
-# stable per-call Idempotency-Key) that is not available today. Until then,
-# every replay this proxy serves is logged with replay_key_source =
-# "logical_call_id" (the safe case) or "content_fingerprint" (the wrong-merge-
-# prone case), so the limitation is observable and auditable rather than silent.
+# Residual edge: two CONCURRENT same-content arrivals AFTER the instance already
+# served that content both forward (each gets a distinct seed). This is the
+# conservative choice — prefer a possible double-bill over any wrong-merge —
+# and is far rarer than the sequential distinct calls the guard now handles.
+# A native Codex per-call identity (per-call header interpolation or a stable
+# per-call Idempotency-Key) would remove the need for the _locally_served
+# heuristic entirely; the capability probe tracks when that arrives. Verified
+# against codex-cli == PINNED_CODEX_CLI_VERSION: ModelProviderInfo exposes only
+# base_url / query_params / env_key / wire_api / auth flags — no per-request
+# header field (http_headers / env_http_headers exist only for HTTP MCP servers,
+# resolved once executor-side) and no model-request-level Idempotency-Key.
 _LOGICAL_CALL_HEADERS = (
     "X-OpenMontage-Logical-Call-Id",
 )

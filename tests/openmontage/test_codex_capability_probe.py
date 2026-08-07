@@ -1,9 +1,11 @@
 """Capability probe for tracked external blocker KB-001.
 
 KB-001 (docs/KNOWN_BLOCKERS.md) records that Codex has no per-call model-request
-identity, so ``DelegationSigningProxy`` dedups Responses on the content
-fingerprint. That is an accepted limitation, NOT a closed feature. These tests
-make the blocker non-drifting:
+identity, so ``DelegationSigningProxy`` keys Responses replay on the content
+fingerprint as the durable cross-instance key. The same-instance wrong-merge is
+MITIGATED in OpenMontage by a per-instance distinct-call guard; what remains
+open is the external capability (a native Codex per-call identity) that would
+let that guard be removed. These tests make the blocker non-drifting:
 
 * the audited manifest stays in sync with the pinned Codex version (so a bump
   forces a re-probe and a re-verified blocker status);
