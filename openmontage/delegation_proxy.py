@@ -47,7 +47,7 @@ def _request_fingerprint(method: str, path: str, body: bytes | None, content_typ
                 parsed = {
                     key: value
                     for key, value in parsed.items()
-                    if key not in {"client_metadata", "prompt_cache_key"}
+                    if key not in {"prompt_cache_key"}
                 }
             normalized_body = json.dumps(
                 parsed,
