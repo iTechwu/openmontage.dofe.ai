@@ -465,6 +465,7 @@ _PASSING_CAPABILITY = {
         "fields": [
             {"key": "durationSeconds", "min": 5},
             {"key": "ratio", "options": ["16:9", "9:16"]},
+            {"key": "generateAudio", "type": "switch", "labelKey": "audio"},
         ]
     },
     "output": {"mode": "task"},
@@ -568,3 +569,59 @@ def test_execute_blocks_paid_generation_when_live_probe_is_blocked(monkeypatch):
     assert "not supported" in result.error.lower()
     assert submit_calls == []
     assert len(list_calls) == 1
+
+
+def test_video_selector_shares_one_catalog_and_capability_per_request(monkeypatch):
+    """A single selector request fetches catalog and capability exactly once."""
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_VIDEO_MODEL", "catalog-video")
+
+    list_calls: list[int] = []
+    monkeypatch.setattr(
+        DofeClient,
+        "list_models",
+        lambda _self: list_calls.append(1) or [{"id": "catalog-video"}],
+    )
+    capability_calls: list[str] = []
+    monkeypatch.setattr(
+        DofeClient,
+        "get_playground_capability",
+        lambda _self, model: capability_calls.append(model) or _PASSING_CAPABILITY,
+    )
+    monkeypatch.setattr(
+        DofeClient,
+        "submit_and_collect",
+        lambda _self, *_a, **_k: {
+            "task_id": "task-1",
+            "status": "succeeded",
+            "assets": [{"url": "https://cdn.test/out.mp4", "kind": "video"}],
+        },
+    )
+    monkeypatch.setattr(
+        DofeClient,
+        "download",
+        lambda _self, _url, path: Path(path).write_bytes(b"video" * 300),
+    )
+
+    from tools.tool_registry import ToolRegistry
+
+    registry = ToolRegistry()
+    registry.discover("tools.video")
+    selector = registry.get("video_selector")
+
+    result = selector.execute(
+        {
+            "prompt": "a cat playing piano",
+            "operation": "text_to_video",
+            "allowed_providers": ["dofe"],
+            "execution_scope": "sample",
+            "allow_degraded_preflight": True,
+        }
+    )
+
+    assert result.success
+    assert result.data["selected_tool"] == "dofe_video"
+    # Selection, preflight, and execution all shared one catalog snapshot.
+    assert len(list_calls) == 1
+    # The capability probe was also cached and executed only once per model.
+    assert capability_calls == ["catalog-video"]

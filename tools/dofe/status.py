@@ -11,10 +11,12 @@ from .client import DofeClient
 from .errors import DofeError
 from .models import catalog_model_ids, resolve_alias
 
-# Snapshot holder shared across status checks inside one ``catalog_snapshot()``
-# context. ``None`` = no active snapshot (each check fetches its own catalog).
-# A holder dict caches the first fetch so a single provider-menu enumeration
-# issues one GET /v1/models for every dofe tool instead of one per tool.
+# Snapshot holder shared across dofe calls inside one ``catalog_snapshot()``
+# context. ``None`` = no active snapshot (each call fetches its own catalog).
+# A holder dict caches the first ``GET /v1/models`` and any
+# ``GET /v1/models/{id}/playground`` capability lookups, so a single video
+# selector request issues one catalog call and one capability call instead of
+# one per selection/preflight/execution phase.
 _CATALOG_SNAPSHOT: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "dofe_catalog_snapshot", default=None
 )
@@ -56,20 +58,38 @@ def resolve_catalog() -> tuple[Any, bool]:
 
 @contextmanager
 def catalog_snapshot():
-    """Share one GET /v1/models across all dofe status checks in this block.
+    """Share one GET /v1/models (and capability probes) across all dofe calls.
 
-    The fetch is lazy: nothing is requested until a status check actually
-    needs the catalog, so wrapping a menu that has no dofe tool costs zero
-    calls. Nested snapshots reuse the outer one (no extra fetch).
+    The fetch is lazy: nothing is requested until a status check or video
+    preflight actually needs it, so wrapping a menu that has no dofe tool costs
+    zero calls. Nested snapshots reuse the outer one (no extra fetch).
     """
     if _CATALOG_SNAPSHOT.get() is not None:
         yield
         return
-    token = _CATALOG_SNAPSHOT.set({})
+    token = _CATALOG_SNAPSHOT.set({"capabilities": {}})
     try:
         yield
     finally:
         _CATALOG_SNAPSHOT.reset(token)
+
+
+def resolve_playground_capability(client: DofeClient, model_id: str) -> Any:
+    """Return the live playground capability for ``model_id``, reusing snapshot.
+
+    Inside a ``catalog_snapshot()`` block the result is cached per model id so
+    selection, preflight, and execution share one ``GET /v1/models/{id}/playground``
+    per model. Outside a snapshot the call is made directly.
+    """
+    holder = _CATALOG_SNAPSHOT.get()
+    if holder is not None:
+        cached = holder["capabilities"].get(model_id)
+        if cached is not None:
+            return cached
+        capability = client.get_playground_capability(model_id)
+        holder["capabilities"][model_id] = capability
+        return capability
+    return client.get_playground_capability(model_id)
 
 
 def configured_model_is_visible(

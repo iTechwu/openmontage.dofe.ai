@@ -314,6 +314,18 @@ class VideoSelector(BaseTool):
         return tool.estimate_runtime(self._adapt_inputs_for_tool(tool, inputs)) if tool else 0.0
 
     def execute(self, inputs: dict[str, object]) -> ToolResult:
+        """Route a video generation request through selection, preflight, and execution.
+
+        A request-scoped catalog/capability snapshot is shared across the three
+        phases so a single request issues at most one ``GET /v1/models`` and one
+        capability probe per model.
+        """
+        from tools.dofe.status import catalog_snapshot
+
+        with catalog_snapshot():
+            return self._execute_impl(inputs)
+
+    def _execute_impl(self, inputs: dict[str, object]) -> ToolResult:
         from lib.scoring import rank_providers
 
         candidates = self._providers()

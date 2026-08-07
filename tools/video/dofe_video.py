@@ -35,7 +35,11 @@ from tools.dofe import (
 )
 from tools.dofe.models import resolve_alias, validate_catalog_alias
 from tools.dofe.runtime import build_metadata, run_dofe_generation
-from tools.dofe.status import configured_model_is_visible, resolve_catalog
+from tools.dofe.status import (
+    configured_model_is_visible,
+    resolve_catalog,
+    resolve_playground_capability,
+)
 
 MAX_REFERENCE_IMAGES = 9  # dev-guide §5.2: dofe enforces this server-side.
 
@@ -238,9 +242,11 @@ class DofeVideo(BaseTool):
         try:
             client = DofeClient()
             if catalog is None:
-                catalog = client.list_models()
+                catalog, ok = resolve_catalog()
+                if not ok or catalog is None:
+                    raise DofeError("DoFe model catalog unavailable")
             model = validate_catalog_alias(requested_model, catalog)
-            capability = client.get_playground_capability(model)
+            capability = resolve_playground_capability(client, model)
         except DofeError as exc:
             return _blocked_probe(
                 operation=operation,
