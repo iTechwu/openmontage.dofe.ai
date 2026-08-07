@@ -65,12 +65,19 @@ def _now() -> datetime:
 
 
 def _parse_lease_expiry(raw: str | None) -> datetime | None:
-    """Parse a stored lease expiry, tolerating naive (legacy) timestamps."""
-    if not raw:
+    """Parse a stored lease expiry, tolerating legacy/naive and corrupt values.
+
+    The ``openmontage_job_execution`` table is not declared STRICT, so a corrupt
+    write can store a BLOB or a number instead of an ISO-8601 string. Any such
+    value fails closed to ``None`` ("no valid expiry") so the active-lease check
+    rejects the token and the claim/reclaim path can take the record back,
+    rather than raising and leaving a stuck token in place.
+    """
+    if not isinstance(raw, str) or not raw.strip():
         return None
     try:
         parsed = datetime.fromisoformat(raw)
-    except ValueError:
+    except (ValueError, TypeError):
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)

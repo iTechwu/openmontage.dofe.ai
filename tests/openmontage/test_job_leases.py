@@ -598,6 +598,94 @@ def test_corrupted_illegal_expiry_record_is_rejected_and_reclaimable(
     assert reclaimed.job_id == job.job_id
 
 
+@pytest.mark.parametrize(
+    "corrupt_value",
+    [
+        pytest.param(b"bad", id="blob"),
+        pytest.param(12345, id="integer"),
+        pytest.param(12.5, id="float"),
+    ],
+)
+def test_corrupted_non_string_expiry_record_is_rejected_and_reclaimable(
+    tmp_path: Path,
+    corrupt_value: object,
+) -> None:
+    """A non-STRICT SQLite column can hold a BLOB or number instead of text.
+
+    datetime.fromisoformat() raises TypeError (not ValueError) on those types,
+    so the parser must fail closed to None and the record must stay reclaimable,
+    rather than crashing the active-lease check or the Worker claim loop.
+    """
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request("corrupt-nonstring"), _attribution())
+    lease = service.claim_job(
+        worker_id="worker-a",
+        lease_duration=timedelta(seconds=30),
+        now=NOW,
+    )
+    assert lease is not None
+    _corrupt_lease_expiry(service.database_path, job.job_id, corrupt_value)
+
+    with pytest.raises(JobLeaseError, match="no valid expiry"):
+        service.complete_stage(
+            job.job_id,
+            "research",
+            lease_token=lease.lease_token,
+            lease_now=NOW,
+        )
+
+    reclaimed = service.claim_job(
+        worker_id="worker-b",
+        lease_duration=timedelta(seconds=30),
+        now=NOW,
+    )
+    assert reclaimed is not None
+    assert reclaimed.job_id == job.job_id
+
+
+@pytest.mark.parametrize(
+    "stored_expiry, still_active",
+    [
+        # 12:00:01Z written as a +05:30 offset — strictly after NOW (12:00:00Z).
+        pytest.param("2026-08-05T17:30:01+05:30", True, id="future-offset-active"),
+        # 01:00:00Z written as a +05:30 offset — before NOW.
+        pytest.param("2026-08-05T06:30:00+05:30", False, id="past-offset-expired"),
+    ],
+)
+def test_offset_aware_expiry_compared_by_instant_for_reclaim(
+    tmp_path: Path,
+    stored_expiry: str,
+    still_active: bool,
+) -> None:
+    """An offset-aware expiry is compared by absolute instant, so a non-UTC zone
+    never flips a future expiry into a reclaimable record or vice versa.
+
+    Exercises the claim/reclaim path (which parses expiry in Python); paired
+    with the non-string tests above it covers the abnormal-timezone case the
+    parser must not mishandle.
+    """
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(f"offset-{still_active}"), _attribution())
+    first = service.claim_job(
+        worker_id="worker-a",
+        lease_duration=timedelta(seconds=30),
+        now=NOW,
+    )
+    assert first is not None
+    _corrupt_lease_expiry(service.database_path, job.job_id, stored_expiry)
+
+    reclaimed = service.claim_job(
+        worker_id="worker-b",
+        lease_duration=timedelta(seconds=30),
+        now=NOW,
+    )
+    if still_active:
+        assert reclaimed is None  # token still live → not reclaimable
+    else:
+        assert reclaimed is not None
+        assert reclaimed.job_id == job.job_id
+
+
 def test_expired_token_rejected_on_legacy_public_api_but_settlement_succeeds(
     tmp_path: Path,
 ) -> None:
