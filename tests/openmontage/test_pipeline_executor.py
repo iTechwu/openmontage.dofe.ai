@@ -476,6 +476,42 @@ sys.exit(7)
     assert "sk-abc123" not in log["stderrTail"]
 
 
+def test_executor_classifies_missing_responses_route_as_endpoint_configuration_error(
+    tmp_path: Path,
+) -> None:
+    job, projects_dir, _ = _job(tmp_path)
+    diagnostic_script = """
+import sys
+sys.stderr.write("Reconnecting after connection failure: 404 Cannot POST /api/v1/responses\\n")
+sys.exit(7)
+"""
+    executor = AgentCommandPipelineExecutor(
+        [sys.executable, "-c", diagnostic_script],
+        timeout_seconds=5,
+    )
+
+    with pytest.raises(PipelineExecutionError):
+        executor.execute(
+            StageAssignment.from_job(
+                job,
+                stage="research",
+                stage_attempt=1,
+                projects_dir=projects_dir,
+            )
+        )
+
+    log = json.loads(
+        (
+            projects_dir
+            / job.job_id
+            / ".openmontage"
+            / "executor"
+            / "research-attempt-1.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert log["diagnosticCode"] == "MODEL_ENDPOINT_CONFIGURATION_ERROR"
+
+
 def test_executor_redacts_delegated_credential_and_structured_secrets_from_diagnostics(
     tmp_path: Path,
 ) -> None:

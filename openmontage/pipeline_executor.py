@@ -789,6 +789,11 @@ def _classify_diagnostic(stdout: Any, stderr: Any) -> str:
         return "CLI_CONFIGURATION_ERROR"
     if any(marker in text for marker in ("unauthorized", "forbidden", "401", "403", "api key", "access key", "invalid token")):
         return "MODEL_AUTH_ERROR"
+    if "404" in text and any(
+        marker in text
+        for marker in ("cannot post", "not found", "/responses", "/chat/completions")
+    ):
+        return "MODEL_ENDPOINT_CONFIGURATION_ERROR"
     if any(marker in text for marker in ("timeout", "timed out", "deadline exceeded")):
         return "MODEL_TIMEOUT"
     if any(marker in text for marker in ("connection", "connect", "network", "dns", "refused", "reset by peer", "502", "503", "504")):

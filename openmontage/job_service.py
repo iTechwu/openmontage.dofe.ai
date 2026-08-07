@@ -1300,7 +1300,9 @@ class JobService:
                     # AgentSpace's signed event contract caps failure summaries at
                     # 500 characters. Full executor diagnostics remain in the
                     # per-assignment execution log.
-                    "message": message[:500],
+                    # Executor diagnostics place the failure closest to the end.
+                    # Preserve that root cause when crossing the 500-char event contract.
+                    "message": message[-500:],
                     "retryable": retryable,
                 },
             },

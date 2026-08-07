@@ -405,13 +405,14 @@ def test_fail_job_limits_cross_service_error_message_to_event_contract(tmp_path:
     service.fail_job(
         job.job_id,
         code="OPENMONTAGE_AGENT_EXECUTOR_FAILED",
-        message="x" * 800,
+        message="startup context: " + "x" * 800 + " root cause: endpoint not found",
         retryable=False,
     )
 
     event = service.list_events(job.job_id)[-1]
     assert len(event.payload["error"]["message"]) == 500
-    assert event.payload["error"]["message"] == "x" * 500
+    assert event.payload["error"]["message"].endswith("root cause: endpoint not found")
+    assert not event.payload["error"]["message"].startswith("startup context")
 
 
 def test_cancellation_uses_requested_then_confirmed_terminal_states(tmp_path: Path) -> None:
