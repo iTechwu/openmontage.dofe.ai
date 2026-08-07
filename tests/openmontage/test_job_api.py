@@ -427,8 +427,37 @@ async def test_mcp_job_tools_do_not_expose_trusted_attribution_as_model_input(tm
     }
     for definition_name in nested_refs | input_refs:
         assert submit_schema["$defs"][definition_name]["additionalProperties"] is False
+    for command_tool in ("cancel_video_job", "approve_video_stage"):
+        command_schema = by_name[command_tool].input_schema
+        assert {"expected_sequence", "idempotency_key"}.issubset(
+            command_schema["required"]
+        )
     assert created.structured_content["status"] == "QUEUED"
     assert artifacts.structured_content["artifacts"] == []
+
+
+@pytest.mark.asyncio
+async def test_mcp_cancel_replays_the_same_sequence_fenced_command(tmp_path: Path) -> None:
+    from mcp import Client
+
+    service = JobService(tmp_path / "jobs.sqlite3")
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
+    ) as client:
+        created = await client.call_tool("submit_video_job", {"request": _request()})
+        job_id = created.structured_content["jobId"]
+        command = {
+            "job_id": job_id,
+            "expected_sequence": 1,
+            "idempotency_key": "mcp-cancel-job-at-sequence-1",
+        }
+        first = await client.call_tool("cancel_video_job", command)
+        repeated = await client.call_tool("cancel_video_job", command)
+
+    assert first.structured_content["lastSequence"] == 2
+    assert repeated.structured_content["lastSequence"] == 2
+    assert [event.sequence for event in service.list_events(job_id)] == [1, 2]
 
 
 @pytest.mark.asyncio

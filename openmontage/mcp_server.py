@@ -105,29 +105,50 @@ def create_server(
         return snapshot.to_wire()
 
     @server.tool()
-    def cancel_video_job(job_id: str, ctx: Context) -> dict[str, Any]:
-        """Request cancellation of a video Job."""
+    def cancel_video_job(
+        job_id: str,
+        expected_sequence: int,
+        idempotency_key: str,
+        ctx: Context,
+    ) -> dict[str, Any]:
+        """Request cancellation with optimistic fencing and a stable retry key."""
         from openmontage.job_api import require_same_workspace
 
         attribution = resolve_attribution(ctx.headers)
         snapshot = jobs().get_job(job_id)
         require_same_workspace(snapshot, attribution)
-        return jobs().request_cancel(job_id).to_wire()
+        if not idempotency_key.strip():
+            raise ValueError("idempotency_key must be non-empty")
+        return jobs().request_cancel(
+            job_id,
+            expected_sequence=expected_sequence,
+            idempotency_key=idempotency_key,
+        ).to_wire()
 
     @server.tool()
     def approve_video_stage(
         job_id: str,
         stage: str,
+        expected_sequence: int,
+        idempotency_key: str,
         ctx: Context,
         approved: bool = True,
     ) -> dict[str, Any]:
-        """Resolve a pending video stage approval."""
+        """Resolve approval with optimistic fencing and a stable retry key."""
         from openmontage.job_api import require_same_workspace
 
         attribution = resolve_attribution(ctx.headers)
         snapshot = jobs().get_job(job_id)
         require_same_workspace(snapshot, attribution)
-        return jobs().resolve_stage_approval(job_id, stage, approved=approved).to_wire()
+        if not idempotency_key.strip():
+            raise ValueError("idempotency_key must be non-empty")
+        return jobs().resolve_stage_approval(
+            job_id,
+            stage,
+            approved=approved,
+            expected_sequence=expected_sequence,
+            idempotency_key=idempotency_key,
+        ).to_wire()
 
     @server.tool()
     def list_video_job_events(
