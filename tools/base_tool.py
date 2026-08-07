@@ -433,13 +433,22 @@ class BaseTool(ABC):
             "would_execute": True,
         }
 
-    def probe_provider_contract(self, inputs: dict[str, Any]) -> dict[str, Any]:
+    def probe_provider_contract(
+        self,
+        inputs: dict[str, Any],
+        *,
+        catalog: Any = None,
+    ) -> dict[str, Any]:
         """Probe a provider's live, side-effect-free contract when supported.
 
         Provider tools may override this to query authoritative model metadata
         or an input schema without submitting a paid generation. The default is
         deliberately honest: dependency availability does not prove live model
         entitlement or a current remote interface.
+
+        ``catalog`` may carry a tenant ``GET /v1/models`` snapshot already fetched
+        by the caller; callers that share a snapshot avoid redundant catalog
+        round-trips across selection, preflight, and execution.
         """
         return {
             "status": "not_supported",

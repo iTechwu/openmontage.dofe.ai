@@ -532,3 +532,39 @@ def test_execute_runs_live_probe_and_shares_catalog_before_generation(monkeypatc
     assert capability_calls == ["catalog-video"]
     assert len(submit_calls) == 1
     assert len(list_calls) == 1
+
+
+def test_execute_blocks_paid_generation_when_live_probe_is_blocked(monkeypatch):
+    """The shared paid boundary fail-closes when the live contract is blocked."""
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_VIDEO_MODEL", "catalog-video")
+
+    list_calls: list[int] = []
+    monkeypatch.setattr(
+        DofeClient,
+        "list_models",
+        lambda _self: list_calls.append(1) or [{"id": "catalog-video"}],
+    )
+    submit_calls: list[int] = []
+    monkeypatch.setattr(
+        DofeClient,
+        "submit_and_collect",
+        lambda self, *a, **k: submit_calls.append(1),
+    )
+
+    def blocked_probe(self, inputs, *, catalog=None):
+        return {
+            "status": "blocked",
+            "errors": ["operation reference_to_video is not supported by model catalog-video"],
+        }
+
+    monkeypatch.setattr(DofeVideo, "probe_provider_contract", blocked_probe)
+
+    result = DofeVideo().execute(
+        {"prompt": "a cat playing piano", "operation": "reference_to_video"}
+    )
+
+    assert not result.success
+    assert "not supported" in result.error.lower()
+    assert submit_calls == []
+    assert len(list_calls) == 1

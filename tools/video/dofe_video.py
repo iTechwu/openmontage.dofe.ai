@@ -495,27 +495,16 @@ class DofeVideo(BaseTool):
             self.check_dependencies()
         except DependencyError as exc:
             return ToolResult(success=False, error=str(exc))
-        # Live provider preflight enforced at the paid execution boundary: a
-        # caller that skipped the Skill (or passed live_preflight=false) still
-        # cannot reach paid generation without a passing live contract. The
-        # tenant catalog is fetched once and shared with run_dofe_generation so
-        # the gate adds no extra GET /v1/models (dev-guide §model-catalog).
-        try:
-            catalog = DofeClient().list_models()
-        except DofeError as exc:
+        # The shared paid boundary in run_dofe_generation enforces the live
+        # provider preflight and validates the exact catalog model. Fetch the
+        # catalog here once so it can be reused by the boundary gate without a
+        # second GET /v1/models (dev-guide §model-catalog).
+        catalog, ok = resolve_catalog()
+        if not ok or catalog is None:
             return ToolResult(
                 success=False,
                 data={"provider": "dofe"},
-                error=f"DoFe live model catalog is unavailable: {exc}",
-            )
-        probe = self.probe_provider_contract(inputs, catalog=catalog)
-        if probe.get("status") != "passed":
-            return ToolResult(
-                success=False,
-                data={"provider": "dofe", "preflight": probe},
-                error="; ".join(
-                    probe.get("errors") or ["DoFe live preflight blocked paid generation"]
-                ),
+                error="DoFe live model catalog is unavailable",
             )
         return run_dofe_generation(self, inputs, catalog=catalog)
 

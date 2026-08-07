@@ -31,6 +31,7 @@ from .errors import (
 )
 from .media import sanitize_for_log
 from .models import catalog_model_ids, config_env_name, validate_catalog_alias
+from .status import catalog_snapshot
 
 ARTIFACT_MIN_BYTES = 1024  # dev-guide §4.4: image/audio/video ≥ 1KB
 
@@ -283,6 +284,21 @@ def run_dofe_generation(
     *,
     catalog: Any = None,
 ) -> ToolResult:
+    """Execute a dofe generation end-to-end inside a shared catalog snapshot.
+
+    The snapshot lets selection, preflight, and execution reuse a single
+    ``GET /v1/models`` response within one generation request.
+    """
+    with catalog_snapshot():
+        return _run_dofe_generation_impl(tool, inputs, catalog=catalog)
+
+
+def _run_dofe_generation_impl(
+    tool: Any,
+    inputs: dict[str, Any],
+    *,
+    catalog: Any | None,
+) -> ToolResult:
     """Execute a dofe generation end-to-end.
 
     ``tool`` must expose: ``dofe_spec`` (DofeToolSpec), ``resolve_model(inputs)``,
@@ -324,6 +340,21 @@ def run_dofe_generation(
         model = validate_catalog_alias(requested_model, catalog)
     except DofeError as exc:
         return _error_result(tool, exc, requested_model, spec, start)
+
+    # Live provider preflight is enforced at the shared paid boundary for every
+    # dofe tool. Video tools perform a real capability probe; other capabilities
+    # honestly report "not_supported" and degrade rather than block. A blocked
+    # probe fail-closes before any paid submit_and_collect.
+    probe = tool.probe_provider_contract(inputs, catalog=catalog)
+    if probe.get("status") == "blocked":
+        errors = probe.get("errors") or ["DoFe live provider preflight blocked paid generation"]
+        return ToolResult(
+            success=False,
+            data={"provider": "dofe", "model": model, "preflight": probe},
+            error="; ".join(str(e) for e in errors),
+            duration_seconds=round(time.monotonic() - start, 2),
+            model=model,
+        )
 
     output_path = _enforce_projects_path(inputs.get("output_path"), tool.name, spec.default_ext)
 
