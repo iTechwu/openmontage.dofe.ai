@@ -43,12 +43,29 @@ has already served (`_locally_served`). When no logical-call header is present:
   sibling has already committed to the shared seed before `_locally_served` is
   marked at serve completion.
 
+`_locally_served` is marked **only on a committed success** — a cached
+successful response (or a replay of one). A **failed** forward (upstream error,
+exception, or a **truncated SSE stream** that closed without its
+`response.completed` / `[DONE]` terminal marker) marks nothing, so an
+in-instance retry of that same logical call reuses the same content-keyed seed
+and the same invocation id (no double-billing, no split attribution). A
+truncated stream is also marked `failed` (not cached), so a restart recovers by
+re-forwarding instead of replaying a broken response forever.
+
 Callers that can supply a stable identity (native tool paths) set
-`X-OpenMontage-Logical-Call-Id`, used strictly with no fallback. Residual edge:
-two **concurrent** same-content arrivals AFTER the instance already served that
-content both forward (each gets a distinct seed) — the conservative choice
-(prefer a possible double-bill over any wrong-merge), far rarer than the
-sequential distinct calls the guard now handles.
+`X-OpenMontage-Logical-Call-Id`, used strictly with no fallback. Residual edges:
+
+- **concurrent**: two **concurrent** same-content arrivals AFTER the instance
+  already served that content both forward (each gets a distinct seed) — the
+  conservative choice (prefer a possible double-bill over any wrong-merge), far
+  rarer than the sequential distinct calls the guard now handles;
+- **restart**: within one instance the 2nd..Nth distinct same-content call gets
+  a random `::distinct::` uuid seed that cannot be re-derived after a restart,
+  so crash-restart replays the 1st such call from the ledger but **re-forwards**
+  the 2nd..Nth (a re-bill for those). No caller re-supplies that random seed.
+
+Both residuals are inherent to having no native per-call identity; a native
+Codex per-call identity removes the guard (and both residuals) entirely.
 
 Every fingerprint-keyed replay is also logged at INFO with
 `replay_key_source="content_fingerprint"` (vs `"logical_call_id"`), and the CLI
