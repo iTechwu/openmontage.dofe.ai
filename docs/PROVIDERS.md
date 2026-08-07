@@ -18,7 +18,7 @@ Everything you need to know about every provider in OpenMontage — setup instru
 | 6 | **~$0.05/image** | OpenAI | GPT Image 2 images + OpenAI TTS |
 | 7 | **~$0.04/image** | Google Imagen | Imagen 4 images (shares the Google API key) |
 | 8 | **pay-as-you-go** | Kling Official | Official direct Kling video, image, TTS, avatar, and lip-sync API, separate from fal.ai Kling |
-| 9 | **pay-as-you-go** | DoFe.AI Gateway | One key routes image, video, TTS, music, and avatar model work through `model.local.dofe.ai/api` |
+| 9 | **pay-as-you-go** | DoFe.AI Gateway | One key routes image, video, TTS, music, avatar, and speech-to-text work through `model.local.dofe.ai/api` |
 | 10 | **$12/month** | Runway | Gen-4 video — highest quality AI video |
 | 11 | **pay-as-you-go** | HeyGen | Avatar videos, multi-model video gateway |
 | 12 | **pay-as-you-go** | Suno | Full song generation with vocals and lyrics |
@@ -34,9 +34,13 @@ Everything you need to know about every provider in OpenMontage — setup instru
 DOFE_ENABLED=true
 DOFE_MODEL_BASE_URL=https://model.local.dofe.ai/api
 DOFE_MODEL_API_KEY=          # Team-level sk-... key
-DOFE_IMAGE_MODEL=seedream-5.0
-DOFE_VIDEO_MODEL=seedance-2.0-fast
-DOFE_STT_MODEL=openspeech-auc
+# Select only exact IDs returned by authenticated GET /v1/models.
+DOFE_IMAGE_MODEL=
+DOFE_VIDEO_MODEL=
+DOFE_TTS_MODEL=
+DOFE_MUSIC_MODEL=
+DOFE_AVATAR_MODEL=
+DOFE_STT_MODEL=
 
 # FREE (no cost, ever)
 PEXELS_API_KEY=              # Stock photos + videos
@@ -84,7 +88,8 @@ VIDEO_GEN_LOCAL_MODEL=       # wan2.1-1.3b, wan2.1-14b, hunyuan-1.5, ltx2-local,
 > `DOFE_ENABLED=true`, the image, video, and TTS selectors prefer the DoFe tools;
 > music and avatar capabilities use the same shared client when explicitly chosen.
 
-**Tools unlocked:** `dofe_image`, `dofe_video`, `dofe_tts`, `dofe_music`, `dofe_avatar`
+**Tools unlocked:** `dofe_image`, `dofe_video`, `dofe_tts`, `dofe_music`,
+`dofe_avatar`, `dofe_stt`
 
 **Env vars:** `DOFE_MODEL_BASE_URL`, `DOFE_MODEL_API_KEY`, `DOFE_*_MODEL`,
 `DOFE_INTERNAL_API_BASE_URL`, `DOFE_TENANT_ID`, `INTERNAL_API_SECRET`
@@ -93,36 +98,37 @@ VIDEO_GEN_LOCAL_MODEL=       # wan2.1-1.3b, wan2.1-14b, hunyuan-1.5, ltx2-local,
 DOFE_ENABLED=true
 DOFE_MODEL_BASE_URL=https://model.local.dofe.ai/api
 DOFE_MODEL_API_KEY=sk-your-key
-DOFE_IMAGE_MODEL=seedream-5.0
-DOFE_VIDEO_MODEL=seedance-2.0-fast
-DOFE_STT_MODEL=openspeech-auc
+# Query GET https://model.local.dofe.ai/api/v1/models first.
+DOFE_IMAGE_MODEL=
+DOFE_VIDEO_MODEL=
+DOFE_TTS_MODEL=
+DOFE_MUSIC_MODEL=
+DOFE_AVATAR_MODEL=
+DOFE_STT_MODEL=
 DOFE_INTERNAL_API_BASE_URL=https://model.local.dofe.ai
 DOFE_TENANT_ID=your-tenant-uuid
 INTERNAL_API_SECRET=your-internal-service-secret
 ```
 
 The gateway also exposes OpenAI/OpenAI Responses at `/v1`, Anthropic at
-`/anthropic`, and Gemini at `/gemini`. Model values are tenant-visible aliases
-from `GET /v1/models` and are matched exactly. A failed DoFe task is surfaced to
-the caller; OpenMontage does not silently substitute another provider.
+`/anthropic`, and Gemini at `/gemini`. Model values are tenant-visible IDs from
+authenticated `GET /v1/models` and are matched exactly. OpenMontage validates
+the configured candidate against that response before task creation. A failed
+lookup or task is surfaced to the caller; no model name or provider substitute
+is guessed.
 
-The configured image and video aliases are `seedream-5.0` and `seedance-2.0-fast`.
-Although the capability projection previously marked
-Seedance billing/smoke readiness as blocked, a five-second text-to-video task
-completed successfully; readiness is therefore treated as a diagnostic soft
-signal. `openspeech-auc` is restricted and must be granted to the tenant before
-STT can run. It also needs a positive tenant-effective `PER_MINUTE` price;
-zero-priced or unresolved models are hidden and rejected before provider
-submission. No TTS alias was visible, so leave `DOFE_TTS_MODEL` blank until the
-gateway publishes one.
+Before a video generation call, live preflight also reads authenticated
+`GET /v1/models/{alias}/playground-capability`. The returned state, executor,
+endpoint kind, operation, asset roles/counts, and form fields must match the
+request. Catalog visibility alone does not prove that a Seedance operation is
+currently executable, and OpenMontage does not infer provider prompt-token
+syntax that this projection does not declare.
 
-Seedance preflight pricing is read from AIRouter's tenant-effective conditional
+Video preflight pricing is read from AIRouter's tenant-effective conditional
 rate card through `POST /internal/pricing/quote`; OpenMontage does not keep a
-second price table. For the currently configured tenant, `seedance-2.0-fast`
-is CNY 37 per million output tokens without video input and CNY 22 per million
-output tokens with video/image input. Pass `estimated_output_tokens` to obtain
-an estimated amount; otherwise dry-run returns the unit rate and waits for the
-provider's actual `usage.completion_tokens`. The completed task's `finalCost`,
+second price table. Pass `estimated_output_tokens` to obtain an estimated
+amount; otherwise dry-run returns the selected catalog model's unit rate and
+waits for the provider's actual `usage.completion_tokens`. The completed task's `finalCost`,
 currency, and pricing breakdown are authoritative.
 
 ---

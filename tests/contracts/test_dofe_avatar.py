@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -35,6 +36,10 @@ def test_status_gating(monkeypatch):
     assert tool.get_status() == ToolStatus.UNAVAILABLE
     monkeypatch.setenv("DOFE_API_KEY", "test-key")
     monkeypatch.setenv("DOFE_AVATAR_MODEL", "avatar-test")
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.list_models",
+        lambda _self: [{"id": "avatar-test"}],
+    )
     assert tool.get_status() == ToolStatus.AVAILABLE
 
 
@@ -72,3 +77,17 @@ def test_default_model_none_until_configured(monkeypatch):
 
 def test_fallback_tools_declared():
     assert "talking_head" in DofeAvatar().fallback_tools
+
+
+def test_avatar_schema_matches_local_image_and_required_audio_contract():
+    validator = Draft202012Validator(DofeAvatar().input_schema)
+
+    validator.validate(
+        {
+            "image_path": "/project/portrait.png",
+            "audio_url": "https://cdn.test/voice.mp3",
+        }
+    )
+    errors = list(validator.iter_errors({"image_url": "https://cdn.test/face.png"}))
+
+    assert any("audio_url" in error.message for error in errors)

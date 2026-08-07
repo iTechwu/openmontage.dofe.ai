@@ -102,6 +102,26 @@ def test_dofe_contract_advertises_model_scoped_negative_prompt():
     assert "negative_prompt" in tool.idempotency_key_fields
 
 
+def test_execute_rejects_model_not_returned_by_gateway_catalog(monkeypatch):
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_IMAGE_MODEL", "configured-but-hidden")
+    monkeypatch.setattr(
+        "tools.dofe.runtime.DofeClient.list_models",
+        lambda _self: [{"id": "tenant-visible-image"}],
+    )
+
+    def fail_submit(*_args, **_kwargs):
+        raise AssertionError("generation task must not be submitted for a hidden model")
+
+    monkeypatch.setattr("tools.dofe.runtime.DofeClient.submit_and_collect", fail_submit)
+
+    result = DofeImage().execute({"prompt": "catalog enforcement"})
+
+    assert not result.success
+    assert "not returned by GET /v1/models" in result.error
+    assert result.data["model"] == "configured-but-hidden"
+
+
 def test_negative_prompt_changes_dofe_idempotency_key():
     tool = DofeImage()
     base = {"prompt": "x", "model_name": "flux-pro-1.1"}

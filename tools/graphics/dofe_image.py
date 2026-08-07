@@ -1,6 +1,6 @@
 """DoFe.AI gateway image generation (endpointKind: image_async).
 
-Routes the current ``seedream-5.0`` alias through the unified gateway. It also
+Routes a tenant-visible catalog model through the unified gateway. It also
 supports reference-image edits via an ``image_url`` block
 with ``role:"reference"`` (local files are inlined as a data URI). See
 dev-guide §5.1.
@@ -20,11 +20,13 @@ from tools.base_tool import (
     ToolResult,
     ToolRuntime,
     ToolStability,
+    ToolStatus,
     ToolTier,
 )
 from tools.dofe import DofeToolSpec, probe_image, resolve_image_source
 from tools.dofe.models import resolve_alias
 from tools.dofe.runtime import build_metadata, run_dofe_generation
+from tools.dofe.status import configured_model_is_visible
 
 
 class DofeImage(BaseTool):
@@ -42,7 +44,7 @@ class DofeImage(BaseTool):
     install_instructions = (
         "Set DOFE_MODEL_API_KEY in .env for the models.dofe.ai gateway. "
         "Set DOFE_ENABLED=true to make selectors prefer the dofe chain. "
-        "Override the default model with DOFE_IMAGE_MODEL (default seedream-5.0)."
+        "Read GET /v1/models and set DOFE_IMAGE_MODEL to one returned model ID."
     )
     agent_skills = ["flux-best-practices", "bfl-api"]
 
@@ -64,7 +66,7 @@ class DofeImage(BaseTool):
         "aspect_ratio": True,
     }
     best_for = [
-        "image generation via the models.dofe.ai gateway (seedream-5.0 and the gateway catalog)",
+        "image generation using an exact ID from the tenant-visible gateway catalog",
         "reference-conditioned image edits when DOFE_ENABLED=true",
     ]
     not_good_for = ["offline generation", "non-dofe model families"]
@@ -101,7 +103,7 @@ class DofeImage(BaseTool):
             "image_path": {"type": "string", "description": "Local reference image (inlined as a data URI)."},
             "model_name": {
                 "type": "string",
-                "description": "Explicit dofe alias (e.g. seedream-5.0). Overrides DOFE_IMAGE_MODEL.",
+                "description": "Exact ID from GET /v1/models. Overrides DOFE_IMAGE_MODEL.",
             },
             "task_id": {
                 "type": "string",
@@ -128,6 +130,16 @@ class DofeImage(BaseTool):
     ]
     side_effects = ["paid remote generation via models.dofe.ai gateway", "writes image file to output_path"]
     user_visible_verification = ["Inspect generated image for relevance, quality, and prompt adherence"]
+
+    def get_status(self) -> ToolStatus:
+        status = super().get_status()
+        if status == ToolStatus.UNAVAILABLE:
+            return status
+        return (
+            ToolStatus.AVAILABLE
+            if configured_model_is_visible("image", ("generate",))
+            else ToolStatus.UNAVAILABLE
+        )
 
     # ------------------------------------------------------------------ cost
 

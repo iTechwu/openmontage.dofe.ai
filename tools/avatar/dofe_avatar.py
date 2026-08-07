@@ -1,8 +1,7 @@
 """DoFe.AI gateway digital-human avatar (endpointKind: digital_human).
 
-Protocol-ready. No ``digital_human`` model is published on the test gateway yet,
-so the default alias is intentionally empty. Takes a portrait image plus a
-driving audio track. See dev-guide §5.5.
+No default model is embedded. The selected model must be present in the current
+tenant catalog. Takes a portrait image plus a driving audio track.
 
 Note on the avatar image ``role``: dev-guide §5.5 suggests ``role:"avatar"``,
 but §2.3's hard constraint (from a real 400) limits asset roles to
@@ -26,12 +25,14 @@ from tools.base_tool import (
     ToolResult,
     ToolRuntime,
     ToolStability,
+    ToolStatus,
     ToolTier,
 )
 from tools.dofe import DofeToolSpec, probe_video, resolve_image_source
 from tools.dofe.media import is_https_url
 from tools.dofe.models import resolve_alias
 from tools.dofe.runtime import build_metadata, run_dofe_generation
+from tools.dofe.status import configured_model_is_visible
 
 
 class DofeAvatar(BaseTool):
@@ -49,7 +50,7 @@ class DofeAvatar(BaseTool):
     install_instructions = (
         "Set DOFE_MODEL_API_KEY in .env for the models.dofe.ai gateway. "
         "Set DOFE_ENABLED=true to prefer the dofe chain. "
-        "Set DOFE_AVATAR_MODEL to a published digital_human alias once the gateway registers one."
+        "Read GET /v1/models and set DOFE_AVATAR_MODEL to one returned model ID."
     )
     agent_skills = ["avatar-video"]
 
@@ -75,14 +76,15 @@ class DofeAvatar(BaseTool):
 
     input_schema = {
         "type": "object",
-        "required": ["image_url"],
+        "required": ["audio_url"],
+        "anyOf": [{"required": ["image_url"]}, {"required": ["image_path"]}],
         "properties": {
             "image_url": {"type": "string", "description": "Portrait https URL (or use image_path)."},
             "image_path": {"type": "string", "description": "Local portrait image (inlined as a data URI)."},
             "audio_url": {"type": "string", "description": "Driving audio https URL (required)."},
             "audio_path": {"type": "string", "description": "Local audio is not supported inline — provide audio_url."},
             "prompt": {"type": "string", "description": "Optional description passed to the gateway."},
-            "model_name": {"type": "string", "description": "Explicit dofe digital_human alias. Overrides DOFE_AVATAR_MODEL."},
+            "model_name": {"type": "string", "description": "Exact ID from GET /v1/models. Overrides DOFE_AVATAR_MODEL."},
             "task_id": {"type": "string", "description": "Resume polling an earlier timed-out dofe task."},
             "output_path": {"type": "string"},
         },
@@ -95,6 +97,16 @@ class DofeAvatar(BaseTool):
     idempotency_key_fields = ["image_url", "image_path", "audio_url", "prompt", "model_name"]
     side_effects = ["paid remote generation via models.dofe.ai gateway", "writes avatar video to output_path"]
     user_visible_verification = ["Watch generated avatar video for identity preservation and mouth motion"]
+
+    def get_status(self) -> ToolStatus:
+        status = super().get_status()
+        if status == ToolStatus.UNAVAILABLE:
+            return status
+        return (
+            ToolStatus.AVAILABLE
+            if configured_model_is_visible("avatar", ("generate",))
+            else ToolStatus.UNAVAILABLE
+        )
 
     # ------------------------------------------------------------------ cost
 

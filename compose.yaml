@@ -18,9 +18,13 @@ x-openmontage-common: &openmontage-common
     OPENMONTAGE_EVENT_ENDPOINT: ${OPENMONTAGE_EVENT_ENDPOINT:-http://host.docker.internal:1455/api/internal/openmontage/events}
     OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL: ${OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL:-http://host.docker.internal:1455}
     OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL: ${OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL:-http://host.docker.internal:1455}
+    # The shared models Compose network exposes Airouter as api:3101.
+    DOFE_MODEL_BASE_URL: ${DOFE_DOCKER_MODEL_BASE_URL:-http://api:3101}
     OPENMONTAGE_AGENT_EXECUTOR_JSON: '${OPENMONTAGE_AGENT_EXECUTOR_JSON:-["codex","exec","--skip-git-repo-check","--ephemeral","--ignore-user-config","-s","workspace-write","-C","/app","--add-dir","{project_dir}","-"]}'
     OPENMONTAGE_AGENT_TIMEOUT_SECONDS: ${OPENMONTAGE_AGENT_TIMEOUT_SECONDS:-3600}
     OPENMONTAGE_EVENT_SIGNING_SECRET: ${OPENMONTAGE_EVENT_SIGNING_SECRET:?Set OPENMONTAGE_EVENT_SIGNING_SECRET in .env}
+    OPENMONTAGE_EVENT_MAX_ATTEMPTS: ${OPENMONTAGE_EVENT_MAX_ATTEMPTS:-20}
+    OPENMONTAGE_EVENT_NOT_FOUND_MAX_ATTEMPTS: ${OPENMONTAGE_EVENT_NOT_FOUND_MAX_ATTEMPTS:-5}
     DOFE_ENABLED: "true"
     DOFE_CA_BUNDLE: ${DOFE_CA_BUNDLE:-}
   volumes:

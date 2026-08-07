@@ -12,6 +12,9 @@ from openmontage.contracts import JobCreateRequest
 
 
 def test_prepare_creates_agent_ready_airouter_project(monkeypatch, tmp_path):
+    monkeypatch.setenv("DOFE_IMAGE_MODEL", "catalog-image")
+    monkeypatch.setenv("DOFE_VIDEO_MODEL", "catalog-video")
+    monkeypatch.delenv("DOFE_STT_MODEL", raising=False)
     monkeypatch.setattr(
         reference_clone,
         "normalize_video_url",
@@ -47,8 +50,9 @@ def test_prepare_creates_agent_ready_airouter_project(monkeypatch, tmp_path):
         reference_clone.DofeClient,
         "list_models",
         lambda _self: [
-            {"id": "seedream-5.0"},
-            {"id": "seedance-2.0-fast"},
+            {"id": "catalog-image"},
+            {"id": "catalog-video"},
+            {"id": "catalog-stt"},
         ],
     )
     monkeypatch.setattr(
@@ -67,10 +71,16 @@ def test_prepare_creates_agent_ready_airouter_project(monkeypatch, tmp_path):
         "policy": "dofe_airouter_only",
         "provider": "dofe",
         "base_url": "https://model.local.dofe.ai/api",
+        "catalog_endpoint": "https://model.local.dofe.ai/api/v1/models",
         "direct_provider_fallback": False,
     }
     assert result["preflight"]["airouter"]["status"] == "blocked"
-    assert result["preflight"]["airouter"]["missing_required_models"] == ["openspeech-auc"]
+    assert result["preflight"]["airouter"]["unconfigured_capabilities"] == ["stt"]
+    assert result["preflight"]["airouter"]["catalog_models"] == [
+        "catalog-image",
+        "catalog-video",
+        "catalog-stt",
+    ]
     assert result["preflight"]["job_submission"]["workflow_field_is_pipeline"] is True
     assert any("preflight.job_submission" in item for item in result["agent_instructions"])
     assert Path(result["analysis"]["brief_path"]).is_file()

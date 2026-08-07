@@ -35,6 +35,10 @@ def test_status_gating(monkeypatch):
     assert tool.get_status() == ToolStatus.UNAVAILABLE
     monkeypatch.setenv("DOFE_API_KEY", "test-key")
     monkeypatch.setenv("DOFE_MUSIC_MODEL", "music-test")
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.list_models",
+        lambda _self: [{"id": "music-test"}],
+    )
     assert tool.get_status() == ToolStatus.AVAILABLE
 
 

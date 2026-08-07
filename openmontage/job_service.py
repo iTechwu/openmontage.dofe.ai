@@ -46,6 +46,10 @@ class JobLeaseError(RuntimeError):
     """Raised when a Worker lease is invalid, expired, or no longer owned."""
 
 
+class OutboxLeaseError(RuntimeError):
+    """Raised when an event delivery lease is no longer owned."""
+
+
 @dataclass(frozen=True)
 class JobLease:
     job_id: str
@@ -117,6 +121,8 @@ class JobService:
                     delivery_status TEXT NOT NULL DEFAULT 'pending',
                     delivery_attempts INTEGER NOT NULL DEFAULT 0,
                     next_attempt_at TEXT,
+                    delivery_lease_token TEXT,
+                    delivery_lease_expires_at TEXT,
                     delivered_at TEXT,
                     last_error TEXT,
                     created_at TEXT NOT NULL,
@@ -158,6 +164,23 @@ class JobService:
                 connection.execute(
                     "ALTER TABLE openmontage_job_event ADD COLUMN last_error TEXT"
                 )
+            if "delivery_lease_token" not in columns:
+                connection.execute(
+                    "ALTER TABLE openmontage_job_event ADD COLUMN delivery_lease_token TEXT"
+                )
+            if "delivery_lease_expires_at" not in columns:
+                connection.execute(
+                    "ALTER TABLE openmontage_job_event ADD COLUMN delivery_lease_expires_at TEXT"
+                )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_openmontage_job_event_claim
+                ON openmontage_job_event(
+                    delivery_status, next_attempt_at,
+                    delivery_lease_expires_at, created_at
+                )
+                """
+            )
 
     def create_job(
         self,
@@ -253,11 +276,11 @@ class JobService:
             raise JobLeaseError("worker_id must be between 1 and 256 characters")
         if lease_duration <= timedelta(0):
             raise JobLeaseError("lease_duration must be greater than zero")
-        effective_now = now or _now()
-        expires_at = effective_now + lease_duration
 
         with self._connect() as connection:
             self._begin_write(connection)
+            effective_now = now if now is not None else _now()
+            expires_at = effective_now + lease_duration
             rows = connection.execute(
                 """
                 SELECT job.job_id, job.snapshot_json
@@ -329,10 +352,10 @@ class JobService:
     ) -> JobLease:
         if lease_duration <= timedelta(0):
             raise JobLeaseError("lease_duration must be greater than zero")
-        effective_now = now or _now()
-        expires_at = effective_now + lease_duration
         with self._connect() as connection:
             self._begin_write(connection)
+            effective_now = now if now is not None else _now()
+            expires_at = effective_now + lease_duration
             self._require_active_lease(
                 connection,
                 lease.job_id,
@@ -363,38 +386,77 @@ class JobService:
         *,
         lease_token: str,
         retry_at: datetime | None = None,
+        retry_delay: timedelta | None = None,
         error: str | None = None,
         reset_attempts: bool = False,
         now: datetime | None = None,
     ) -> None:
-        effective_now = now or _now()
-        if retry_at is not None and retry_at < effective_now:
+        if retry_at is not None and retry_delay is not None:
+            raise JobLeaseError("retry_at and retry_delay are mutually exclusive")
+        if retry_delay is not None and retry_delay < timedelta(0):
+            raise JobLeaseError("retry_delay must not be negative")
+        call_now = now if now is not None else _now()
+        if retry_at is not None and retry_at < call_now:
             raise JobLeaseError("retry_at must not be earlier than now")
         with self._connect() as connection:
             self._begin_write(connection)
+            effective_now = now if now is not None else _now()
+            effective_retry_at = (
+                effective_now + retry_delay if retry_delay is not None else retry_at
+            )
             self._require_active_lease(
                 connection,
                 job_id,
                 lease_token,
                 effective_now,
             )
-            connection.execute(
-                """
-                UPDATE openmontage_job_execution
-                SET worker_id = NULL, lease_token = NULL, lease_expires_at = NULL,
-                    next_attempt_at = ?, last_error = ?,
-                    attempts = CASE WHEN ? THEN 0 ELSE attempts END,
-                    updated_at = ?
-                WHERE job_id = ?
-                """,
-                (
-                    retry_at.isoformat() if retry_at is not None else None,
-                    error[:1000] if error else None,
-                    reset_attempts,
-                    effective_now.isoformat(),
-                    job_id,
-                ),
+            self._release_lease_record(
+                connection,
+                job_id,
+                retry_at=effective_retry_at,
+                error=error,
+                reset_attempts=reset_attempts,
+                now=effective_now,
             )
+
+    def release_lease_or_confirm_cancel(
+        self,
+        job_id: str,
+        *,
+        lease_token: str,
+        retry_at: datetime | None = None,
+        retry_delay: timedelta | None = None,
+        error: str | None = None,
+        reset_attempts: bool = False,
+        now: datetime | None = None,
+    ) -> JobSnapshot:
+        if retry_at is not None and retry_delay is not None:
+            raise JobLeaseError("retry_at and retry_delay are mutually exclusive")
+        if retry_delay is not None and retry_delay < timedelta(0):
+            raise JobLeaseError("retry_delay must not be negative")
+        call_now = now if now is not None else _now()
+        if retry_at is not None and retry_at < call_now:
+            raise JobLeaseError("retry_at must not be earlier than now")
+        with self._connect() as connection:
+            self._begin_write(connection)
+            effective_now = now if now is not None else _now()
+            effective_retry_at = (
+                effective_now + retry_delay if retry_delay is not None else retry_at
+            )
+            self._require_active_lease(connection, job_id, lease_token, effective_now)
+            snapshot = self._load_job(connection, job_id).model_copy(deep=True)
+            cancelled = snapshot.status == JobStatus.CANCEL_REQUESTED
+            if cancelled:
+                snapshot = self._confirm_cancel_snapshot(connection, snapshot)
+            self._release_lease_record(
+                connection,
+                job_id,
+                retry_at=None if cancelled else effective_retry_at,
+                error=None if cancelled else error,
+                reset_attempts=cancelled or reset_attempts,
+                now=effective_now,
+            )
+            return snapshot
 
     def require_active_lease(
         self,
@@ -430,41 +492,8 @@ class JobService:
         with self._connect() as connection:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now)
-            snapshot = self._load_job(connection, job_id)
-            if artifact.job_id != snapshot.job_id:
-                raise JobStateError("Published artifact Job identity does not match")
-            if artifact.employee_id != snapshot.attribution.employee_id:
-                raise JobStateError("Published artifact employee identity does not match")
-            existing = next(
-                (
-                    item
-                    for item in snapshot.artifacts
-                    if item.employee_artifact_id == artifact.employee_artifact_id
-                ),
-                None,
-            )
-            if existing is not None:
-                if existing != artifact:
-                    raise JobConflictError(
-                        "employee_artifact_id was already published with different metadata"
-                    )
-                return snapshot
-            snapshot.artifacts = (*snapshot.artifacts, artifact)
-            return self._persist_event(
-                connection,
-                snapshot,
-                JobEventType.ARTIFACT_PUBLISHED,
-                {
-                    "artifactId": artifact.employee_artifact_id,
-                    "employeeId": artifact.employee_id,
-                    "role": artifact.role,
-                    "fileName": artifact.file_name,
-                    "mediaType": artifact.media_type,
-                    "sizeBytes": artifact.size_bytes,
-                    "sha256": artifact.sha256,
-                    "publishedAt": artifact.published_at.isoformat().replace("+00:00", "Z"),
-                },
-            )
+            snapshot = self._load_job(connection, job_id).model_copy(deep=True)
+            return self._publish_artifact_snapshot(connection, snapshot, artifact)
 
     def list_pending_outbox(
         self,
@@ -477,23 +506,91 @@ class JobService:
             rows = connection.execute(
                 """
                 SELECT event_json, delivery_status, delivery_attempts,
-                       next_attempt_at, delivered_at, last_error
+                       next_attempt_at, delivery_lease_token,
+                       delivery_lease_expires_at, delivered_at, last_error
                 FROM openmontage_job_event
-                WHERE delivery_status IN ('pending', 'retry')
-                  AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                WHERE (
+                        delivery_status IN ('pending', 'retry')
+                        AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                      ) OR (
+                        delivery_status = 'publishing'
+                        AND delivery_lease_expires_at <= ?
+                      )
                 ORDER BY created_at ASC, sequence ASC
                 LIMIT ?
                 """,
-                (effective_now.isoformat(), limit),
+                (effective_now.isoformat(), effective_now.isoformat(), limit),
             ).fetchall()
         return [self._map_outbox_record(row) for row in rows]
+
+    def claim_pending_outbox(
+        self,
+        *,
+        lease_token: str,
+        now: datetime | None = None,
+        lease_seconds: float = 30.0,
+        limit: int = 100,
+    ) -> list[OutboxRecord]:
+        if not lease_token:
+            raise ValueError("lease_token is required")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be greater than zero")
+        if limit <= 0:
+            raise ValueError("limit must be greater than zero")
+        with self._connect() as connection:
+            self._begin_write(connection)
+            effective_now = now if now is not None else _now()
+            expires_at = effective_now + timedelta(seconds=lease_seconds)
+            rows = connection.execute(
+                """
+                SELECT event_id
+                FROM openmontage_job_event
+                WHERE (
+                        delivery_status IN ('pending', 'retry')
+                        AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                      ) OR (
+                        delivery_status = 'publishing'
+                        AND delivery_lease_expires_at <= ?
+                      )
+                ORDER BY created_at ASC, sequence ASC
+                LIMIT ?
+                """,
+                (effective_now.isoformat(), effective_now.isoformat(), limit),
+            ).fetchall()
+            event_ids = [str(row["event_id"]) for row in rows]
+            if not event_ids:
+                return []
+            placeholders = ",".join("?" for _ in event_ids)
+            connection.execute(
+                f"""
+                UPDATE openmontage_job_event
+                SET delivery_status = 'publishing',
+                    delivery_lease_token = ?,
+                    delivery_lease_expires_at = ?
+                WHERE event_id IN ({placeholders})
+                """,
+                (lease_token, expires_at.isoformat(), *event_ids),
+            )
+            claimed = connection.execute(
+                f"""
+                SELECT event_json, delivery_status, delivery_attempts,
+                       next_attempt_at, delivery_lease_token,
+                       delivery_lease_expires_at, delivered_at, last_error
+                FROM openmontage_job_event
+                WHERE event_id IN ({placeholders})
+                ORDER BY created_at ASC, sequence ASC
+                """,
+                event_ids,
+            ).fetchall()
+        return [self._map_outbox_record(row) for row in claimed]
 
     def get_outbox_record(self, event_id: str) -> OutboxRecord:
         with self._connect() as connection:
             row = connection.execute(
                 """
                 SELECT event_json, delivery_status, delivery_attempts,
-                       next_attempt_at, delivered_at, last_error
+                       next_attempt_at, delivery_lease_token,
+                       delivery_lease_expires_at, delivered_at, last_error
                 FROM openmontage_job_event
                 WHERE event_id = ?
                 """,
@@ -503,7 +600,13 @@ class JobService:
             raise LookupError(f"OpenMontage Job event not found: {event_id}")
         return self._map_outbox_record(row)
 
-    def mark_event_delivered(self, event_id: str, *, delivered_at: datetime | None = None) -> None:
+    def mark_event_delivered(
+        self,
+        event_id: str,
+        *,
+        lease_token: str,
+        delivered_at: datetime | None = None,
+    ) -> None:
         timestamp = delivered_at or _now()
         with self._connect() as connection:
             self._begin_write(connection)
@@ -511,18 +614,24 @@ class JobService:
                 """
                 UPDATE openmontage_job_event
                 SET delivery_status = 'delivered', delivered_at = ?,
-                    next_attempt_at = NULL, last_error = NULL
-                WHERE event_id = ?
+                    next_attempt_at = NULL, last_error = NULL,
+                    delivery_lease_token = NULL,
+                    delivery_lease_expires_at = NULL
+                WHERE event_id = ? AND delivery_status = 'publishing'
+                  AND delivery_lease_token = ?
                 """,
-                (timestamp.isoformat(), event_id),
+                (timestamp.isoformat(), event_id, lease_token),
             )
             if cursor.rowcount != 1:
-                raise LookupError(f"OpenMontage Job event not found: {event_id}")
+                raise OutboxLeaseError(
+                    f"OpenMontage Job event delivery lease is no longer owned: {event_id}"
+                )
 
     def mark_event_failed(
         self,
         event_id: str,
         *,
+        lease_token: str,
         error: str,
         next_attempt_at: datetime,
     ) -> None:
@@ -533,13 +642,46 @@ class JobService:
                 UPDATE openmontage_job_event
                 SET delivery_status = 'retry',
                     delivery_attempts = delivery_attempts + 1,
-                    next_attempt_at = ?, last_error = ?
-                WHERE event_id = ?
+                    next_attempt_at = ?, last_error = ?,
+                    delivery_lease_token = NULL,
+                    delivery_lease_expires_at = NULL
+                WHERE event_id = ? AND delivery_status = 'publishing'
+                  AND delivery_lease_token = ?
                 """,
-                (next_attempt_at.isoformat(), error[:1000], event_id),
+                (next_attempt_at.isoformat(), error[:1000], event_id, lease_token),
             )
             if cursor.rowcount != 1:
-                raise LookupError(f"OpenMontage Job event not found: {event_id}")
+                raise OutboxLeaseError(
+                    f"OpenMontage Job event delivery lease is no longer owned: {event_id}"
+                )
+
+    def mark_event_dead_lettered(
+        self,
+        event_id: str,
+        *,
+        lease_token: str,
+        error: str,
+    ) -> None:
+        with self._connect() as connection:
+            self._begin_write(connection)
+            cursor = connection.execute(
+                """
+                UPDATE openmontage_job_event
+                SET delivery_status = 'dead_letter',
+                    delivery_attempts = delivery_attempts + 1,
+                    next_attempt_at = NULL, delivered_at = NULL,
+                    last_error = ?, delivery_lease_token = NULL,
+                    delivery_lease_expires_at = NULL
+                WHERE event_id = ?
+                  AND delivery_status = 'publishing'
+                  AND delivery_lease_token = ?
+                """,
+                (error[:1000], event_id, lease_token),
+            )
+            if cursor.rowcount != 1:
+                raise OutboxLeaseError(
+                    f"OpenMontage Job event delivery lease is no longer owned: {event_id}"
+                )
 
     def start_stage(
         self,
@@ -553,31 +695,33 @@ class JobService:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
-            stage_index, stage = self._stage(snapshot, stage_code)
-            incomplete = [
-                predecessor.code
-                for predecessor in snapshot.stages[:stage_index]
-                if predecessor.status not in {StageStatus.SUCCEEDED, StageStatus.SKIPPED}
-            ]
-            if incomplete:
-                raise JobStateError(f"Stage {stage_code!r} has incomplete predecessor stages: {incomplete}")
-            if snapshot.status == JobStatus.QUEUED:
-                validate_job_transition(JobStatus.QUEUED, JobStatus.RUNNING)
-                snapshot.status = JobStatus.RUNNING
-            elif snapshot.status != JobStatus.RUNNING:
-                raise JobStateError(f"Cannot start a stage while Job is {snapshot.status}")
-            self._validate_stage(stage.status, StageStatus.RUNNING)
-            stage.status = StageStatus.RUNNING
-            stage.attempt += 1
-            stage.started_at = _now()
-            stage.completed_at = None
-            snapshot.current_stage = stage_code
-            return self._persist_event(
-                connection,
-                snapshot,
-                JobEventType.STAGE_STARTED,
-                self._stage_payload(stage),
-            )
+            return self._start_stage_snapshot(connection, snapshot, stage_code)
+
+    def start_stage_or_confirm_cancel(
+        self,
+        job_id: str,
+        stage_code: str,
+        *,
+        lease_token: str,
+        now: datetime | None = None,
+    ) -> JobSnapshot:
+        with self._connect() as connection:
+            self._begin_write(connection)
+            effective_now = now if now is not None else _now()
+            self._require_active_lease(connection, job_id, lease_token, effective_now)
+            snapshot = self._load_job(connection, job_id).model_copy(deep=True)
+            if snapshot.status == JobStatus.CANCEL_REQUESTED:
+                snapshot = self._confirm_cancel_snapshot(connection, snapshot)
+                self._release_lease_record(
+                    connection,
+                    job_id,
+                    retry_at=None,
+                    error=None,
+                    reset_attempts=True,
+                    now=effective_now,
+                )
+                return snapshot
+            return self._start_stage_snapshot(connection, snapshot, stage_code)
 
     def complete_stage(
         self,
@@ -591,19 +735,38 @@ class JobService:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
-            _, stage = self._stage(snapshot, stage_code)
-            if stage.approval_required and stage.approval_status != ApprovalStatus.APPROVED:
-                raise JobStateError(f"Stage {stage_code!r} requires approval before completion")
-            self._validate_stage(stage.status, StageStatus.SUCCEEDED)
-            stage.status = StageStatus.SUCCEEDED
-            stage.completed_at = _now()
-            snapshot.current_stage = None
-            return self._persist_event(
+            return self._complete_stage_snapshot(connection, snapshot, stage_code)
+
+    def complete_stage_or_confirm_cancel(
+        self,
+        job_id: str,
+        stage_code: str,
+        *,
+        lease_token: str,
+        now: datetime | None = None,
+    ) -> JobSnapshot:
+        with self._connect() as connection:
+            self._begin_write(connection)
+            effective_now = now if now is not None else _now()
+            self._require_active_lease(connection, job_id, lease_token, effective_now)
+            snapshot = self._load_job(connection, job_id).model_copy(deep=True)
+            if snapshot.status == JobStatus.CANCEL_REQUESTED:
+                snapshot = self._confirm_cancel_snapshot(connection, snapshot)
+            else:
+                snapshot = self._complete_stage_snapshot(
+                    connection,
+                    snapshot,
+                    stage_code,
+                )
+            self._release_lease_record(
                 connection,
-                snapshot,
-                JobEventType.STAGE_COMPLETED,
-                self._stage_payload(stage),
+                job_id,
+                retry_at=None,
+                error=None,
+                reset_attempts=True,
+                now=effective_now,
             )
+            return snapshot
 
     def update_stage_progress(
         self,
@@ -655,23 +818,45 @@ class JobService:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
-            _, stage = self._stage(snapshot, stage_code)
-            if not stage.approval_required:
-                raise JobStateError(f"Stage {stage_code!r} does not require approval")
-            self._validate_stage(stage.status, StageStatus.WAITING_APPROVAL)
-            try:
-                validate_job_transition(snapshot.status, JobStatus.WAITING_APPROVAL)
-            except ValueError as exc:
-                raise JobStateError(str(exc)) from exc
-            stage.status = StageStatus.WAITING_APPROVAL
-            stage.approval_status = ApprovalStatus.PENDING
-            snapshot.status = JobStatus.WAITING_APPROVAL
-            return self._persist_event(
+            return self._request_stage_approval_snapshot(
                 connection,
                 snapshot,
-                JobEventType.JOB_WAITING_APPROVAL,
-                {**self._stage_payload(stage), "reason": reason},
+                stage_code,
+                reason=reason,
             )
+
+    def request_stage_approval_or_confirm_cancel(
+        self,
+        job_id: str,
+        stage_code: str,
+        *,
+        reason: str,
+        lease_token: str,
+        now: datetime | None = None,
+    ) -> JobSnapshot:
+        with self._connect() as connection:
+            self._begin_write(connection)
+            effective_now = now if now is not None else _now()
+            self._require_active_lease(connection, job_id, lease_token, effective_now)
+            snapshot = self._load_job(connection, job_id).model_copy(deep=True)
+            if snapshot.status == JobStatus.CANCEL_REQUESTED:
+                snapshot = self._confirm_cancel_snapshot(connection, snapshot)
+            else:
+                snapshot = self._request_stage_approval_snapshot(
+                    connection,
+                    snapshot,
+                    stage_code,
+                    reason=reason,
+                )
+            self._release_lease_record(
+                connection,
+                job_id,
+                retry_at=None,
+                error=None,
+                reset_attempts=True,
+                now=effective_now,
+            )
+            return snapshot
 
     def resolve_stage_approval(
         self,
@@ -752,42 +937,55 @@ class JobService:
         lease_token: str | None = None,
         lease_now: datetime | None = None,
     ) -> JobSnapshot:
-        if not code.strip():
-            raise JobStateError("code must not be empty")
-        if not message.strip():
-            raise JobStateError("message must not be empty")
+        self._validate_job_failure(code, message)
 
         with self._connect() as connection:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
-            try:
-                validate_job_transition(snapshot.status, JobStatus.FAILED)
-            except ValueError as exc:
-                raise JobStateError(str(exc)) from exc
-
-            stage_code = snapshot.current_stage
-            if stage_code is not None:
-                _, stage = self._stage(snapshot, stage_code)
-                if stage.status in {StageStatus.RUNNING, StageStatus.WAITING_APPROVAL}:
-                    self._validate_stage(stage.status, StageStatus.FAILED)
-                    stage.status = StageStatus.FAILED
-                    stage.completed_at = _now()
-            snapshot.status = JobStatus.FAILED
-            return self._persist_event(
+            return self._fail_job_snapshot(
                 connection,
                 snapshot,
-                JobEventType.JOB_FAILED,
-                {
-                    "stage": stage_code,
-                    "status": JobStatus.FAILED.value,
-                    "error": {
-                        "code": code,
-                        "message": message,
-                        "retryable": retryable,
-                    },
-                },
+                code=code,
+                message=message,
+                retryable=retryable,
             )
+
+    def fail_job_or_confirm_cancel(
+        self,
+        job_id: str,
+        *,
+        code: str,
+        message: str,
+        retryable: bool,
+        lease_token: str,
+        now: datetime | None = None,
+    ) -> JobSnapshot:
+        self._validate_job_failure(code, message)
+        with self._connect() as connection:
+            self._begin_write(connection)
+            effective_now = now if now is not None else _now()
+            self._require_active_lease(connection, job_id, lease_token, effective_now)
+            snapshot = self._load_job(connection, job_id).model_copy(deep=True)
+            if snapshot.status == JobStatus.CANCEL_REQUESTED:
+                snapshot = self._confirm_cancel_snapshot(connection, snapshot)
+            else:
+                snapshot = self._fail_job_snapshot(
+                    connection,
+                    snapshot,
+                    code=code,
+                    message=message,
+                    retryable=retryable,
+                )
+            self._release_lease_record(
+                connection,
+                job_id,
+                retry_at=None,
+                error=None,
+                reset_attempts=True,
+                now=effective_now,
+            )
+            return snapshot
 
     def request_cancel(
         self,
@@ -839,22 +1037,7 @@ class JobService:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
-            try:
-                validate_job_transition(snapshot.status, JobStatus.CANCELLED)
-            except ValueError as exc:
-                raise JobStateError(str(exc)) from exc
-            for stage in snapshot.stages:
-                if stage.status in {StageStatus.RUNNING, StageStatus.WAITING_APPROVAL}:
-                    self._validate_stage(stage.status, StageStatus.CANCELLED)
-                    stage.status = StageStatus.CANCELLED
-                    stage.completed_at = _now()
-            snapshot.status = JobStatus.CANCELLED
-            return self._persist_event(
-                connection,
-                snapshot,
-                JobEventType.JOB_CANCELLED,
-                {"status": JobStatus.CANCELLED.value},
-            )
+            return self._confirm_cancel_snapshot(connection, snapshot)
 
     def complete_job(
         self,
@@ -867,23 +1050,280 @@ class JobService:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
-            if any(
-                stage.status not in {StageStatus.SUCCEEDED, StageStatus.SKIPPED}
-                for stage in snapshot.stages
-            ):
-                raise JobStateError("Cannot complete Job until all stages succeeded or were skipped")
-            try:
-                validate_job_transition(snapshot.status, JobStatus.SUCCEEDED)
-            except ValueError as exc:
-                raise JobStateError(str(exc)) from exc
-            snapshot.status = JobStatus.SUCCEEDED
-            snapshot.current_stage = None
-            return self._persist_event(
+            return self._complete_job_snapshot(connection, snapshot)
+
+    def complete_job_or_confirm_cancel(
+        self,
+        job_id: str,
+        *,
+        artifact: PublishedArtifact | None,
+        lease_token: str,
+        now: datetime | None = None,
+    ) -> JobSnapshot:
+        with self._connect() as connection:
+            self._begin_write(connection)
+            effective_now = now if now is not None else _now()
+            self._require_active_lease(connection, job_id, lease_token, effective_now)
+            snapshot = self._load_job(connection, job_id).model_copy(deep=True)
+            if snapshot.status == JobStatus.CANCEL_REQUESTED:
+                snapshot = self._confirm_cancel_snapshot(connection, snapshot)
+            else:
+                if artifact is not None:
+                    snapshot = self._publish_artifact_snapshot(
+                        connection,
+                        snapshot,
+                        artifact,
+                    )
+                snapshot = self._complete_job_snapshot(connection, snapshot)
+            self._release_lease_record(
                 connection,
-                snapshot,
-                JobEventType.JOB_COMPLETED,
-                {"status": JobStatus.SUCCEEDED.value},
+                job_id,
+                retry_at=None,
+                error=None,
+                reset_attempts=True,
+                now=effective_now,
             )
+            return snapshot
+
+    def _start_stage_snapshot(
+        self,
+        connection: sqlite3.Connection,
+        snapshot: JobSnapshot,
+        stage_code: str,
+    ) -> JobSnapshot:
+        stage_index, stage = self._stage(snapshot, stage_code)
+        incomplete = [
+            predecessor.code
+            for predecessor in snapshot.stages[:stage_index]
+            if predecessor.status not in {StageStatus.SUCCEEDED, StageStatus.SKIPPED}
+        ]
+        if incomplete:
+            raise JobStateError(
+                f"Stage {stage_code!r} has incomplete predecessor stages: {incomplete}"
+            )
+        if snapshot.status == JobStatus.QUEUED:
+            validate_job_transition(JobStatus.QUEUED, JobStatus.RUNNING)
+            snapshot.status = JobStatus.RUNNING
+        elif snapshot.status != JobStatus.RUNNING:
+            raise JobStateError(f"Cannot start a stage while Job is {snapshot.status}")
+        self._validate_stage(stage.status, StageStatus.RUNNING)
+        stage.status = StageStatus.RUNNING
+        stage.attempt += 1
+        stage.started_at = _now()
+        stage.completed_at = None
+        snapshot.current_stage = stage_code
+        return self._persist_event(
+            connection,
+            snapshot,
+            JobEventType.STAGE_STARTED,
+            self._stage_payload(stage),
+        )
+
+    def _publish_artifact_snapshot(
+        self,
+        connection: sqlite3.Connection,
+        snapshot: JobSnapshot,
+        artifact: PublishedArtifact,
+    ) -> JobSnapshot:
+        if artifact.job_id != snapshot.job_id:
+            raise JobStateError("Published artifact Job identity does not match")
+        if artifact.employee_id != snapshot.attribution.employee_id:
+            raise JobStateError("Published artifact employee identity does not match")
+        existing = next(
+            (
+                item
+                for item in snapshot.artifacts
+                if item.employee_artifact_id == artifact.employee_artifact_id
+            ),
+            None,
+        )
+        if existing is not None:
+            if existing != artifact:
+                raise JobConflictError(
+                    "employee_artifact_id was already published with different metadata"
+                )
+            return snapshot
+        snapshot.artifacts = (*snapshot.artifacts, artifact)
+        return self._persist_event(
+            connection,
+            snapshot,
+            JobEventType.ARTIFACT_PUBLISHED,
+            {
+                "artifactId": artifact.employee_artifact_id,
+                "employeeId": artifact.employee_id,
+                "role": artifact.role,
+                "fileName": artifact.file_name,
+                "mediaType": artifact.media_type,
+                "sizeBytes": artifact.size_bytes,
+                "sha256": artifact.sha256,
+                "publishedAt": artifact.published_at.isoformat().replace("+00:00", "Z"),
+            },
+        )
+
+    def _complete_stage_snapshot(
+        self,
+        connection: sqlite3.Connection,
+        snapshot: JobSnapshot,
+        stage_code: str,
+    ) -> JobSnapshot:
+        _, stage = self._stage(snapshot, stage_code)
+        if stage.approval_required and stage.approval_status != ApprovalStatus.APPROVED:
+            raise JobStateError(f"Stage {stage_code!r} requires approval before completion")
+        self._validate_stage(stage.status, StageStatus.SUCCEEDED)
+        stage.status = StageStatus.SUCCEEDED
+        stage.completed_at = _now()
+        snapshot.current_stage = None
+        return self._persist_event(
+            connection,
+            snapshot,
+            JobEventType.STAGE_COMPLETED,
+            self._stage_payload(stage),
+        )
+
+    def _request_stage_approval_snapshot(
+        self,
+        connection: sqlite3.Connection,
+        snapshot: JobSnapshot,
+        stage_code: str,
+        *,
+        reason: str,
+    ) -> JobSnapshot:
+        _, stage = self._stage(snapshot, stage_code)
+        if not stage.approval_required:
+            raise JobStateError(f"Stage {stage_code!r} does not require approval")
+        self._validate_stage(stage.status, StageStatus.WAITING_APPROVAL)
+        try:
+            validate_job_transition(snapshot.status, JobStatus.WAITING_APPROVAL)
+        except ValueError as exc:
+            raise JobStateError(str(exc)) from exc
+        stage.status = StageStatus.WAITING_APPROVAL
+        stage.approval_status = ApprovalStatus.PENDING
+        snapshot.status = JobStatus.WAITING_APPROVAL
+        return self._persist_event(
+            connection,
+            snapshot,
+            JobEventType.JOB_WAITING_APPROVAL,
+            {**self._stage_payload(stage), "reason": reason},
+        )
+
+    def _complete_job_snapshot(
+        self,
+        connection: sqlite3.Connection,
+        snapshot: JobSnapshot,
+    ) -> JobSnapshot:
+        if any(
+            stage.status not in {StageStatus.SUCCEEDED, StageStatus.SKIPPED}
+            for stage in snapshot.stages
+        ):
+            raise JobStateError(
+                "Cannot complete Job until all stages succeeded or were skipped"
+            )
+        try:
+            validate_job_transition(snapshot.status, JobStatus.SUCCEEDED)
+        except ValueError as exc:
+            raise JobStateError(str(exc)) from exc
+        snapshot.status = JobStatus.SUCCEEDED
+        snapshot.current_stage = None
+        return self._persist_event(
+            connection,
+            snapshot,
+            JobEventType.JOB_COMPLETED,
+            {"status": JobStatus.SUCCEEDED.value},
+        )
+
+    @staticmethod
+    def _release_lease_record(
+        connection: sqlite3.Connection,
+        job_id: str,
+        *,
+        retry_at: datetime | None,
+        error: str | None,
+        reset_attempts: bool,
+        now: datetime,
+    ) -> None:
+        connection.execute(
+            """
+            UPDATE openmontage_job_execution
+            SET worker_id = NULL, lease_token = NULL, lease_expires_at = NULL,
+                next_attempt_at = ?, last_error = ?,
+                attempts = CASE WHEN ? THEN 0 ELSE attempts END,
+                updated_at = ?
+            WHERE job_id = ?
+            """,
+            (
+                retry_at.isoformat() if retry_at is not None else None,
+                error[:1000] if error else None,
+                reset_attempts,
+                now.isoformat(),
+                job_id,
+            ),
+        )
+
+    @staticmethod
+    def _validate_job_failure(code: str, message: str) -> None:
+        if not code.strip():
+            raise JobStateError("code must not be empty")
+        if not message.strip():
+            raise JobStateError("message must not be empty")
+
+    def _fail_job_snapshot(
+        self,
+        connection: sqlite3.Connection,
+        snapshot: JobSnapshot,
+        *,
+        code: str,
+        message: str,
+        retryable: bool,
+    ) -> JobSnapshot:
+        try:
+            validate_job_transition(snapshot.status, JobStatus.FAILED)
+        except ValueError as exc:
+            raise JobStateError(str(exc)) from exc
+
+        stage_code = snapshot.current_stage
+        if stage_code is not None:
+            _, stage = self._stage(snapshot, stage_code)
+            if stage.status in {StageStatus.RUNNING, StageStatus.WAITING_APPROVAL}:
+                self._validate_stage(stage.status, StageStatus.FAILED)
+                stage.status = StageStatus.FAILED
+                stage.completed_at = _now()
+        snapshot.status = JobStatus.FAILED
+        return self._persist_event(
+            connection,
+            snapshot,
+            JobEventType.JOB_FAILED,
+            {
+                "stage": stage_code,
+                "status": JobStatus.FAILED.value,
+                "error": {
+                    "code": code,
+                    "message": message,
+                    "retryable": retryable,
+                },
+            },
+        )
+
+    def _confirm_cancel_snapshot(
+        self,
+        connection: sqlite3.Connection,
+        snapshot: JobSnapshot,
+    ) -> JobSnapshot:
+        try:
+            validate_job_transition(snapshot.status, JobStatus.CANCELLED)
+        except ValueError as exc:
+            raise JobStateError(str(exc)) from exc
+        for stage in snapshot.stages:
+            if stage.status in {StageStatus.RUNNING, StageStatus.WAITING_APPROVAL}:
+                self._validate_stage(stage.status, StageStatus.CANCELLED)
+                stage.status = StageStatus.CANCELLED
+                stage.completed_at = _now()
+        snapshot.status = JobStatus.CANCELLED
+        return self._persist_event(
+            connection,
+            snapshot,
+            JobEventType.JOB_CANCELLED,
+            {"status": JobStatus.CANCELLED.value},
+        )
 
     def _load_job(self, connection: sqlite3.Connection, job_id: str) -> JobSnapshot:
         row = connection.execute(
@@ -1009,6 +1449,8 @@ class JobService:
             status=row["delivery_status"],
             delivery_attempts=row["delivery_attempts"],
             next_attempt_at=row["next_attempt_at"],
+            delivery_lease_token=row["delivery_lease_token"],
+            delivery_lease_expires_at=row["delivery_lease_expires_at"],
             delivered_at=row["delivered_at"],
             last_error=row["last_error"],
         )

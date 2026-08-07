@@ -14,6 +14,8 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from tools.base_tool import ToolStatus
+from tools.dofe.client import DofeClient
 from tools.video.dofe_video import MAX_REFERENCE_IMAGES, DofeVideo
 
 
@@ -53,6 +55,32 @@ def test_reference_to_video_reference_roles():
     assert roles[0] is None  # text
     assert all(r == "reference" for r in roles[1:])
     assert len(roles) == 4
+
+
+def test_reference_to_video_accepts_selector_single_reference_alias():
+    payload = _payload(
+        {
+            "prompt": "x",
+            "operation": "reference_to_video",
+            "reference_image_url": "https://cdn.test/reference.png",
+        }
+    )
+
+    assert payload["content"][1]["role"] == "reference"
+    assert payload["content"][1]["part"]["image_url"]["url"] == (
+        "https://cdn.test/reference.png"
+    )
+
+
+def test_reference_to_video_rejects_non_https_reference_url():
+    with pytest.raises(ValueError, match="must be https"):
+        _payload(
+            {
+                "prompt": "x",
+                "operation": "reference_to_video",
+                "reference_image_urls": ["http://cdn.test/reference.png"],
+            }
+        )
 
 
 def test_reference_to_video_local_paths_inlined(tmp_path):
@@ -115,8 +143,14 @@ class _PricingClient:
 def test_text_to_video_dry_run_reports_37_cny_unit_rate(monkeypatch):
     client = _PricingClient()
     monkeypatch.setattr("tools.video.dofe_video.DofePricingClient", lambda: client)
+    monkeypatch.setattr(
+        "tools.video.dofe_video.DofeClient.list_models",
+        lambda _self: [{"id": "catalog-video"}],
+    )
 
-    result = DofeVideo().dry_run({"prompt": "x", "operation": "text_to_video"})
+    result = DofeVideo().dry_run(
+        {"prompt": "x", "operation": "text_to_video", "model_name": "catalog-video"}
+    )
 
     assert result["estimated_cost_usd"] is None
     assert result["pricing"]["amount"] is None
@@ -130,11 +164,16 @@ def test_text_to_video_dry_run_reports_37_cny_unit_rate(monkeypatch):
 def test_image_to_video_quote_uses_video_input_rate_and_estimated_tokens(monkeypatch):
     client = _PricingClient()
     monkeypatch.setattr("tools.video.dofe_video.DofePricingClient", lambda: client)
+    monkeypatch.setattr(
+        "tools.video.dofe_video.DofeClient.list_models",
+        lambda _self: [{"id": "catalog-video"}],
+    )
 
     result = DofeVideo().dry_run(
         {
             "prompt": "x",
             "operation": "image_to_video",
+            "model_name": "catalog-video",
             "estimated_output_tokens": 108_900,
         }
     )
@@ -145,3 +184,263 @@ def test_image_to_video_quote_uses_video_input_rate_and_estimated_tokens(monkeyp
     assert result["pricing"]["quote_basis"] == "estimated_usage"
     assert result["pricing"]["requires_actual_usage"] is False
     assert client.requests[0]["pricingContext"]["hasVideoInput"] is True
+
+
+def test_video_dry_run_rejects_model_missing_from_catalog_before_quote(monkeypatch):
+    def fail_quote():
+        raise AssertionError("pricing must not run for a model absent from the catalog")
+
+    monkeypatch.setattr("tools.video.dofe_video.DofePricingClient", fail_quote)
+    monkeypatch.setattr(
+        "tools.video.dofe_video.DofeClient.list_models",
+        lambda _self: [{"id": "tenant-video"}],
+    )
+
+    result = DofeVideo().dry_run(
+        {"prompt": "x", "model_name": "invented-video"}
+    )
+
+    assert result["pricing"]["available"] is False
+    assert "not returned by GET /v1/models" in result["pricing"]["error"]
+
+
+def test_status_fails_closed_when_configured_model_is_hidden(monkeypatch):
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_VIDEO_MODEL", "hidden-video")
+    monkeypatch.setattr(
+        DofeClient,
+        "list_models",
+        lambda _self: [{"id": "visible-video"}],
+    )
+
+    assert DofeVideo().get_status() == ToolStatus.UNAVAILABLE
+
+
+def test_status_is_available_when_any_configured_model_is_visible(monkeypatch):
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_MODEL_TEXT_TO_VIDEO", "hidden-video")
+    monkeypatch.setenv("DOFE_MODEL_REFERENCE_TO_VIDEO", "visible-video")
+    monkeypatch.setattr(
+        DofeClient,
+        "list_models",
+        lambda _self: [{"id": "visible-video"}],
+    )
+
+    assert DofeVideo().get_status() == ToolStatus.AVAILABLE
+
+
+def test_live_preflight_blocks_an_unsupported_video_operation(monkeypatch):
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_VIDEO_MODEL", "catalog-video")
+    monkeypatch.setattr(
+        DofeClient,
+        "list_models",
+        lambda _self: [{"id": "catalog-video"}],
+    )
+    monkeypatch.setattr(
+        DofeClient,
+        "get_playground_capability",
+        lambda _self, _model: {
+            "alias": "catalog-video",
+            "modelType": "video",
+            "state": "ready",
+            "executor": "generation_task",
+            "endpointKind": "video_async",
+            "input": {
+                "text": True,
+                "acceptedAssetTypes": [],
+                "roles": [],
+            },
+            "operations": [
+                {
+                    "id": "text_to_video",
+                    "labelKey": "operation.text_to_video",
+                    "constraints": {
+                        "acceptedAssetTypes": [],
+                        "roles": [],
+                    },
+                }
+            ],
+            "form": {"fields": []},
+            "output": {"mode": "task"},
+            "readiness": [],
+        },
+        raising=False,
+    )
+
+    report = DofeVideo().preflight(
+        {
+            "prompt": "Keep the vehicle identity stable.",
+            "operation": "reference_to_video",
+            "reference_image_urls": ["https://example.com/vehicle.png"],
+        },
+        live=True,
+    )
+
+    assert report["status"] == "blocked"
+    assert any("reference_to_video" in error["message"] for error in report["errors"])
+
+
+def test_live_preflight_verifies_dofe_reference_contract(monkeypatch):
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_VIDEO_MODEL", "catalog-seedance")
+    monkeypatch.setattr(
+        DofeClient,
+        "list_models",
+        lambda _self: [{"id": "catalog-seedance"}],
+    )
+    monkeypatch.setattr(
+        DofeClient,
+        "get_playground_capability",
+        lambda _self, _model: {
+            "alias": "catalog-seedance",
+            "modelType": "video",
+            "state": "ready",
+            "executor": "generation_task",
+            "endpointKind": "video_async",
+            "input": {
+                "text": True,
+                "acceptedAssetTypes": ["image"],
+                "roles": ["reference"],
+                "minInputAssets": 1,
+                "maxInputAssets": 9,
+            },
+            "operations": [
+                {
+                    "id": "reference_to_video",
+                    "labelKey": "operation.reference_to_video",
+                    "constraints": {
+                        "acceptedAssetTypes": ["image"],
+                        "roles": ["reference"],
+                        "minInputAssets": 1,
+                        "maxInputAssets": 9,
+                        "allowedValues": {
+                            "videoOperation": ["reference_to_video"]
+                        },
+                    },
+                }
+            ],
+            "form": {
+                "fields": [
+                    {"key": "durationSeconds", "type": "slider", "labelKey": "duration"},
+                    {"key": "ratio", "type": "select", "labelKey": "ratio"},
+                    {"key": "generateAudio", "type": "switch", "labelKey": "audio"},
+                ]
+            },
+            "output": {"mode": "task"},
+            "readiness": [],
+        },
+        raising=False,
+    )
+
+    report = DofeVideo().preflight(
+        {
+            "prompt": "Keep the vehicle identity stable.",
+            "operation": "reference_to_video",
+            "duration": "5",
+            "aspect_ratio": "9:16",
+            "generate_audio": False,
+            "reference_image_urls": ["https://example.com/vehicle.png"],
+            "reference_roles": [
+                {
+                    "tag": "vehicle-identity-reference",
+                    "binding_mode": "input_parameter",
+                    "role": "identity",
+                }
+            ],
+        },
+        live=True,
+    )
+
+    assert report["status"] == "passed"
+    assert report["verification_level"] == "live_provider_contract"
+    assert report["live_probe"]["operation"] == "reference_to_video"
+    assert report["live_probe"]["reference_binding"]["roles"] == ["reference"]
+
+
+@pytest.mark.parametrize(
+    ("capability_change", "expected_error"),
+    [
+        ({"input": {"text": False}}, "text prompt"),
+        (
+            {
+                "readiness": [
+                    {
+                        "code": "smoke_pending",
+                        "severity": "blocked",
+                        "action": "view_release_status",
+                    }
+                ]
+            },
+            "smoke_pending",
+        ),
+        (
+            {
+                "form": {
+                    "fields": [
+                        {"key": "durationSeconds", "type": "slider", "labelKey": "duration"},
+                        {"key": "ratio", "type": "select", "labelKey": "ratio"},
+                        {"key": "generateAudio", "type": "switch", "labelKey": "audio"},
+                        {
+                            "key": "resolution",
+                            "type": "select",
+                            "labelKey": "resolution",
+                            "required": True,
+                        },
+                    ]
+                }
+            },
+            "required provider parameter 'resolution'",
+        ),
+    ],
+)
+def test_live_preflight_fails_closed_on_non_executable_projection(
+    monkeypatch,
+    capability_change,
+    expected_error,
+):
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_VIDEO_MODEL", "catalog-video")
+    monkeypatch.setattr(
+        DofeClient,
+        "list_models",
+        lambda _self: [{"id": "catalog-video"}],
+    )
+    capability = {
+        "alias": "catalog-video",
+        "modelType": "video",
+        "state": "ready",
+        "executor": "generation_task",
+        "endpointKind": "video_async",
+        "input": {"text": True, "acceptedAssetTypes": [], "roles": []},
+        "operations": [
+            {
+                "id": "text_to_video",
+                "labelKey": "operation.text_to_video",
+                "constraints": {"acceptedAssetTypes": [], "roles": []},
+            }
+        ],
+        "form": {
+            "fields": [
+                {"key": "durationSeconds", "type": "slider", "labelKey": "duration"},
+                {"key": "ratio", "type": "select", "labelKey": "ratio"},
+                {"key": "generateAudio", "type": "switch", "labelKey": "audio"},
+            ]
+        },
+        "output": {"mode": "task"},
+        "readiness": [],
+    }
+    capability.update(capability_change)
+    monkeypatch.setattr(
+        DofeClient,
+        "get_playground_capability",
+        lambda _self, _model: capability,
+    )
+
+    report = DofeVideo().preflight(
+        {"prompt": "A controlled camera move."},
+        live=True,
+    )
+
+    assert report["status"] == "blocked"
+    assert any(expected_error in error["message"] for error in report["errors"])

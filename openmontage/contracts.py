@@ -353,6 +353,8 @@ class OutboxRecord(WireModel):
     status: str
     delivery_attempts: int = Field(default=0, ge=0)
     next_attempt_at: datetime | None = None
+    delivery_lease_token: str | None = None
+    delivery_lease_expires_at: datetime | None = None
     delivered_at: datetime | None = None
     last_error: str | None = None
 
@@ -437,11 +439,27 @@ _JOB_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
 }
 
 
-def validate_stage_transition(previous: StageStatus, next_status: StageStatus) -> None:
-    if next_status not in _STAGE_TRANSITIONS[previous]:
-        raise ValueError(f"Invalid stage transition: {previous.value} -> {next_status.value}")
+def validate_stage_transition(
+    previous: StageStatus | str,
+    next_status: StageStatus | str,
+) -> None:
+    previous_status = StageStatus(previous)
+    resolved_next_status = StageStatus(next_status)
+    if resolved_next_status not in _STAGE_TRANSITIONS[previous_status]:
+        raise ValueError(
+            "Invalid stage transition: "
+            f"{previous_status.value} -> {resolved_next_status.value}"
+        )
 
 
-def validate_job_transition(previous: JobStatus, next_status: JobStatus) -> None:
-    if next_status not in _JOB_TRANSITIONS[previous]:
-        raise ValueError(f"Invalid job transition: {previous.value} -> {next_status.value}")
+def validate_job_transition(
+    previous: JobStatus | str,
+    next_status: JobStatus | str,
+) -> None:
+    previous_status = JobStatus(previous)
+    resolved_next_status = JobStatus(next_status)
+    if resolved_next_status not in _JOB_TRANSITIONS[previous_status]:
+        raise ValueError(
+            "Invalid job transition: "
+            f"{previous_status.value} -> {resolved_next_status.value}"
+        )

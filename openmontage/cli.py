@@ -174,11 +174,15 @@ def main(argv: list[str] | None = None) -> int:
             while True:
                 result = publisher.publish_pending(limit=args.limit)
                 _print(
-                    {"delivered": result.delivered, "failed": result.failed},
+                    {
+                        "delivered": result.delivered,
+                        "failed": result.failed,
+                        "deadLettered": result.dead_lettered,
+                    },
                     as_json=args.json,
                 )
                 if args.once:
-                    return 1 if result.failed else 0
+                    return 1 if result.failed or result.dead_lettered else 0
                 time.sleep(args.interval)
         if args.command == "worker" and args.worker_command == "run":
             if args.interval <= 0:

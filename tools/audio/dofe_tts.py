@@ -19,11 +19,13 @@ from tools.base_tool import (
     ToolResult,
     ToolRuntime,
     ToolStability,
+    ToolStatus,
     ToolTier,
 )
 from tools.dofe import DofeToolSpec, probe_audio
 from tools.dofe.models import resolve_alias
 from tools.dofe.runtime import build_metadata, run_dofe_generation
+from tools.dofe.status import configured_model_is_visible
 
 
 class DofeTTS(BaseTool):
@@ -41,7 +43,7 @@ class DofeTTS(BaseTool):
     install_instructions = (
         "Set DOFE_MODEL_API_KEY in .env for the models.dofe.ai gateway. "
         "Set DOFE_ENABLED=true to make tts_selector prefer the dofe chain. "
-        "Set DOFE_TTS_MODEL to a published TTS alias once the gateway registers one."
+        "Read GET /v1/models and set DOFE_TTS_MODEL to one returned model ID."
     )
     agent_skills = ["text-to-speech"]
 
@@ -82,7 +84,7 @@ class DofeTTS(BaseTool):
                 "maximum": 100,
                 "description": "Speech rate (params.speechRate, -50..100).",
             },
-            "model_name": {"type": "string", "description": "Explicit dofe TTS alias. Overrides DOFE_TTS_MODEL."},
+            "model_name": {"type": "string", "description": "Exact ID from GET /v1/models. Overrides DOFE_TTS_MODEL."},
             "task_id": {"type": "string", "description": "Resume polling an earlier timed-out dofe task."},
             "output_path": {"type": "string"},
         },
@@ -95,6 +97,16 @@ class DofeTTS(BaseTool):
     idempotency_key_fields = ["text", "voice", "format", "speed", "model_name"]
     side_effects = ["paid remote generation via models.dofe.ai gateway", "writes audio file to output_path"]
     user_visible_verification = ["Listen to generated audio for intelligibility and tone"]
+
+    def get_status(self) -> ToolStatus:
+        status = super().get_status()
+        if status == ToolStatus.UNAVAILABLE:
+            return status
+        return (
+            ToolStatus.AVAILABLE
+            if configured_model_is_visible("tts", ("generate",))
+            else ToolStatus.UNAVAILABLE
+        )
 
     # ------------------------------------------------------------------ cost
 

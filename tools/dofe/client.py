@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Any
+from urllib.parse import quote
 
 try:
     import truststore
@@ -286,6 +287,31 @@ class DofeClient:
                 f"dofe model-list response missing data list: {sanitize_for_log(body)}"
             )
         return [item for item in models if isinstance(item, dict)]
+
+    def get_playground_capability(self, model_id: str) -> dict[str, Any]:
+        """Return the executable projection for one exact tenant-visible model ID."""
+
+        requested = str(model_id).strip()
+        if not requested:
+            raise DofeAPIError("dofe playground capability requires a model ID")
+        encoded = quote(requested, safe="")
+        body = self._request(
+            "get",
+            f"/v1/models/{encoded}/playground-capability",
+        )
+        data = self._unwrap(body)
+        capability = data.get("capability") if isinstance(data, dict) else None
+        if not isinstance(capability, dict):
+            raise DofeAPIError(
+                "dofe playground-capability response missing data.capability: "
+                f"{sanitize_for_log(body)}"
+            )
+        if capability.get("alias") != requested:
+            raise DofeAPIError(
+                "dofe playground-capability alias mismatch: "
+                f"requested {requested!r}, received {capability.get('alias')!r}"
+            )
+        return capability
 
     def create_task(self, payload: dict[str, Any]) -> dict[str, Any]:
         """POST /v1/generation/tasks. Not retried (avoid double charge)."""

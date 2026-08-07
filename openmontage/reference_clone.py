@@ -15,9 +15,10 @@ from lib.paths import PROJECTS_DIR
 from lib.pipeline_loader import load_pipeline_readonly, pipeline_supports_reference_input
 from lib.video_sources import detect_video_platform, normalize_video_url
 from tools.analysis.video_analyzer import VideoAnalyzer
+from tools.dofe import config as dofe_config
 from tools.dofe.client import DofeClient
 from tools.dofe.errors import DofeError
-from tools.dofe.models import resolve_alias
+from tools.dofe.models import catalog_model_ids, resolve_alias
 from tools.tool_registry import registry
 
 from openmontage.capabilities import job_submission_capability
@@ -71,31 +72,37 @@ def _brief_path(project_dir: Path) -> Path:
 
 
 def _airouter_model_preflight() -> dict[str, Any]:
-    required = {
+    selected = {
         "image": resolve_alias("image", "generate"),
         "video": resolve_alias("video", "text_to_video"),
         "stt": resolve_alias("stt", "transcribe"),
     }
+    unconfigured = [
+        capability for capability, alias in selected.items() if not alias
+    ]
     try:
-        visible = {
-            str(item.get("id"))
-            for item in DofeClient().list_models()
-            if item.get("id")
-        }
+        catalog = catalog_model_ids(DofeClient().list_models())
     except DofeError as exc:
         return {
             "status": "unreachable",
-            "required_models": required,
-            "visible_required_models": [],
-            "missing_required_models": [alias for alias in required.values() if alias],
+            "catalog_endpoint": f"{dofe_config.dofe_base_url()}/v1/models",
+            "selected_models": selected,
+            "catalog_models": [],
+            "visible_selected_models": [],
+            "missing_selected_models": [alias for alias in selected.values() if alias],
+            "unconfigured_capabilities": unconfigured,
             "error": str(exc),
         }
-    missing = [alias for alias in required.values() if alias and alias not in visible]
+    visible = set(catalog)
+    missing = [alias for alias in selected.values() if alias and alias not in visible]
     return {
-        "status": "ready" if not missing else "blocked",
-        "required_models": required,
-        "visible_required_models": [alias for alias in required.values() if alias in visible],
-        "missing_required_models": missing,
+        "status": "ready" if not missing and not unconfigured else "blocked",
+        "catalog_endpoint": f"{dofe_config.dofe_base_url()}/v1/models",
+        "selected_models": selected,
+        "catalog_models": list(catalog),
+        "visible_selected_models": [alias for alias in selected.values() if alias in visible],
+        "missing_selected_models": missing,
+        "unconfigured_capabilities": unconfigured,
     }
 
 
@@ -162,6 +169,7 @@ class ReferenceCloneService:
 
         preflight = capability_summary()
         preflight["airouter"] = _airouter_model_preflight()
+        models_base_url = dofe_config.dofe_base_url()
         request = {
             "version": "1.0",
             "status": "prepared",
@@ -186,7 +194,8 @@ class ReferenceCloneService:
             "model_routing": {
                 "policy": "dofe_airouter_only",
                 "provider": "dofe",
-                "base_url": "https://model.local.dofe.ai/api",
+                "base_url": models_base_url,
+                "catalog_endpoint": f"{models_base_url}/v1/models",
                 "direct_provider_fallback": False,
             },
             "next_stage": get_next_stage(
@@ -198,7 +207,7 @@ class ReferenceCloneService:
                 "Run the selected pipeline stage by stage and honor every manifest approval gate.",
                 "Before submitting a Job, follow preflight.job_submission; workflow is the pipeline name, not a stage such as compose.",
                 "Use only source material the user is authorized to reference or transform.",
-                "Route every model call through provider=dofe at https://model.local.dofe.ai/api; block instead of using a direct provider fallback.",
+                f"Fetch model IDs from {models_base_url}/v1/models before selection; use only an exact returned ID and block instead of guessing or using a direct-provider fallback.",
             ],
         }
         request_path = project_dir / "artifacts" / "reference_clone_request.json"

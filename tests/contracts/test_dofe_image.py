@@ -38,7 +38,18 @@ def test_registry_discovers_dofe_image(monkeypatch, isolated_tool_registry):
 
 def test_status_available_with_key(monkeypatch):
     monkeypatch.setenv("DOFE_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_IMAGE_MODEL", "catalog-image")
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.list_models",
+        lambda _self: [{"id": "catalog-image"}],
+    )
     assert DofeImage().get_status() == ToolStatus.AVAILABLE
+
+
+def test_status_unavailable_without_catalog_selection(monkeypatch):
+    monkeypatch.setenv("DOFE_API_KEY", "test-key")
+    monkeypatch.delenv("DOFE_IMAGE_MODEL", raising=False)
+    assert DofeImage().get_status() == ToolStatus.UNAVAILABLE
 
 
 def test_status_unavailable_without_key(monkeypatch):
@@ -76,6 +87,11 @@ def _fake_execute(self, inputs):
 def test_image_selector_switch_on_picks_dofe(monkeypatch, isolated_tool_registry):
     monkeypatch.setenv("DOFE_ENABLED", "true")
     monkeypatch.setenv("DOFE_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_IMAGE_MODEL", "catalog-image")
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.list_models",
+        lambda _self: [{"id": "catalog-image"}],
+    )
     isolated_tool_registry.discover("tools")
     monkeypatch.setattr(DofeImage, "execute", _fake_execute)
 
@@ -103,7 +119,12 @@ def test_image_selector_switch_off_runs_original_scoring(monkeypatch, isolated_t
 def test_image_selector_switch_beats_explicit_direct_provider(monkeypatch, isolated_tool_registry):
     monkeypatch.setenv("DOFE_ENABLED", "true")
     monkeypatch.setenv("DOFE_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_IMAGE_MODEL", "catalog-image")
     monkeypatch.setenv("FAL_KEY", "test-fal")
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.list_models",
+        lambda _self: [{"id": "catalog-image"}],
+    )
     isolated_tool_registry.discover("tools")
     monkeypatch.setattr(DofeImage, "execute", _fake_execute)
 

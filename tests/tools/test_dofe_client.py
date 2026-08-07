@@ -141,6 +141,32 @@ def test_list_models_returns_tenant_visible_aliases():
     assert [item["id"] for item in result] == ["seedream-5.0"]
 
 
+def test_get_playground_capability_returns_exact_visible_model_projection():
+    capability = {
+        "alias": "seedance/video 2",
+        "modelType": "video",
+        "state": "ready",
+    }
+    with _rm.Mocker() as m:
+        m.get(
+            f"{BASE}/v1/models/seedance%2Fvideo%202/playground-capability",
+            json=_ok({"capability": capability}),
+        )
+        result = _client().get_playground_capability("seedance/video 2")
+
+    assert result == capability
+
+
+def test_get_playground_capability_rejects_alias_mismatch():
+    with _rm.Mocker() as m:
+        m.get(
+            f"{BASE}/v1/models/requested/playground-capability",
+            json=_ok({"capability": {"alias": "different"}}),
+        )
+        with pytest.raises(DofeAPIError, match="alias mismatch"):
+            _client().get_playground_capability("requested")
+
+
 def test_delegated_requests_sign_job_stage_and_one_invocation_id_across_retries(monkeypatch):
     monkeypatch.setenv("DOFE_DELEGATION_ID", "delegation-1")
     monkeypatch.setenv("DOFE_EXTERNAL_JOB_ID", "job-1")

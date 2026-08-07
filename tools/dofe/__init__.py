@@ -1,6 +1,6 @@
 """Shared package for the models.dofe.ai gateway provider family.
 
-Public surface used by the five ``dofe_*`` tools and the three selectors:
+Public surface used by the six ``dofe_*`` tools and the three selectors:
 
 - :class:`DofeClient` — HTTP/task client (auth, retry, poll, download).
 - :class:`DofeToolSpec`, :func:`run_dofe_generation` — shared execute body.
@@ -26,7 +26,7 @@ from .errors import (
 )
 from .media import file_to_data_uri, is_https_url, resolve_image_source, sanitize_for_log
 from .media_upload import DofeMediaUploadClient, DofeMediaUploadError
-from .models import resolve_alias
+from .models import catalog_model_ids, resolve_alias, validate_catalog_alias
 from .pricing import DofePricingClient, DofePricingError
 from .runtime import DofeToolSpec, probe_audio, probe_image, probe_video, run_dofe_generation
 
@@ -54,9 +54,11 @@ __all__ = [
     "probe_audio",
     "probe_image",
     "probe_video",
+    "catalog_model_ids",
     "resolve_alias",
     "resolve_image_source",
     "run_dofe_generation",
     "sanitize_for_log",
     "select_dofe_if_enabled",
+    "validate_catalog_alias",
 ]

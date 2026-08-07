@@ -59,26 +59,27 @@ original production.
 
 Treat model routing as a hard constraint: every LLM, image, video, TTS, music,
 or avatar model call must use `provider=dofe` through
-`https://model.local.dofe.ai/api`. Use the `dofe_*` provider tools or selectors
-with `DOFE_ENABLED=true`. Never invoke a vendor-direct model tool and never
-silently fall back outside the Airouter. If the required DoFe alias is missing,
-stop with a blocker and report which capability/alias must be added.
+the effective DoFe base URL. Fetch its authenticated `GET /v1/models` catalog
+first and use only an exact returned ID. Use the `dofe_*` provider tools or
+selectors with `DOFE_ENABLED=true`. Never invoke a vendor-direct model tool and never
+silently fall back outside the Airouter. If no suitable catalog ID is selected,
+stop with a blocker and report which capability needs a model selection.
 
 Before generation, resolve:
 
 - topic and creative difference from the reference;
 - target platform, duration, and aspect ratio;
 - narration architecture and music source;
-- Airouter model-alias options with itemized cost;
+- Airouter catalog-model options with itemized cost;
 - Remotion versus HyperFrames when both are available;
 - templated versus atelier composition mode;
 - source-rights confirmation and approval policy.
 
 Wait for explicit approval at every manifest gate. Announce each paid tool,
 provider, model, reason, sample/batch scope, and estimated cost before calling it.
-For this reference-clone pipeline, use `seedance-2.0-fast` for video generation
-and `openspeech-auc` for STT. HeyGen is not required: it remains optional only
-for avatar/presenter/lip-sync workflows and must not be called directly while
+Never prescribe a fixed video or STT model in this skill; the current tenant
+catalog is the only source of model IDs. HeyGen is not required: it remains
+optional only for avatar/presenter/lip-sync workflows and must not be called directly while
 AIRouter-only routing is enabled.
 
 Treat a missing or zero tenant-effective price as a hard blocker. The model must
@@ -109,8 +110,8 @@ motion with still images. Stop at the relevant approval gate or structured block
 
 - Download failure: retry with current yt-dlp; for Douyin use the built-in share
   fallback, then request `cookies.txt` only if the public route is restricted.
-- Missing transcript: use `dofe_stt` with `openspeech-auc`. If the extracted file
-  has no provider-accessible URL or the restricted alias is not granted to the
+- Missing transcript: use `dofe_stt` with an STT ID returned by the current
+  catalog. If the extracted file has no provider-accessible URL or the selected ID is not visible to the
   tenant, stop and report that AIRouter/storage blocker; do not fall back to a
   direct provider or local Whisper while `DOFE_ENABLED=true`.
 - Missing scenes: use uniform frame sampling and disclose reduced confidence.

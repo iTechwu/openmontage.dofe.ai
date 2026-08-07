@@ -21,7 +21,8 @@ def test_agent_skills_and_mcp_configs_are_discoverable():
     assert claude_skill.is_file()
     body = codex_skill.read_text()
     assert "www.douyin.com" in body or "douyin.com" in body
-    assert "https://model.local.dofe.ai/api" in body
+    assert "GET /v1/models" in body
+    assert "exact returned ID" in body
     assert "Never invoke a vendor-direct model tool" in body
 
     claude_mcp = json.loads((ROOT / ".mcp.json").read_text())
@@ -38,6 +39,8 @@ def test_docker_contract_exposes_mcp_and_persists_projects():
     assert "./projects:/data/projects" in compose
     assert "DOFE_ENABLED: \"true\"" in compose
     assert "OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL" in compose
+    assert "DOFE_DOCKER_MODEL_BASE_URL" in compose
+    assert "http://api:3101" in compose
     assert "DOFE_MODEL_API_KEY:" not in compose
     assert "INTERNAL_API_SECRET:" not in compose
     assert "modelsdofeai_default" in compose

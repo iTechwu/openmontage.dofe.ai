@@ -163,9 +163,14 @@ def test_multi_model_gateways_only_expose_seedance_skills_for_seedance(tool_clas
 
 def test_dofe_gateway_selects_skills_from_model_alias(monkeypatch):
     tool = DofeVideo()
+    monkeypatch.setattr(
+        "tools.video.dofe_video.DofeClient.list_models",
+        lambda _self: [{"id": "seedance-2.0-fast"}, {"id": "kling-3.0"}],
+    )
     monkeypatch.setenv("DOFE_VIDEO_MODEL", "kling-3.0")
     assert tool.agent_skills_for({}) == ["ai-video-gen"]
     assert tool.agent_skills_for({"model_name": "seedance-2.0-fast"})[:5] == list(SKILL_NAMES)
+    assert tool.agent_skills_for({"model_name": "invented-seedance"}) == ["ai-video-gen"]
 
 
 def test_selector_exposes_input_aware_skills_in_execution_context():
@@ -196,6 +201,47 @@ def test_selector_adapts_shared_fields_to_runway_contract():
     assert adapted["ratio"] == "9:16"
     assert adapted["duration"] == 10
     assert adapted["image_url"] == "https://example.com/car.png"
+
+
+def test_selector_passes_local_first_frame_through_seedance_contract(
+    monkeypatch,
+    tmp_path,
+    isolated_tool_registry,
+):
+    monkeypatch.setenv("FAL_KEY", "test-key")
+    image_path = tmp_path / "first-frame.png"
+    image_path.write_bytes(b"image")
+    isolated_tool_registry.discover("tools")
+    seen = {}
+
+    def fake_execute(self, inputs):
+        seen.update(inputs)
+        return ToolResult(
+            success=True,
+            data={"output_path": "out.mp4", "provider": self.provider},
+            artifacts=["out.mp4"],
+        )
+
+    def fail_upload(path):
+        raise AssertionError("selector must not upload a provider-supported local image")
+
+    monkeypatch.setattr(SeedanceVideo, "execute", fake_execute)
+    monkeypatch.setattr("tools.video._shared.upload_image_fal", fail_upload)
+
+    result = isolated_tool_registry.get("video_selector").execute(
+        {
+            "prompt": "Animate the first frame.",
+            "operation": "image_to_video",
+            "preferred_provider": "seedance",
+            "allowed_providers": ["seedance"],
+            "reference_image_path": str(image_path),
+            "live_preflight": False,
+        }
+    )
+
+    assert result.success
+    assert result.data["selected_tool"] == "seedance_video"
+    assert seen["image_path"] == str(image_path)
 
 
 def test_selector_filters_providers_that_contradict_explicit_aspect_ratio():

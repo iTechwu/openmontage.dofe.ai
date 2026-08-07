@@ -410,8 +410,11 @@ class VideoSelector(BaseTool):
         # Auto-resolve reference_image_path to a URL for providers that need it
         if adapted.get("operation") == "image_to_video" and adapted.get("reference_image_path"):
             tool_props = getattr(tool, "input_schema", {}).get("properties", {})
-            # If the provider uses image_url (not reference_image_path), upload and convert
-            if "image_url" in tool_props and "image_url" not in adapted:
+            supports_local_image = (
+                "reference_image_path" in tool_props or "image_path" in tool_props
+            )
+            # Upload only when the provider cannot consume a local path itself.
+            if "image_url" in tool_props and not supports_local_image and "image_url" not in adapted:
                 try:
                     from tools.video._shared import upload_image_fal
                     adapted["image_url"] = upload_image_fal(adapted["reference_image_path"])
@@ -555,6 +558,7 @@ class VideoSelector(BaseTool):
             ("model_name", "model"),
             ("aspect_ratio", "ratio"),
             ("reference_image_url", "image_url"),
+            ("reference_image_path", "image_path"),
         )
         for source, target in aliases:
             if target in properties and target not in adapted and adapted.get(source) is not None:

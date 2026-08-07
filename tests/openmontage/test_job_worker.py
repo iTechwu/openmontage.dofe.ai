@@ -4,9 +4,14 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
+import sqlite3
+from threading import Event
+from time import monotonic, sleep
+
+import pytest
 
 from lib.checkpoint import init_project, read_checkpoint, write_checkpoint
-from openmontage.artifact_bridge import ArtifactDownload
+from openmontage.artifact_bridge import ArtifactBridgeError, ArtifactDownload
 from openmontage.contracts import (
     ArtifactJobInput,
     ArtifactMetadata,
@@ -17,9 +22,11 @@ from openmontage.contracts import (
     PublishedArtifact,
     StageStatus,
 )
-from openmontage.job_service import JobService
+from openmontage.job_service import JobLeaseError, JobService
 from openmontage.job_worker import JobWorker
+from openmontage.model_credential_bridge import ModelCredentialBridgeError
 from openmontage.pipeline_executor import (
+    PipelineExecutionCancelled,
     PipelineExecutionError,
     PipelineExecutionResult,
     StageAssignment,
@@ -65,6 +72,7 @@ class FakeExecutor:
         assignment: StageAssignment,
         *,
         credential: DelegatedModelCredential | None = None,
+        cancellation_requested=None,
     ) -> PipelineExecutionResult:
         self.assignments.append(assignment)
         self.credentials.append(credential)
@@ -159,6 +167,29 @@ class FakeModelCredentialBridge:
             expires_at="2026-08-06T09:00:01Z",
         )
 
+
+class InterleavingCancelJobService(JobService):
+    cancel_after_next_read = False
+
+    def _inject_cancel_after_read(self, job_id: str):
+        snapshot = super().get_job(job_id)
+        if self.cancel_after_next_read:
+            self.cancel_after_next_read = False
+            super().request_cancel(job_id)
+        return snapshot
+
+    def get_job(self, job_id: str):
+        return self._inject_cancel_after_read(job_id)
+
+    def release_lease_or_confirm_cancel(self, job_id: str, **kwargs):
+        self._inject_cancel_after_read(job_id)
+        return super().release_lease_or_confirm_cancel(job_id, **kwargs)
+
+    def fail_job_or_confirm_cancel(self, job_id: str, **kwargs):
+        self._inject_cancel_after_read(job_id)
+        return super().fail_job_or_confirm_cancel(job_id, **kwargs)
+
+
 def _worker(
     service: JobService,
     executor: FakeExecutor,
@@ -198,6 +229,79 @@ def test_worker_executes_one_stage_and_updates_job_state(tmp_path: Path) -> None
     assert len(executor.assignments) == 1
 
 
+def test_worker_atomically_prefers_cancel_before_stage_start(tmp_path: Path) -> None:
+    class CancelBeforeStartService(JobService):
+        def start_stage_or_confirm_cancel(self, job_id: str, stage_code: str, **kwargs):
+            super().request_cancel(job_id)
+            return super().start_stage_or_confirm_cancel(job_id, stage_code, **kwargs)
+
+    service = CancelBeforeStartService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="cancel-before-start"), _attribution())
+    executor = FakeExecutor(["completed"])
+
+    result = _worker(service, executor, tmp_path / "projects").run_once(now=NOW)
+
+    restored = service.get_job(job.job_id)
+    assert result is not None and result.outcome == "job_cancelled"
+    assert restored.status == JobStatus.CANCELLED
+    assert restored.stages[0].status == StageStatus.PENDING
+    assert executor.assignments == []
+
+
+def test_worker_atomically_prefers_cancel_before_stage_completion(tmp_path: Path) -> None:
+    class CancelBeforeCompletionService(JobService):
+        def complete_stage_or_confirm_cancel(self, job_id: str, stage_code: str, **kwargs):
+            super().request_cancel(job_id)
+            return super().complete_stage_or_confirm_cancel(job_id, stage_code, **kwargs)
+
+    service = CancelBeforeCompletionService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="cancel-before-completion"), _attribution())
+
+    result = _worker(
+        service,
+        FakeExecutor(["completed"]),
+        tmp_path / "projects",
+    ).run_once(now=NOW)
+
+    restored = service.get_job(job.job_id)
+    assert result is not None and result.outcome == "job_cancelled"
+    assert restored.status == JobStatus.CANCELLED
+    assert restored.stages[0].status == StageStatus.CANCELLED
+
+
+def test_worker_atomically_prefers_cancel_before_approval_wait(tmp_path: Path) -> None:
+    class CancelBeforeApprovalService(JobService):
+        def request_stage_approval_or_confirm_cancel(
+            self,
+            job_id: str,
+            stage_code: str,
+            **kwargs,
+        ):
+            super().request_cancel(job_id)
+            return super().request_stage_approval_or_confirm_cancel(
+                job_id,
+                stage_code,
+                **kwargs,
+            )
+
+    service = CancelBeforeApprovalService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(
+        _request(request_id="cancel-before-approval", workflow="framework-smoke"),
+        _attribution(),
+    )
+
+    result = _worker(
+        service,
+        FakeExecutor(["awaiting_human"]),
+        tmp_path / "projects",
+    ).run_once(now=NOW)
+
+    restored = service.get_job(job.job_id)
+    assert result is not None and result.outcome == "job_cancelled"
+    assert restored.status == JobStatus.CANCELLED
+    assert restored.stages[0].status == StageStatus.CANCELLED
+
+
 def test_worker_fetches_and_scopes_a_delegated_model_credential_per_stage(tmp_path: Path) -> None:
     service = JobService(tmp_path / "jobs.sqlite3")
     job = service.create_job(_request(request_id="delegated-stage"), _attribution())
@@ -219,6 +323,116 @@ def test_worker_fetches_and_scopes_a_delegated_model_credential_per_stage(tmp_pa
     }]
     assert executor.credentials[0] is not None
     assert executor.credentials[0].pipeline_stage == "research"
+
+
+def test_worker_persists_safe_model_credential_failure_diagnostics(tmp_path: Path) -> None:
+    database_path = tmp_path / "jobs.sqlite3"
+    service = JobService(database_path)
+    job = service.create_job(_request(request_id="credential-diagnostics"), _attribution())
+    executor = FakeExecutor([])
+
+    class FailingCredentialBridge:
+        def issue(self, **_kwargs):
+            raise ModelCredentialBridgeError(
+                "AgentSpace model credential request failed "
+                "(HTTP 503, OPENMONTAGE_MODEL_CREDENTIAL_UNAVAILABLE)"
+            )
+
+    worker = _worker(
+        service,
+        executor,
+        tmp_path / "projects",
+        max_executor_attempts=2,
+        model_credential_bridge=FailingCredentialBridge(),
+    )
+
+    retry = worker.run_once(now=NOW)
+    with sqlite3.connect(database_path) as connection:
+        last_error = connection.execute(
+            "SELECT last_error FROM openmontage_job_execution WHERE job_id = ?",
+            (job.job_id,),
+        ).fetchone()[0]
+    assert retry is not None and retry.outcome == "credential_retry_scheduled"
+    assert "HTTP 503" in last_error
+    assert "OPENMONTAGE_MODEL_CREDENTIAL_UNAVAILABLE" in last_error
+
+    failed = worker.run_once(now=NOW + timedelta(seconds=1))
+    event = service.list_events(job.job_id)[-1]
+    assert failed is not None and failed.outcome == "job_failed"
+    assert event.payload["error"]["code"] == "OPENMONTAGE_MODEL_CREDENTIAL_UNAVAILABLE"
+    assert "HTTP 503" in event.payload["error"]["message"]
+
+
+def test_worker_schedules_zero_delay_credential_retry_with_default_clock(
+    tmp_path: Path,
+) -> None:
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="credential-zero-delay"), _attribution())
+
+    class FailingCredentialBridge:
+        def issue(self, **_kwargs):
+            raise ModelCredentialBridgeError("temporary credential failure")
+
+    result = _worker(
+        service,
+        FakeExecutor([]),
+        tmp_path / "projects",
+        model_credential_bridge=FailingCredentialBridge(),
+    ).run_once()
+
+    assert result is not None and result.outcome == "credential_retry_scheduled"
+    reclaimed = service.claim_job(
+        worker_id="next-worker",
+        lease_duration=timedelta(seconds=30),
+    )
+    assert reclaimed is not None and reclaimed.job_id == job.job_id
+
+
+def test_worker_atomically_prefers_cancel_over_credential_retry(tmp_path: Path) -> None:
+    service = InterleavingCancelJobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="credential-cancel-race"), _attribution())
+
+    class FailingCredentialBridge:
+        def issue(self, **_kwargs):
+            service.cancel_after_next_read = True
+            raise ModelCredentialBridgeError("temporary credential failure")
+
+    result = _worker(
+        service,
+        FakeExecutor([]),
+        tmp_path / "projects",
+        model_credential_bridge=FailingCredentialBridge(),
+    ).run_once(now=NOW)
+
+    restored = service.get_job(job.job_id)
+    assert result is not None and result.outcome == "job_cancelled"
+    assert restored.status == JobStatus.CANCELLED
+    assert restored.stages[0].status == StageStatus.CANCELLED
+
+
+def test_worker_atomically_prefers_cancel_over_terminal_credential_failure(
+    tmp_path: Path,
+) -> None:
+    service = InterleavingCancelJobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="credential-terminal-cancel"), _attribution())
+
+    class FailingCredentialBridge:
+        def issue(self, **_kwargs):
+            service.cancel_after_next_read = True
+            raise ModelCredentialBridgeError("terminal credential failure")
+
+    result = _worker(
+        service,
+        FakeExecutor([]),
+        tmp_path / "projects",
+        max_executor_attempts=1,
+        model_credential_bridge=FailingCredentialBridge(),
+    ).run_once(now=NOW)
+
+    restored = service.get_job(job.job_id)
+    assert result is not None and result.outcome == "job_cancelled"
+    assert restored.status == JobStatus.CANCELLED
+    assert restored.stages[0].status == StageStatus.CANCELLED
 
 
 def test_worker_reconciles_completed_checkpoint_without_repeating_executor(
@@ -299,6 +513,67 @@ def test_worker_retries_executor_error_then_completes_same_running_stage(
     assert len(executor.assignments) == 2
 
 
+def test_worker_schedules_zero_delay_retry_with_default_clock(tmp_path: Path) -> None:
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="zero-delay-retry"), _attribution())
+    executor = FakeExecutor([PipelineExecutionError("temporary agent failure")])
+
+    result = _worker(service, executor, tmp_path / "projects").run_once()
+
+    restored = service.get_job(job.job_id)
+    assert result is not None and result.outcome == "retry_scheduled"
+    assert restored.status == JobStatus.RUNNING
+    assert restored.stages[0].status == StageStatus.RUNNING
+    reclaimed = service.claim_job(
+        worker_id="next-worker",
+        lease_duration=timedelta(seconds=30),
+    )
+    assert reclaimed is not None
+    assert reclaimed.job_id == job.job_id
+
+
+def test_worker_schedules_zero_delay_in_progress_retry_with_default_clock(
+    tmp_path: Path,
+) -> None:
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="in-progress-zero-delay"), _attribution())
+
+    result = _worker(
+        service,
+        FakeExecutor(["in_progress"]),
+        tmp_path / "projects",
+    ).run_once()
+
+    assert result is not None and result.outcome == "stage_in_progress"
+    reclaimed = service.claim_job(
+        worker_id="next-worker",
+        lease_duration=timedelta(seconds=30),
+    )
+    assert reclaimed is not None and reclaimed.job_id == job.job_id
+
+
+def test_worker_atomically_prefers_cancel_over_in_progress_retry(tmp_path: Path) -> None:
+    service = InterleavingCancelJobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="in-progress-cancel-race"), _attribution())
+
+    class CancellingInProgressExecutor(FakeExecutor):
+        def execute(self, assignment, **kwargs):
+            result = super().execute(assignment, **kwargs)
+            service.cancel_after_next_read = True
+            return result
+
+    result = _worker(
+        service,
+        CancellingInProgressExecutor(["in_progress"]),
+        tmp_path / "projects",
+    ).run_once(now=NOW)
+
+    restored = service.get_job(job.job_id)
+    assert result is not None and result.outcome == "job_cancelled"
+    assert restored.status == JobStatus.CANCELLED
+    assert restored.stages[0].status == StageStatus.CANCELLED
+
+
 def test_worker_fails_job_after_bounded_executor_errors(tmp_path: Path) -> None:
     service = JobService(tmp_path / "jobs.sqlite3")
     job = service.create_job(_request(request_id="bounded-failure"), _attribution())
@@ -319,6 +594,141 @@ def test_worker_fails_job_after_bounded_executor_errors(tmp_path: Path) -> None:
     assert result is not None and result.outcome == "job_failed"
     assert restored.status == JobStatus.FAILED
     assert restored.stages[0].status == StageStatus.FAILED
+    failed_event = service.list_events(job.job_id)[-1]
+    assert failed_event.payload["error"]["message"] == "failure two"
+
+
+def test_worker_confirms_cancel_after_executor_terminates_in_flight_process(
+    tmp_path: Path,
+) -> None:
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="cancel-in-flight"), _attribution())
+
+    class CancellingExecutor:
+        def execute(self, assignment, *, credential=None, cancellation_requested=None):
+            service.request_cancel(assignment.job_id)
+            raise PipelineExecutionCancelled()
+
+    worker = _worker(service, CancellingExecutor(), tmp_path / "projects")
+
+    result = worker.run_once(now=NOW)
+
+    restored = service.get_job(job.job_id)
+    assert result is not None and result.outcome == "job_cancelled"
+    assert restored.status == JobStatus.CANCELLED
+    assert restored.stages[0].status == StageStatus.CANCELLED
+
+
+def test_worker_prefers_cancel_requested_over_an_executor_error(tmp_path: Path) -> None:
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="cancel-error-race"), _attribution())
+
+    class CancellingErrorExecutor:
+        def execute(self, assignment, *, credential=None, cancellation_requested=None):
+            service.request_cancel(assignment.job_id)
+            raise PipelineExecutionError("executor exited during cancellation")
+
+    worker = _worker(service, CancellingErrorExecutor(), tmp_path / "projects")
+
+    result = worker.run_once(now=NOW)
+
+    restored = service.get_job(job.job_id)
+    assert result is not None and result.outcome == "job_cancelled"
+    assert restored.status == JobStatus.CANCELLED
+    assert restored.stages[0].status == StageStatus.CANCELLED
+
+
+def test_worker_atomically_prefers_cancel_arriving_before_retry_release(
+    tmp_path: Path,
+) -> None:
+    service = InterleavingCancelJobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="cancel-before-retry"), _attribution())
+
+    class FailingExecutor:
+        def execute(self, assignment, *, credential=None, cancellation_requested=None):
+            service.cancel_after_next_read = True
+            raise PipelineExecutionError("executor failed as cancellation arrived")
+
+    result = _worker(service, FailingExecutor(), tmp_path / "projects").run_once(now=NOW)
+
+    restored = service.get_job(job.job_id)
+    assert result is not None and result.outcome == "job_cancelled"
+    assert restored.status == JobStatus.CANCELLED
+    assert restored.stages[0].status == StageStatus.CANCELLED
+
+
+def test_worker_atomically_prefers_cancel_arriving_before_terminal_failure(
+    tmp_path: Path,
+) -> None:
+    service = InterleavingCancelJobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="cancel-before-failure"), _attribution())
+
+    class FailingExecutor:
+        def execute(self, assignment, *, credential=None, cancellation_requested=None):
+            service.cancel_after_next_read = True
+            raise PipelineExecutionError("executor failed as cancellation arrived")
+
+    worker = _worker(
+        service,
+        FailingExecutor(),
+        tmp_path / "projects",
+        max_executor_attempts=1,
+    )
+
+    result = worker.run_once(now=NOW)
+
+    restored = service.get_job(job.job_id)
+    assert result is not None and result.outcome == "job_cancelled"
+    assert restored.status == JobStatus.CANCELLED
+    assert restored.stages[0].status == StageStatus.CANCELLED
+
+
+def test_worker_interrupts_executor_and_fences_writes_after_heartbeat_failure(
+    tmp_path: Path,
+) -> None:
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="heartbeat-loss"), _attribution())
+    heartbeat_failed = Event()
+    executor_interrupted = Event()
+
+    def fail_heartbeat(*_args, **_kwargs):
+        heartbeat_failed.set()
+        raise JobLeaseError("lease ownership lost")
+
+    service.heartbeat_lease = fail_heartbeat  # type: ignore[method-assign]
+
+    class BlockingExecutor:
+        def execute(self, assignment, *, credential=None, cancellation_requested=None):
+            assert cancellation_requested is not None
+            assert heartbeat_failed.wait(timeout=1)
+            deadline = monotonic() + 0.5
+            while monotonic() < deadline:
+                if cancellation_requested():
+                    executor_interrupted.set()
+                    raise PipelineExecutionCancelled()
+                sleep(0.005)
+            raise AssertionError("lease loss did not interrupt the executor")
+
+    worker = JobWorker(
+        service,
+        BlockingExecutor(),
+        projects_dir=tmp_path / "projects",
+        worker_id="test-worker",
+        lease_duration=timedelta(seconds=1),
+        heartbeat_interval=timedelta(milliseconds=10),
+        retry_delay=timedelta(0),
+    )
+
+    started = monotonic()
+    with pytest.raises(JobLeaseError, match="heartbeat failed"):
+        worker.run_once()
+    elapsed = monotonic() - started
+
+    restored = service.get_job(job.job_id)
+    assert executor_interrupted.is_set()
+    assert elapsed < 0.5
+    assert restored.status == JobStatus.RUNNING
+    assert restored.stages[0].status == StageStatus.RUNNING
 
 
 def test_worker_maps_failed_checkpoint_and_cancel_request_to_terminal_states(
@@ -481,6 +891,93 @@ def test_worker_uploads_final_mp4_persists_artifact_then_completes_job(
     ]
 
 
+def test_worker_atomically_prefers_cancel_after_final_upload(tmp_path: Path) -> None:
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="cancel-after-upload"), _attribution())
+    projects_dir = tmp_path / "projects"
+    final_video = projects_dir / job.job_id / "renders" / "final.mp4"
+    final_video.parent.mkdir(parents=True, exist_ok=True)
+    final_video.write_bytes(b"final-video")
+    _complete_all_stages(service, job.job_id, projects_dir, final_video)
+
+    class CancellingArtifactBridge(FakeArtifactBridge):
+        def upload_output(self, **kwargs):
+            published = super().upload_output(**kwargs)
+            service.request_cancel(kwargs["job_id"])
+            return published
+
+    result = _worker(
+        service,
+        FakeExecutor([]),
+        projects_dir,
+        artifact_bridge=CancellingArtifactBridge(),
+    ).run_once(now=NOW)
+
+    restored = service.get_job(job.job_id)
+    assert result is not None and result.outcome == "job_cancelled"
+    assert restored.status == JobStatus.CANCELLED
+    assert restored.artifacts == ()
+    assert JobEventType.ARTIFACT_PUBLISHED not in {
+        event.event_type for event in service.list_events(job.job_id)
+    }
+
+
+def test_worker_schedules_zero_delay_artifact_retry_with_default_clock(
+    tmp_path: Path,
+) -> None:
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="artifact-zero-delay"), _attribution())
+    projects_dir = tmp_path / "projects"
+    final_video = projects_dir / job.job_id / "renders" / "final.mp4"
+    final_video.parent.mkdir(parents=True, exist_ok=True)
+    final_video.write_bytes(b"final-video")
+    _complete_all_stages(service, job.job_id, projects_dir, final_video)
+
+    class FailingArtifactBridge(FakeArtifactBridge):
+        def upload_output(self, **kwargs):
+            raise ArtifactBridgeError("temporary upload failure")
+
+    result = _worker(
+        service,
+        FakeExecutor([]),
+        projects_dir,
+        artifact_bridge=FailingArtifactBridge(),
+    ).run_once()
+
+    assert result is not None and result.outcome == "artifact_retry_scheduled"
+    reclaimed = service.claim_job(
+        worker_id="next-worker",
+        lease_duration=timedelta(seconds=30),
+    )
+    assert reclaimed is not None and reclaimed.job_id == job.job_id
+
+
+def test_worker_atomically_prefers_cancel_over_artifact_retry(tmp_path: Path) -> None:
+    service = InterleavingCancelJobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="artifact-cancel-race"), _attribution())
+    projects_dir = tmp_path / "projects"
+    final_video = projects_dir / job.job_id / "renders" / "final.mp4"
+    final_video.parent.mkdir(parents=True, exist_ok=True)
+    final_video.write_bytes(b"final-video")
+    _complete_all_stages(service, job.job_id, projects_dir, final_video)
+
+    class FailingArtifactBridge(FakeArtifactBridge):
+        def upload_output(self, **kwargs):
+            service.cancel_after_next_read = True
+            raise ArtifactBridgeError("temporary upload failure")
+
+    result = _worker(
+        service,
+        FakeExecutor([]),
+        projects_dir,
+        artifact_bridge=FailingArtifactBridge(),
+    ).run_once(now=NOW)
+
+    restored = service.get_job(job.job_id)
+    assert result is not None and result.outcome == "job_cancelled"
+    assert restored.status == JobStatus.CANCELLED
+
+
 def test_worker_does_not_upload_final_artifact_twice(tmp_path: Path) -> None:
     service = JobService(tmp_path / "jobs.sqlite3")
     job = service.create_job(_request(request_id="existing-output"), _attribution())
@@ -514,6 +1011,47 @@ def test_worker_does_not_upload_final_artifact_twice(tmp_path: Path) -> None:
 
     assert result is not None and result.outcome == "job_completed"
     assert bridge.upload_calls == []
+
+
+def test_worker_recovers_after_upload_before_local_artifact_persistence(
+    tmp_path: Path,
+) -> None:
+    class CrashOnceAfterUploadJobService(JobService):
+        crash_next_publish = True
+
+        def complete_job_or_confirm_cancel(self, *args, **kwargs):
+            if self.crash_next_publish:
+                self.crash_next_publish = False
+                raise JobLeaseError("simulated crash after remote upload")
+            return super().complete_job_or_confirm_cancel(*args, **kwargs)
+
+    service = CrashOnceAfterUploadJobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="upload-crash-recovery"), _attribution())
+    projects_dir = tmp_path / "projects"
+    final_video = projects_dir / job.job_id / "renders" / "final.mp4"
+    final_video.parent.mkdir(parents=True, exist_ok=True)
+    final_video.write_bytes(b"final-video")
+    _complete_all_stages(service, job.job_id, projects_dir, final_video)
+    bridge = FakeArtifactBridge()
+    worker = _worker(
+        service,
+        FakeExecutor([]),
+        projects_dir,
+        artifact_bridge=bridge,
+    )
+
+    with pytest.raises(JobLeaseError, match="simulated crash"):
+        worker.run_once(now=NOW)
+    recovered = worker.run_once(now=NOW + timedelta(minutes=6))
+
+    restored = service.get_job(job.job_id)
+    assert recovered is not None and recovered.outcome == "job_completed"
+    assert restored.status == JobStatus.SUCCEEDED
+    assert [artifact.employee_artifact_id for artifact in restored.artifacts] == [
+        "eart-final-1"
+    ]
+    assert len(bridge.upload_calls) == 2
+    assert bridge.upload_calls[0] == bridge.upload_calls[1]
 
 
 def test_worker_rejects_final_video_outside_job_workspace(tmp_path: Path) -> None:

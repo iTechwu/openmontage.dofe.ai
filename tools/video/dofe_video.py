@@ -1,14 +1,14 @@
 """DoFe.AI gateway video generation (endpointKind: video_async).
 
-Protocol-ready. On the test gateway the video adapters are not yet enabled
-(seedance-2.0-fast, hailuo, kling), so failures must
-surface a clear error (model + reason + suggestion) and never hang. All three
-operations default to ``seedance-2.0-fast``. See dev-guide §5.2.
+The model must be selected from the current tenant's ``GET /v1/models``
+catalog. Failures surface the model, reason, and suggestion without silently
+substituting another model or provider.
 """
 
 from __future__ import annotations
 
-import os
+import hashlib
+import json
 from typing import Any
 
 from tools.base_tool import (
@@ -21,17 +21,21 @@ from tools.base_tool import (
     ToolResult,
     ToolRuntime,
     ToolStability,
+    ToolStatus,
     ToolTier,
 )
 from tools.dofe import (
+    DofeClient,
+    DofeError,
     DofePricingClient,
     DofePricingError,
     DofeToolSpec,
     probe_video,
     resolve_image_source,
 )
-from tools.dofe.models import resolve_alias
+from tools.dofe.models import resolve_alias, validate_catalog_alias
 from tools.dofe.runtime import build_metadata, run_dofe_generation
+from tools.dofe.status import configured_model_is_visible
 
 MAX_REFERENCE_IMAGES = 9  # dev-guide §5.2: dofe enforces this server-side.
 
@@ -51,7 +55,7 @@ class DofeVideo(BaseTool):
     install_instructions = (
         "Set DOFE_MODEL_API_KEY in .env for the models.dofe.ai gateway. "
         "Set DOFE_ENABLED=true to make selectors prefer the dofe chain. "
-        "Override the default model with DOFE_VIDEO_MODEL (default seedance-2.0-fast)."
+        "Read GET /v1/models and set DOFE_VIDEO_MODEL to one returned model ID."
     )
     agent_skills = ["ai-video-gen"]
 
@@ -65,8 +69,26 @@ class DofeVideo(BaseTool):
     ]
 
     def agent_skills_for(self, inputs: dict[str, Any] | None = None) -> list[str]:
-        selected = str((inputs or {}).get("model_name") or os.environ.get("DOFE_VIDEO_MODEL", "seedance-2.0-fast"))
-        return list(self._SEEDANCE_SKILLS if "seedance" in selected.lower() else self.agent_skills)
+        operation = str((inputs or {}).get("operation") or "text_to_video")
+        selected = str(
+            resolve_alias(
+                "video",
+                operation,
+                explicit=(inputs or {}).get("model_name"),
+            )
+            or ""
+        )
+        if not selected:
+            return list(self.agent_skills)
+        try:
+            selected = validate_catalog_alias(selected, DofeClient().list_models())
+        except DofeError:
+            return list(self.agent_skills)
+        return list(
+            self._SEEDANCE_SKILLS
+            if "seedance" in selected.lower()
+            else self.agent_skills
+        )
 
     dofe_spec = DofeToolSpec(
         capability="video",
@@ -100,7 +122,7 @@ class DofeVideo(BaseTool):
         "prompt_token_syntax": None,
     }
     best_for = [
-        "video generation via the models.dofe.ai gateway (seedance-2.0-fast and the gateway catalog)",
+        "video generation using an exact ID from the tenant-visible gateway catalog",
         "text/image/reference-to-video when DOFE_ENABLED=true",
     ]
     not_good_for = ["offline generation", "non-dofe model families"]
@@ -149,7 +171,7 @@ class DofeVideo(BaseTool):
             },
             "model_name": {
                 "type": "string",
-                "description": "Explicit dofe alias (e.g. seedance-2.0-fast). Overrides DOFE_VIDEO_MODEL.",
+                "description": "Exact ID from GET /v1/models. Overrides DOFE_VIDEO_MODEL.",
             },
             "estimated_output_tokens": {
                 "type": "integer",
@@ -172,6 +194,129 @@ class DofeVideo(BaseTool):
     side_effects = ["paid remote generation via models.dofe.ai gateway", "writes video file to output_path"]
     user_visible_verification = ["Watch generated clip for motion coherence and prompt adherence"]
 
+    def get_status(self) -> ToolStatus:
+        status = super().get_status()
+        if status == ToolStatus.UNAVAILABLE:
+            return status
+        return (
+            ToolStatus.AVAILABLE
+            if configured_model_is_visible(
+                "video",
+                (
+                    "text_to_video",
+                    "image_to_video",
+                    "reference_to_video",
+                ),
+            )
+            else ToolStatus.UNAVAILABLE
+        )
+
+    def probe_provider_contract(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        """Validate the exact model and operation against DoFe's live projection."""
+
+        operation = str(inputs.get("operation") or "text_to_video")
+        requested_model = self.resolve_model(inputs)
+        if not requested_model:
+            return _blocked_probe(
+                operation=operation,
+                errors=["No DoFe video model ID is configured for this operation"],
+            )
+
+        try:
+            client = DofeClient()
+            model = validate_catalog_alias(requested_model, client.list_models())
+            capability = client.get_playground_capability(model)
+        except DofeError as exc:
+            return _blocked_probe(
+                operation=operation,
+                model=requested_model,
+                errors=[f"DoFe live capability validation failed: {exc}"],
+            )
+
+        errors: list[str] = []
+        warnings: list[str] = []
+        readiness = capability.get("readiness")
+        readiness_items = readiness if isinstance(readiness, list) else []
+        for item in readiness_items:
+            if not isinstance(item, dict):
+                continue
+            message = f"DoFe readiness {item.get('code') or 'unknown'}"
+            if item.get("severity") == "blocked":
+                errors.append(message)
+            else:
+                warnings.append(message)
+
+        if capability.get("modelType") != "video":
+            errors.append("DoFe capability modelType is not video")
+        capability_input = capability.get("input")
+        if not isinstance(capability_input, dict) or capability_input.get("text") is not True:
+            errors.append("DoFe capability does not accept the required text prompt")
+        if capability.get("state") not in {"ready", "warning"}:
+            errors.append(
+                f"DoFe capability state {capability.get('state')!r} is not executable"
+            )
+        if capability.get("executor") != "generation_task":
+            errors.append("DoFe capability executor is not generation_task")
+        if capability.get("endpointKind") != "video_async":
+            errors.append("DoFe capability endpointKind is not video_async")
+        output = capability.get("output")
+        if not isinstance(output, dict) or output.get("mode") != "task":
+            errors.append("DoFe capability output mode is not task")
+
+        operation_contract = next(
+            (
+                item
+                for item in capability.get("operations") or []
+                if isinstance(item, dict) and item.get("id") == operation
+            ),
+            None,
+        )
+        if operation_contract is None:
+            errors.append(
+                f"DoFe capability does not expose operation {operation!r} for model {model!r}"
+            )
+            constraints: dict[str, Any] = {}
+        else:
+            raw_constraints = operation_contract.get("constraints")
+            constraints = raw_constraints if isinstance(raw_constraints, dict) else {}
+            errors.extend(_validate_operation_contract(operation, inputs, constraints))
+
+        form = capability.get("form")
+        raw_fields = form.get("fields") if isinstance(form, dict) else None
+        fields = [item for item in (raw_fields or []) if isinstance(item, dict)]
+        provider_params = self._build_params(inputs)
+        provider_params.pop("videoOperation", None)
+        errors.extend(_validate_provider_fields(provider_params, fields))
+
+        fingerprint = hashlib.sha256(
+            json.dumps(capability, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:16]
+        return {
+            "status": "blocked" if errors else "passed",
+            "verification_scope": [
+                "tenant_model_catalog",
+                "playground_capability",
+                "video_operation",
+                "reference_binding",
+                "provider_parameters",
+            ],
+            "provider_contract_version": fingerprint,
+            "model": model,
+            "operation": operation,
+            "endpoint_kind": capability.get("endpointKind"),
+            "reference_binding": {
+                "accepted_asset_types": list(constraints.get("acceptedAssetTypes") or []),
+                "roles": list(constraints.get("roles") or []),
+                "min_input_assets": constraints.get("minInputAssets"),
+                "max_input_assets": constraints.get("maxInputAssets"),
+            },
+            "input_fields": sorted(
+                str(field["key"]) for field in fields if field.get("key")
+            ),
+            "warnings": warnings,
+            "errors": errors,
+        }
+
     # ------------------------------------------------------------------ cost
 
     def estimate_cost(self, inputs: dict[str, Any]) -> float:
@@ -180,9 +325,18 @@ class DofeVideo(BaseTool):
         return 0.0
 
     def pricing_quote(self, inputs: dict[str, Any]) -> dict[str, Any]:
-        model = self.resolve_model(inputs)
-        if not model:
+        requested_model = self.resolve_model(inputs)
+        if not requested_model:
             raise DofePricingError("No Airouter video model alias could be resolved")
+        try:
+            model = validate_catalog_alias(
+                requested_model,
+                DofeClient().list_models(),
+            )
+        except DofeError as exc:
+            raise DofePricingError(
+                f"Airouter model catalog validation failed: {exc}"
+            ) from exc
         operation = str(inputs.get("operation") or "text_to_video")
         requested_tokens = inputs.get("estimated_output_tokens")
         quote_tokens = int(requested_tokens) if requested_tokens is not None else 1_000_000
@@ -240,6 +394,23 @@ class DofeVideo(BaseTool):
 
     # ---------------------------------------------------------------- payload
 
+    @staticmethod
+    def _build_params(inputs: dict[str, Any]) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "videoOperation": inputs.get("operation", "text_to_video"),
+            "durationSeconds": _parse_duration(inputs.get("duration", "5")),
+            "ratio": inputs.get("aspect_ratio", "16:9"),
+        }
+        if inputs.get("resolution"):
+            params["resolution"] = inputs["resolution"]
+        if "generate_audio" in inputs:
+            params["generateAudio"] = bool(inputs["generate_audio"])
+        if inputs.get("negative_prompt"):
+            params["negativePrompt"] = inputs["negative_prompt"]
+        if inputs.get("seed") is not None:
+            params["seed"] = inputs["seed"]
+        return params
+
     def _build_payload(self, inputs: dict[str, Any], model: str) -> dict[str, Any]:
         prompt = str(inputs.get("prompt") or "").strip()
         if not prompt:
@@ -263,9 +434,16 @@ class DofeVideo(BaseTool):
                 }
             )
         elif operation == "reference_to_video":
-            refs = list(inputs.get("reference_image_urls") or [])
+            refs: list[str] = []
+            single_url = inputs.get("reference_image_url") or inputs.get("image_url")
+            single_path = inputs.get("reference_image_path") or inputs.get("image_path")
+            if single_url or single_path:
+                refs.append(resolve_image_source(url=single_url, path=single_path))
+            for remote_url in inputs.get("reference_image_urls") or []:
+                refs.append(resolve_image_source(url=remote_url))
             for local_path in inputs.get("reference_image_paths") or []:
                 refs.append(resolve_image_source(path=local_path))
+            refs = list(dict.fromkeys(refs))
             if len(refs) > MAX_REFERENCE_IMAGES:
                 raise ValueError(
                     f"dofe reference_to_video accepts at most {MAX_REFERENCE_IMAGES} reference images; "
@@ -273,7 +451,7 @@ class DofeVideo(BaseTool):
                 )
             if not refs:
                 raise ValueError(
-                    "reference_to_video requires reference_image_urls or reference_image_paths"
+                    "reference_to_video requires a reference image URL or path"
                 )
             for ref_url in refs:
                 content.append(
@@ -284,25 +462,11 @@ class DofeVideo(BaseTool):
                     }
                 )
 
-        params: dict[str, Any] = {
-            "videoOperation": operation,
-            "durationSeconds": _parse_duration(inputs.get("duration", "5")),
-            "ratio": inputs.get("aspect_ratio", "16:9"),
-        }
-        if inputs.get("resolution"):
-            params["resolution"] = inputs["resolution"]
-        if "generate_audio" in inputs:
-            params["generateAudio"] = bool(inputs["generate_audio"])
-        if inputs.get("negative_prompt"):
-            params["negativePrompt"] = inputs["negative_prompt"]
-        if inputs.get("seed") is not None:
-            params["seed"] = inputs["seed"]
-
         payload: dict[str, Any] = {
             "model": model,
             "endpointKind": "video_async",
             "content": content,
-            "params": params,
+            "params": self._build_params(inputs),
         }
         metadata = build_metadata(inputs, self.idempotency_key(inputs))
         if metadata:
@@ -331,3 +495,114 @@ def _parse_duration(value: Any, default: int = 5) -> int:
         return max(5, int(float(text)))
     except (TypeError, ValueError):
         return default
+
+
+def _blocked_probe(
+    *,
+    operation: str,
+    errors: list[str],
+    model: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": "blocked",
+        "verification_scope": ["tenant_model_catalog"],
+        "model": model,
+        "operation": operation,
+        "warnings": [],
+        "errors": errors,
+    }
+
+
+def _input_asset_count(operation: str, inputs: dict[str, Any]) -> int:
+    if operation == "image_to_video":
+        return int(
+            bool(
+                inputs.get("image_url")
+                or inputs.get("image_path")
+                or inputs.get("reference_image_url")
+                or inputs.get("reference_image_path")
+            )
+        )
+    if operation == "reference_to_video":
+        sources: list[str] = []
+        single_source = (
+            inputs.get("reference_image_url")
+            or inputs.get("image_url")
+            or inputs.get("reference_image_path")
+            or inputs.get("image_path")
+        )
+        if single_source:
+            sources.append(str(single_source))
+        sources.extend(str(value) for value in inputs.get("reference_image_urls") or [])
+        sources.extend(str(value) for value in inputs.get("reference_image_paths") or [])
+        return len(dict.fromkeys(sources))
+    return 0
+
+
+def _validate_operation_contract(
+    operation: str,
+    inputs: dict[str, Any],
+    constraints: dict[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+    asset_count = _input_asset_count(operation, inputs)
+    if operation in {"image_to_video", "reference_to_video"}:
+        if "image" not in (constraints.get("acceptedAssetTypes") or []):
+            errors.append(f"DoFe operation {operation!r} does not accept image assets")
+        required_role = "first_frame" if operation == "image_to_video" else "reference"
+        if required_role not in (constraints.get("roles") or []):
+            errors.append(
+                f"DoFe operation {operation!r} does not expose role {required_role!r}"
+            )
+
+    minimum = constraints.get("minInputAssets")
+    maximum = constraints.get("maxInputAssets")
+    if isinstance(minimum, int) and asset_count < minimum:
+        errors.append(
+            f"DoFe operation {operation!r} requires at least {minimum} input assets"
+        )
+    if isinstance(maximum, int) and asset_count > maximum:
+        errors.append(
+            f"DoFe operation {operation!r} accepts at most {maximum} input assets"
+        )
+
+    allowed_values = constraints.get("allowedValues")
+    allowed_operations = (
+        allowed_values.get("videoOperation")
+        if isinstance(allowed_values, dict)
+        else None
+    )
+    if isinstance(allowed_operations, list) and operation not in allowed_operations:
+        errors.append(
+            f"DoFe operation constraint excludes videoOperation {operation!r}"
+        )
+    return errors
+
+
+def _validate_provider_fields(
+    parameter_values: dict[str, Any],
+    fields: list[dict[str, Any]],
+) -> list[str]:
+    field_by_key = {
+        str(field["key"]): field for field in fields if isinstance(field.get("key"), str)
+    }
+    errors: list[str] = []
+    for key, field in field_by_key.items():
+        if field.get("required") is True and key not in parameter_values:
+            errors.append(f"DoFe capability is missing required provider parameter {key!r}")
+    for key, value in parameter_values.items():
+        field = field_by_key.get(key)
+        if field is None:
+            errors.append(f"DoFe capability form does not expose provider parameter {key!r}")
+            continue
+        options = field.get("options")
+        if isinstance(options, list) and options and value not in options:
+            errors.append(f"DoFe capability field {key!r} does not allow value {value!r}")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            minimum = field.get("min")
+            maximum = field.get("max")
+            if isinstance(minimum, (int, float)) and value < minimum:
+                errors.append(f"DoFe capability field {key!r} requires a value >= {minimum}")
+            if isinstance(maximum, (int, float)) and value > maximum:
+                errors.append(f"DoFe capability field {key!r} requires a value <= {maximum}")
+    return errors

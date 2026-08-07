@@ -30,7 +30,7 @@ from .errors import (
     DofeTaskTimeoutError,
 )
 from .media import sanitize_for_log
-from .models import config_env_name
+from .models import catalog_model_ids, config_env_name, validate_catalog_alias
 
 ARTIFACT_MIN_BYTES = 1024  # dev-guide §4.4: image/audio/video ≥ 1KB
 
@@ -204,7 +204,7 @@ def _suggestion(exc: DofeError, capability: str) -> str:
     if isinstance(exc, DofeModelUnavailableError):
         return (
             f"Alias is not published or not visible to your key. Verify {env_var} matches the gateway "
-            "catalog exactly (e.g. seedance-2.0-fast, not seedance-2-0-fast)."
+            "GET /v1/models catalog exactly."
         )
     if isinstance(exc, DofeRateLimitError):
         wait = f" retry after {exc.retry_after}s" if exc.retry_after is not None else ""
@@ -296,16 +296,24 @@ def run_dofe_generation(tool: Any, inputs: dict[str, Any]) -> ToolResult:
     spec: DofeToolSpec = tool.dofe_spec
     start = time.monotonic()
 
-    model = tool.resolve_model(inputs)
-    if not model:
+    requested_model = tool.resolve_model(inputs)
+    if not requested_model:
         env_var = config_env_name(spec.capability) or f"DOFE_{spec.capability.upper()}_MODEL"
         return ToolResult(
             success=False,
             error=(
-                f"No dofe {spec.capability} model configured. Set {env_var} in .env "
-                f"or pass an explicit model_name. (capability={spec.capability})"
+                f"No dofe {spec.capability} model selected. Read GET /v1/models, then set "
+                f"{env_var} to one returned ID or pass it as model_name. "
+                f"(capability={spec.capability})"
             ),
         )
+
+    client = DofeClient(api_key=api_key)
+    try:
+        catalog = client.list_models()
+        model = validate_catalog_alias(requested_model, catalog)
+    except DofeError as exc:
+        return _error_result(tool, exc, requested_model, spec, start)
 
     output_path = _enforce_projects_path(inputs.get("output_path"), tool.name, spec.default_ext)
 
@@ -319,7 +327,6 @@ def run_dofe_generation(tool: Any, inputs: dict[str, Any]) -> ToolResult:
             duration_seconds=round(time.monotonic() - start, 2),
         )
 
-    client = DofeClient(api_key=api_key)
     try:
         result = client.submit_and_collect(
             payload,
@@ -374,6 +381,7 @@ def run_dofe_generation(tool: Any, inputs: dict[str, Any]) -> ToolResult:
             if (safe_url := _credential_free_url(asset.get("url")))
         ],
         "alternatives_considered": [],
+        "catalog_model_count": len(catalog_model_ids(catalog)),
         "output": str(output_path),
         "output_path": str(output_path),
         "format": output_path.suffix.lstrip(".") or spec.default_ext.lstrip("."),

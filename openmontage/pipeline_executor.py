@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import re
+import signal
+import stat
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, Sequence
+from typing import Any, Callable, Protocol, Sequence
 
 from lib.checkpoint import CheckpointValidationError, read_checkpoint
 from lib.pipeline_loader import get_stage_skill, load_pipeline_readonly
@@ -28,13 +32,48 @@ _CONTROL_PLANE_SECRET_ENV = {
     "GOOGLE_APPLICATION_CREDENTIALS",
     "FAL_KEY",
 }
-_SECRET_ENV_SUFFIX = re.compile(
-    r"(?:_API_KEY|_ACCESS_KEY|_ACCESSKEY|_PASSWORD|_SECRET|_SECRET_KEY|_SECRETKEY|_TOKEN)$"
+_SECRET_ENV_SUFFIX_PATTERN = (
+    r"(?:_API_KEY|_ACCESS_KEY|_ACCESSKEY|_PASSWORD|_SECRET|_SECRET_KEY|"
+    r"_SECRETKEY|_TOKEN)"
 )
+_SECRET_ENV_SUFFIX = re.compile(rf"{_SECRET_ENV_SUFFIX_PATTERN}$")
+_DIAGNOSTIC_LIMIT = 4096
+_BEARER_SECRET = re.compile(r"(?i)(\bBearer\s+)[^\s,;]+")
+_SECRET_ENV_NAME = rf"[A-Z][A-Z0-9_]*{_SECRET_ENV_SUFFIX_PATTERN}"
+_EXACT_SECRET_NAME = "(?:" + "|".join(
+    re.escape(name)
+    for name in sorted(_CONTROL_PLANE_SECRET_ENV | {"AWS_ACCESS_KEY_ID"})
+) + ")"
+_SECRET_NAME = (
+    rf"(?:{_EXACT_SECRET_NAME}|{_SECRET_ENV_NAME}|api[_ -]?key|access[_ -]?key|"
+    r"access[_ -]?token|"
+    r"refresh[_ -]?token|"
+    r"id[_ -]?token|token|secret|password|authorization)"
+)
+_JSON_SECRET_VALUE = re.compile(
+    rf'(?i)("{_SECRET_NAME}"\s*:\s*")(?:(?:\\.)|[^"\\])*(")'
+)
+_SINGLE_QUOTED_SECRET_VALUE = re.compile(
+    rf"(?i)('{_SECRET_NAME}'\s*:\s*')(?:(?:\\.)|[^'\\])*(')"
+)
+_SECRET_VALUE = re.compile(
+    rf"(?i)(\b{_SECRET_NAME}\b\s*[:=]\s*)[^\s,;&]+"
+)
+_OPENAI_KEY = re.compile(r"\bsk-[A-Za-z0-9_-]+")
 
 
 class PipelineExecutionError(RuntimeError):
     """Raised when the configured external Agent cannot execute safely."""
+
+
+class PipelineExecutionCancelled(PipelineExecutionError):
+    """Raised when the durable Job requests cancellation during Agent execution."""
+
+    def __init__(self, *, stdout: Any = "", stderr: Any = "", return_code: int = -15) -> None:
+        self.stdout = _output_text(stdout)
+        self.stderr = _output_text(stderr)
+        self.return_code = return_code
+        super().__init__("External Agent executor cancelled by Job request")
 
 
 class PipelineExecutionIncomplete(PipelineExecutionError):
@@ -124,6 +163,7 @@ class PipelineExecutor(Protocol):
         assignment: StageAssignment,
         *,
         credential: DelegatedModelCredential | None = None,
+        cancellation_requested: Callable[[], bool] | None = None,
     ) -> PipelineExecutionResult:
         """Execute one stage and return the checkpoint-backed outcome."""
 
@@ -175,7 +215,9 @@ class AgentCommandPipelineExecutor:
         assignment: StageAssignment,
         *,
         credential: DelegatedModelCredential | None = None,
+        cancellation_requested: Callable[[], bool] | None = None,
     ) -> PipelineExecutionResult:
+        sensitive_values = (credential.api_key,) if credential is not None else ()
         assignment.project_dir.mkdir(parents=True, exist_ok=True)
         assignment_dir = assignment.project_dir / ".openmontage" / "assignments"
         assignment_dir.mkdir(parents=True, exist_ok=True)
@@ -184,6 +226,16 @@ class AgentCommandPipelineExecutor:
         )
         _atomic_write_json(assignment_path, assignment.to_wire())
         prompt = _stage_prompt(assignment, assignment_path)
+        checkpoint_inventory = _checkpoint_inventory(assignment.project_dir)
+        unexpected_checkpoints = _unexpected_existing_checkpoints(
+            assignment,
+            checkpoint_inventory,
+        )
+        if unexpected_checkpoints:
+            raise PipelineExecutionError(
+                "External Agent executor found checkpoints outside the assigned stage progression: "
+                + ", ".join(unexpected_checkpoints)
+            )
         command = tuple(
             str(assignment.project_dir) if value == "{project_dir}" else value
             for value in self.command
@@ -191,7 +243,12 @@ class AgentCommandPipelineExecutor:
 
         try:
             if credential is None:
-                completed = self._run(command, prompt, environment=None)
+                completed = self._run(
+                    command,
+                    prompt,
+                    environment=None,
+                    cancellation_requested=cancellation_requested,
+                )
             else:
                 with DelegationSigningProxy(
                     credential,
@@ -212,23 +269,85 @@ class AgentCommandPipelineExecutor:
                             dofe_base_url=proxy.base_url,
                         )
                     )
-                    completed = self._run(command, prompt, environment=environment)
+                    completed = self._run(
+                        command,
+                        prompt,
+                        environment=environment,
+                        cancellation_requested=cancellation_requested,
+                    )
+        except PipelineExecutionCancelled as exc:
+            code = "EXECUTION_CANCELLED"
+            _redact_exception_chain(exc, sensitive_values)
+            _write_execution_log(
+                assignment,
+                stdout=exc.stdout,
+                stderr=exc.stderr,
+                return_code=exc.return_code,
+                diagnostic_code=code,
+                error="job_cancel_requested",
+                sensitive_values=sensitive_values,
+            )
+            raise
         except subprocess.TimeoutExpired as exc:
+            _redact_exception_chain(exc, sensitive_values)
+            stdout = _output_text(exc.stdout)
+            stderr = _output_text(exc.stderr)
+            code = "EXECUTION_TIMEOUT"
+            _write_execution_log(
+                assignment,
+                stdout=stdout,
+                stderr=stderr,
+                return_code=-1,
+                diagnostic_code=code,
+                error="timeout",
+                timed_out=True,
+                sensitive_values=sensitive_values,
+            )
             raise PipelineExecutionError(
                 f"External Agent executor timed out after {self.timeout_seconds:g} seconds"
+                f" ({code}){_diagnostic_suffix(stdout, stderr, sensitive_values)}"
             ) from exc
         except OSError as exc:
-            raise PipelineExecutionError("External Agent executor could not be started") from exc
+            code = "CLI_CONFIGURATION_ERROR"
+            _redact_exception_chain(exc, sensitive_values)
+            error_text = _redact_diagnostic(str(exc), sensitive_values)
+            _write_execution_log(
+                assignment,
+                stdout="",
+                stderr=error_text,
+                return_code=-1,
+                diagnostic_code=code,
+                error="process_start_failed",
+                sensitive_values=sensitive_values,
+            )
+            raise PipelineExecutionError(
+                f"External Agent executor could not be started ({code})"
+                f"{_diagnostic_suffix('', error_text, sensitive_values)}"
+            ) from exc
 
+        diagnostic_code = _classify_diagnostic(completed.stdout, completed.stderr)
         _write_execution_log(
             assignment,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
+            stdout=_output_text(completed.stdout),
+            stderr=_output_text(completed.stderr),
             return_code=completed.returncode,
+            diagnostic_code=diagnostic_code,
+            sensitive_values=sensitive_values,
         )
+        changed_checkpoints = _changed_unassigned_checkpoints(
+            assignment,
+            checkpoint_inventory,
+        )
+        if changed_checkpoints:
+            raise PipelineExecutionError(
+                "External Agent executor changed checkpoints outside the assigned stage: "
+                + ", ".join(changed_checkpoints)
+            )
         if completed.returncode != 0:
             raise PipelineExecutionError(
                 f"External Agent executor exited with exit code {completed.returncode}"
+                f" ({diagnostic_code})"
+                f"{_diagnostic_suffix(completed.stdout, completed.stderr, sensitive_values)}"
             )
 
         try:
@@ -265,18 +384,82 @@ class AgentCommandPipelineExecutor:
         prompt: str,
         *,
         environment: dict[str, str] | None,
+        cancellation_requested: Callable[[], bool] | None,
     ):
-        return subprocess.run(
+        process = subprocess.Popen(
             command,
-            input=prompt,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             cwd=ROOT,
-            capture_output=True,
             text=True,
-            timeout=self.timeout_seconds,
-            check=False,
             shell=False,
             env=environment,
+            start_new_session=os.name == "posix",
         )
+        input_pending = True
+        deadline = time.monotonic() + self.timeout_seconds
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    stdout, stderr = _terminate_process(process)
+                    raise subprocess.TimeoutExpired(
+                        command,
+                        self.timeout_seconds,
+                        output=stdout,
+                        stderr=stderr,
+                    )
+                try:
+                    stdout, stderr = process.communicate(
+                        input=prompt if input_pending else None,
+                        timeout=min(0.25, remaining),
+                    )
+                    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+                except subprocess.TimeoutExpired as exc:
+                    input_pending = False
+                    if cancellation_requested is not None and cancellation_requested():
+                        stdout, stderr = _terminate_process(process)
+                        raise PipelineExecutionCancelled(
+                            stdout=stdout or exc.stdout,
+                            stderr=stderr or exc.stderr,
+                            return_code=process.returncode or -15,
+                        )
+                    if time.monotonic() >= deadline:
+                        stdout, stderr = _terminate_process(process)
+                        raise subprocess.TimeoutExpired(
+                            command,
+                            self.timeout_seconds,
+                            output=stdout or exc.stdout,
+                            stderr=stderr or exc.stderr,
+                        )
+        except BaseException:
+            if process.poll() is None:
+                _terminate_process(process)
+            raise
+
+
+def _terminate_process(process: subprocess.Popen[str]) -> tuple[str, str]:
+    """Terminate a CLI process tree and preserve whatever output was captured."""
+    if process.poll() is None:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGTERM)
+            else:
+                process.terminate()
+        except ProcessLookupError:
+            pass
+    try:
+        return process.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except ProcessLookupError:
+            pass
+        return process.communicate()
 
 
 def _validate_command(command: Sequence[str]) -> tuple[str, ...]:
@@ -324,21 +507,206 @@ def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
+def _checkpoint_inventory(project_dir: Path) -> dict[str, str]:
+    inventory: dict[str, str] = {}
+    for path in project_dir.glob("checkpoint_*.json"):
+        mode = path.lstat().st_mode
+        if not stat.S_ISREG(mode):
+            inventory[path.name] = f"non-regular:{stat.S_IFMT(mode)}"
+            continue
+        digest = hashlib.sha256()
+        with path.open("rb") as checkpoint_file:
+            for chunk in iter(lambda: checkpoint_file.read(64 * 1024), b""):
+                digest.update(chunk)
+        inventory[path.name] = digest.hexdigest()
+    return inventory
+
+
+def _changed_unassigned_checkpoints(
+    assignment: StageAssignment,
+    before: dict[str, str],
+) -> list[str]:
+    after = _checkpoint_inventory(assignment.project_dir)
+    assigned_name = f"checkpoint_{assignment.stage}.json"
+    return sorted(
+        name
+        for name in before.keys() | after.keys()
+        if name != assigned_name and before.get(name) != after.get(name)
+    )
+
+
+def _unexpected_existing_checkpoints(
+    assignment: StageAssignment,
+    inventory: dict[str, str],
+) -> list[str]:
+    stages = assignment.job_snapshot.get("stages", [])
+    stage_codes = [
+        item.get("code")
+        for item in stages
+        if isinstance(item, dict) and isinstance(item.get("code"), str)
+    ]
+    assigned_index = stage_codes.index(assignment.stage)
+    allowed_names = {
+        f"checkpoint_{stage}.json" for stage in stage_codes[: assigned_index + 1]
+    }
+    return sorted(name for name in inventory if name not in allowed_names)
+
+
 def _write_execution_log(
     assignment: StageAssignment,
     *,
     stdout: str,
     stderr: str,
     return_code: int,
+    diagnostic_code: str | None = None,
+    error: str | None = None,
+    timed_out: bool = False,
+    sensitive_values: Sequence[str] = (),
 ) -> None:
     log_dir = assignment.project_dir / ".openmontage" / "executor"
     log_dir.mkdir(parents=True, exist_ok=True)
     path = log_dir / f"{assignment.stage}-attempt-{assignment.stage_attempt}.json"
-    _atomic_write_json(
-        path,
-        {
-            "returnCode": return_code,
-            "stdoutCharacters": len(stdout),
-            "stderrCharacters": len(stderr),
-        },
+    stdout_text = _output_text(stdout)
+    stderr_text = _output_text(stderr)
+    payload: dict[str, Any] = {
+        "returnCode": return_code,
+        "stdoutCharacters": len(stdout_text),
+        "stderrCharacters": len(stderr_text),
+        "stdoutTail": _diagnostic_excerpt(stdout_text, sensitive_values),
+        "stderrTail": _diagnostic_excerpt(stderr_text, sensitive_values),
+        "diagnosticCode": diagnostic_code or _classify_diagnostic(stdout_text, stderr_text),
+        "timedOut": timed_out,
+    }
+    if error:
+        payload["error"] = error
+    _atomic_write_json(path, payload)
+
+
+def _output_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _redact_diagnostic(value: str, sensitive_values: Sequence[str] = ()) -> str:
+    redacted = _BEARER_SECRET.sub(r"\1[REDACTED]", value)
+    redacted = _JSON_SECRET_VALUE.sub(r"\1[REDACTED]\2", redacted)
+    redacted = _SINGLE_QUOTED_SECRET_VALUE.sub(r"\1[REDACTED]\2", redacted)
+    redacted = _SECRET_VALUE.sub(r"\1[REDACTED]", redacted)
+    redacted = _OPENAI_KEY.sub("sk-[REDACTED]", redacted)
+    for sensitive_value in sorted(set(sensitive_values), key=len, reverse=True):
+        if sensitive_value:
+            redacted = redacted.replace(sensitive_value, "[REDACTED]")
+    return redacted
+
+
+def _redact_os_error(error: OSError, sensitive_values: Sequence[str]) -> None:
+    error.args = tuple(
+        _redact_diagnostic(value, sensitive_values) if isinstance(value, str) else value
+        for value in error.args
     )
+    for attribute in ("filename", "filename2"):
+        value = getattr(error, attribute, None)
+        if isinstance(value, str):
+            setattr(error, attribute, _redact_diagnostic(value, sensitive_values))
+
+
+def _redact_exception_chain(
+    error: BaseException,
+    sensitive_values: Sequence[str],
+) -> None:
+    pending = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, PipelineExecutionCancelled):
+            current.stdout = _redact_exception_output(
+                current.stdout,
+                sensitive_values,
+            )
+            current.stderr = _redact_exception_output(
+                current.stderr,
+                sensitive_values,
+            )
+        if isinstance(current, subprocess.TimeoutExpired):
+            current.cmd = _redact_exception_value(current.cmd, sensitive_values)
+            current.args = _redact_exception_value(current.args, sensitive_values)
+            current.output = _redact_exception_output(
+                current.output,
+                sensitive_values,
+            )
+            current.stderr = _redact_exception_output(
+                current.stderr,
+                sensitive_values,
+            )
+        if isinstance(current, OSError):
+            _redact_os_error(current, sensitive_values)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+
+
+def _redact_exception_value(value: Any, sensitive_values: Sequence[str]) -> Any:
+    if isinstance(value, str):
+        return _redact_diagnostic(value, sensitive_values)
+    if isinstance(value, bytes):
+        return _redact_exception_output(value, sensitive_values)
+    if isinstance(value, tuple):
+        return tuple(
+            _redact_exception_value(item, sensitive_values) for item in value
+        )
+    if isinstance(value, list):
+        return [_redact_exception_value(item, sensitive_values) for item in value]
+    return value
+
+
+def _redact_exception_output(value: Any, sensitive_values: Sequence[str]) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        decoded = value.decode("utf-8", errors="surrogateescape")
+        return _redact_diagnostic(decoded, sensitive_values).encode(
+            "utf-8",
+            errors="surrogateescape",
+        )
+    return _redact_diagnostic(_output_text(value), sensitive_values)
+
+
+def _diagnostic_excerpt(value: str, sensitive_values: Sequence[str] = ()) -> str:
+    redacted = _redact_diagnostic(value, sensitive_values)
+    if len(redacted) <= _DIAGNOSTIC_LIMIT:
+        return redacted
+    return redacted[-_DIAGNOSTIC_LIMIT:]
+
+
+def _classify_diagnostic(stdout: Any, stderr: Any) -> str:
+    text = f"{_output_text(stderr)}\n{_output_text(stdout)}".lower()
+    if any(marker in text for marker in ("command not found", "no such file or directory", "spawn", "executable")):
+        return "CLI_CONFIGURATION_ERROR"
+    if any(marker in text for marker in ("unauthorized", "forbidden", "401", "403", "api key", "access key", "invalid token")):
+        return "MODEL_AUTH_ERROR"
+    if any(marker in text for marker in ("timeout", "timed out", "deadline exceeded")):
+        return "MODEL_TIMEOUT"
+    if any(marker in text for marker in ("connection", "connect", "network", "dns", "refused", "reset by peer", "502", "503", "504")):
+        return "MODEL_NETWORK_ERROR"
+    if any(marker in text for marker in ("rate limit", "429", "model", "provider")):
+        return "MODEL_PROVIDER_ERROR"
+    return "AGENT_EXECUTOR_ERROR"
+
+
+def _diagnostic_suffix(
+    stdout: Any,
+    stderr: Any,
+    sensitive_values: Sequence[str] = (),
+) -> str:
+    excerpt = _diagnostic_excerpt(
+        _output_text(stderr) or _output_text(stdout),
+        sensitive_values,
+    ).strip()
+    return f": {excerpt}" if excerpt else ""

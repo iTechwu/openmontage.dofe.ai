@@ -95,6 +95,22 @@ Core loop:
 
 ## Decision Communication Contract
 
+### Model Catalog Is the Only Source of Model IDs (HARD RULE)
+
+Before naming, recommending, configuring, or invoking any model, fetch the
+tenant-visible catalog with an authenticated `GET /v1/models` request against
+the effective DoFe base URL:
+
+- host runtime: `https://model.local.dofe.ai/api/v1/models`
+- Docker Compose runtime: `${DOFE_DOCKER_MODEL_BASE_URL:-http://api:3101}/v1/models`
+
+Use only an exact `id` returned by that request. An explicit `model_name` or a
+`DOFE_*_MODEL` environment value is only a candidate and MUST be checked against
+the current response before use. Never invent a model ID, copy one from memory,
+infer one from a provider family, or silently normalize spelling. If the catalog
+cannot be reached, no appropriate ID has been selected, or a configured ID is
+not visible, fail closed and surface a blocker before any paid task is created.
+
 For any meaningful production decision, the agent must communicate the decision before acting. The user should never have to infer which provider, model, or render path was chosen after the fact.
 
 ### Announce Before Execution

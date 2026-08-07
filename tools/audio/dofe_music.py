@@ -1,8 +1,7 @@
 """DoFe.AI gateway music generation (endpointKind: music_async).
 
-Protocol-ready. No ``music_async`` model is published on the test gateway yet,
-so the default alias is intentionally empty and surfaces a clear "set
-DOFE_MUSIC_MODEL" error rather than guessing. See dev-guide §5.4.
+No default model is embedded. The selected model must be present in the current
+tenant catalog or the tool fails before creating a task.
 """
 
 from __future__ import annotations
@@ -19,11 +18,13 @@ from tools.base_tool import (
     ToolResult,
     ToolRuntime,
     ToolStability,
+    ToolStatus,
     ToolTier,
 )
 from tools.dofe import DofeToolSpec, probe_audio
 from tools.dofe.models import resolve_alias
 from tools.dofe.runtime import build_metadata, run_dofe_generation
+from tools.dofe.status import configured_model_is_visible
 
 
 class DofeMusic(BaseTool):
@@ -41,7 +42,7 @@ class DofeMusic(BaseTool):
     install_instructions = (
         "Set DOFE_MODEL_API_KEY in .env for the models.dofe.ai gateway. "
         "Set DOFE_ENABLED=true to prefer the dofe chain. "
-        "Set DOFE_MUSIC_MODEL to a published music_async alias once the gateway registers one."
+        "Read GET /v1/models and set DOFE_MUSIC_MODEL to one returned model ID."
     )
     agent_skills = ["music"]
 
@@ -79,7 +80,7 @@ class DofeMusic(BaseTool):
                 "default": "inspiration",
                 "description": "Suno generation mode. Inspiration uses the prompt directly; custom enables lyrics/title controls.",
             },
-            "model_name": {"type": "string", "description": "Explicit dofe music alias. Overrides DOFE_MUSIC_MODEL."},
+            "model_name": {"type": "string", "description": "Exact ID from GET /v1/models. Overrides DOFE_MUSIC_MODEL."},
             "task_id": {"type": "string", "description": "Resume polling an earlier timed-out dofe task."},
             "output_path": {"type": "string"},
         },
@@ -94,6 +95,16 @@ class DofeMusic(BaseTool):
     ]
     side_effects = ["paid remote generation via models.dofe.ai gateway", "writes audio file to output_path"]
     user_visible_verification = ["Listen to generated music for mood, genre accuracy, and quality"]
+
+    def get_status(self) -> ToolStatus:
+        status = super().get_status()
+        if status == ToolStatus.UNAVAILABLE:
+            return status
+        return (
+            ToolStatus.AVAILABLE
+            if configured_model_is_visible("music", ("generate",))
+            else ToolStatus.UNAVAILABLE
+        )
 
     # ------------------------------------------------------------------ cost
 

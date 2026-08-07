@@ -1,22 +1,24 @@
-"""Model alias resolution for the dofe gateway (dev-guide §3.2/§3.3).
+"""Model selection backed by the tenant-visible DoFe gateway catalog.
 
-Model selection is a strict three-layer cascade — no preference chains, no
-smart filtering, no auto-fallback:
+Model selection is a strict two-layer cascade with no built-in defaults:
 
 1. Explicit ``model_name`` passed by the caller (highest).
 2. ``.env`` override — per-operation video env first, then the capability env.
-3. Built-in default from :data:`DEFAULT_ALIASES`.
 
-Aliases are operational data on the gateway and must match **exactly**
-(``seedance-2.0-fast`` != ``seedance-2-0-fast``); this module never normalizes them.
+The selected candidate is not usable until :func:`validate_catalog_alias`
+confirms that the exact ID was returned by ``GET /v1/models`` for the current
+tenant key. OpenMontage never manufactures or normalizes model names.
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable, Mapping
 from typing import Any
 
-# Capability-level env var that overrides the default alias for that family.
+from .errors import DofeModelUnavailableError
+
+# Capability-level env var that selects an ID from the gateway catalog.
 CAPABILITY_ENV = {
     "video": "DOFE_VIDEO_MODEL",
     "image": "DOFE_IMAGE_MODEL",
@@ -26,33 +28,13 @@ CAPABILITY_ENV = {
     "stt": "DOFE_STT_MODEL",
 }
 
-# Optional per-operation overrides for video (only the first set value is used;
-# there is no preference chain). All video operations default to seedance-2.0-fast.
+# Optional per-operation selectors for video (only the first set value is used;
+# there is no preference chain or guessed fallback).
 VIDEO_OPERATION_ENV = {
     "text_to_video": "DOFE_MODEL_TEXT_TO_VIDEO",
     "image_to_video": "DOFE_MODEL_IMAGE_TO_VIDEO",
     "reference_to_video": "DOFE_MODEL_REFERENCE_TO_VIDEO",
 }
-
-# Built-in defaults. None means "no default until the gateway has the model" —
-# the tool reports a clear configuration error rather than guessing.
-DEFAULT_ALIASES: dict[tuple[str, str], str | None] = {
-    ("video", "text_to_video"): "seedance-2.0-fast",
-    ("video", "image_to_video"): "seedance-2.0-fast",
-    ("video", "reference_to_video"): "seedance-2.0-fast",
-    ("image", "generate"): "seedream-5.0",
-    ("tts", "generate"): None,
-    ("music", "generate"): None,
-    ("avatar", "generate"): None,
-    ("stt", "transcribe"): "openspeech-auc",
-}
-
-# Canonical default the test environment actually serves (used by tests).
-VIDEO_DEFAULT_ALIAS = "seedance-2.0-fast"
-IMAGE_DEFAULT_ALIAS = "seedream-5.0"
-TTS_DEFAULT_ALIAS = None
-STT_DEFAULT_ALIAS = "openspeech-auc"
-
 
 def _first_env(*names: str) -> str | None:
     for name in names:
@@ -91,10 +73,39 @@ def resolve_alias(
         if value:
             return value
 
-    return DEFAULT_ALIASES.get((capability, operation or "generate"))
+    return None
+
+
+def catalog_model_ids(models: Iterable[Any]) -> tuple[str, ...]:
+    """Extract exact, non-empty model IDs from a ``GET /v1/models`` response."""
+
+    ids: list[str] = []
+    seen: set[str] = set()
+    for item in models:
+        if not isinstance(item, Mapping):
+            continue
+        model_id = item.get("id")
+        if not isinstance(model_id, str) or not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        ids.append(model_id)
+    return tuple(ids)
+
+
+def validate_catalog_alias(alias: str, models: Iterable[Any]) -> str:
+    """Return ``alias`` only when the tenant catalog contains that exact ID."""
+
+    visible = catalog_model_ids(models)
+    if alias not in visible:
+        raise DofeModelUnavailableError(
+            f"Model {alias!r} was not returned by GET /v1/models for this tenant key",
+            http_status=404,
+            details={"catalog_model_count": len(visible)},
+        )
+    return alias
 
 
 def config_env_name(capability: str) -> str | None:
-    """The .env var a user sets to change this capability's default alias."""
+    """The .env var a user sets to select this capability's catalog ID."""
 
     return CAPABILITY_ENV.get(capability)

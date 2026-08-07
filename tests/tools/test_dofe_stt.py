@@ -3,11 +3,33 @@ from __future__ import annotations
 import json
 
 from tools.analysis.dofe_stt import DofeSpeechToText
+from tools.base_tool import ToolStatus
 
 
-def test_dofe_stt_uses_openspeech_and_preserves_native_cost(monkeypatch, tmp_path):
+def _catalog(monkeypatch, model="catalog-stt"):
+    monkeypatch.setenv("DOFE_STT_MODEL", model)
+    monkeypatch.setattr(
+        "tools.analysis.dofe_stt.DofeClient.list_models",
+        lambda _self: [{"id": model}],
+    )
+
+
+def test_dofe_stt_status_requires_catalog_selection(monkeypatch):
     monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
     monkeypatch.delenv("DOFE_STT_MODEL", raising=False)
+    assert DofeSpeechToText().get_status() == ToolStatus.UNAVAILABLE
+
+    monkeypatch.setenv("DOFE_STT_MODEL", "catalog-stt")
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.list_models",
+        lambda _self: [{"id": "catalog-stt"}],
+    )
+    assert DofeSpeechToText().get_status() == ToolStatus.AVAILABLE
+
+
+def test_dofe_stt_uses_catalog_model_and_preserves_native_cost(monkeypatch, tmp_path):
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    _catalog(monkeypatch)
     captured = {}
 
     def fake_submit(_self, payload, **kwargs):
@@ -41,7 +63,7 @@ def test_dofe_stt_uses_openspeech_and_preserves_native_cost(monkeypatch, tmp_pat
     )
 
     assert result.success
-    assert captured["payload"]["model"] == "openspeech-auc"
+    assert captured["payload"]["model"] == "catalog-stt"
     assert captured["payload"]["endpointKind"] == "speech_transcription_async"
     assert captured["payload"]["params"]["durationSeconds"] == 300
     assert result.cost_usd == 0.0
@@ -56,6 +78,7 @@ def test_dofe_stt_uses_openspeech_and_preserves_native_cost(monkeypatch, tmp_pat
 
 def test_dofe_stt_rejects_local_audio_without_gateway_storage(monkeypatch, tmp_path):
     monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    _catalog(monkeypatch)
     local_audio = tmp_path / "audio.wav"
     local_audio.write_bytes(b"RIFF")
 
@@ -65,8 +88,9 @@ def test_dofe_stt_rejects_local_audio_without_gateway_storage(monkeypatch, tmp_p
     assert "provider-accessible" in result.error
 
 
-def test_dofe_stt_stages_audio_path_before_submitting_openspeech(monkeypatch, tmp_path):
+def test_dofe_stt_stages_audio_path_before_submitting_catalog_model(monkeypatch, tmp_path):
     monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    _catalog(monkeypatch)
     source = tmp_path / "audio.wav"
     source.write_bytes(b"RIFF")
     events = []
@@ -108,3 +132,26 @@ def test_dofe_stt_stages_audio_path_before_submitting_openspeech(monkeypatch, tm
         ("submit", "tos://dofe-transcode/temp/generation-assets/id-audio.wav"),
     ]
     assert result.data["source_asset"]["bucket"] == "dofe-transcode"
+
+
+def test_dofe_stt_rejects_model_missing_from_catalog_before_submit(monkeypatch):
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_STT_MODEL", "hidden-stt")
+    monkeypatch.setattr(
+        "tools.analysis.dofe_stt.DofeClient.list_models",
+        lambda _self: [{"id": "visible-stt"}],
+    )
+
+    def fail_submit(*_args, **_kwargs):
+        raise AssertionError("STT task must not be submitted for a hidden model")
+
+    monkeypatch.setattr(
+        "tools.analysis.dofe_stt.DofeClient.submit_and_collect", fail_submit
+    )
+
+    result = DofeSpeechToText().execute(
+        {"audio_url": "https://media.example.test/audio.wav"}
+    )
+
+    assert not result.success
+    assert "not returned by GET /v1/models" in result.error

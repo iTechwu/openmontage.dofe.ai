@@ -257,12 +257,14 @@ class TestConfig:
         config = OpenMontageConfig()
         assert config.llm.provider == "dofe"
         assert config.llm.base_url == "https://model.local.dofe.ai/api"
+        assert config.llm.model is None
         assert config.llm.api_key_env == "DOFE_MODEL_API_KEY"
         assert config.budget.mode.value == "warn"
         assert config.checkpoint.policy.value == "guided"
 
     def test_load_from_yaml(self):
         config = OpenMontageConfig.load()
+        assert config.llm.model is None
         assert config.budget.total_usd == 10.0
 
 

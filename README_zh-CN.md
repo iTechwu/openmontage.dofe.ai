@@ -173,9 +173,14 @@ make setup
 DOFE_ENABLED=true
 DOFE_MODEL_BASE_URL=https://model.local.dofe.ai/api
 DOFE_MODEL_API_KEY=your-key
-DOFE_IMAGE_MODEL=seedream-5.0
-DOFE_VIDEO_MODEL=seedance-2.0-fast
-DOFE_STT_MODEL=openspeech-auc
+# 先使用此密钥查询 GET https://model.local.dofe.ai/api/v1/models，
+# DOFE_*_MODEL 只能填写该响应实际返回的精确 ID。
+DOFE_IMAGE_MODEL=
+DOFE_VIDEO_MODEL=
+DOFE_TTS_MODEL=
+DOFE_MUSIC_MODEL=
+DOFE_AVATAR_MODEL=
+DOFE_STT_MODEL=
 DOFE_INTERNAL_API_BASE_URL=https://model.local.dofe.ai
 DOFE_TENANT_ID=your-tenant-uuid
 INTERNAL_API_SECRET=your-internal-service-secret

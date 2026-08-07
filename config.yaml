@@ -5,7 +5,7 @@ llm:
   protocol: openai               # openai | openai_response | anthropic | gemini
   base_url: https://model.local.dofe.ai/api
   api_key_env: DOFE_MODEL_API_KEY
-  model: gpt-5.6-terra           # tenant-visible gateway alias
+  model: null                    # select an exact ID from authenticated GET /v1/models
   temperature: 0.7
   max_tokens: 4096
 

@@ -27,6 +27,9 @@ def test_compose_wires_durable_jobs_and_a_dedicated_event_publisher() -> None:
     )
     assert worker["environment"]["OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL"]
     assert worker["environment"]["OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL"]
+    assert worker["environment"]["DOFE_MODEL_BASE_URL"] == (
+        "${DOFE_DOCKER_MODEL_BASE_URL:-http://api:3101}"
+    )
     assert worker["healthcheck"] == {"disable": True}
 
 

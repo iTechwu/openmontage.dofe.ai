@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import BinaryIO, Iterator
 from uuid import uuid4
+
+try:  # POSIX
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - exercised on Windows.
+    _fcntl = None
+
+try:  # Windows
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - exercised on POSIX.
+    _msvcrt = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +99,20 @@ class ModelInvocationStore:
         db.execute("PRAGMA busy_timeout = 5000")
         return db
 
+    @contextmanager
+    def invocation_lock(self, model_invocation_id: str) -> Iterator[None]:
+        if not model_invocation_id:
+            raise ValueError("model_invocation_id is required")
+        lock_dir = self.database_path.parent / ".openmontage-invocation-locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_name = hashlib.sha256(model_invocation_id.encode("utf-8")).hexdigest()
+        with (lock_dir / f"{lock_name}.lock").open("a+b") as lock_file:
+            _lock_file(lock_file)
+            try:
+                yield
+            finally:
+                _unlock_file(lock_file)
+
     def get_or_create(
         self,
         *,
@@ -138,7 +165,10 @@ class ModelInvocationStore:
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as db:
             db.execute(
-                "UPDATE openmontage_model_invocation SET status = ?, updated_at = ? WHERE model_invocation_id = ?",
+                """UPDATE openmontage_model_invocation
+                   SET status = ?, response_status = NULL,
+                       response_headers = NULL, response_body = NULL, updated_at = ?
+                   WHERE model_invocation_id = ?""",
                 (status, now, model_invocation_id),
             )
             row = db.execute(
@@ -159,16 +189,17 @@ class ModelInvocationStore:
         headers: dict[str, str],
         body: bytes,
     ) -> None:
-        if status_code < 200 or status_code >= 400:
-            raise ValueError("only successful invocation responses can be cached")
+        if status_code < 200 or status_code >= 600:
+            raise ValueError("only final HTTP invocation responses can be cached")
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as db:
             cursor = db.execute(
                 """UPDATE openmontage_model_invocation
-                   SET status = 'succeeded', response_status = ?, response_headers = ?,
+                   SET status = ?, response_status = ?, response_headers = ?,
                        response_body = ?, updated_at = ?
                    WHERE model_invocation_id = ?""",
                 (
+                    "succeeded" if status_code < 400 else "failed",
                     status_code,
                     json.dumps(headers, ensure_ascii=True, sort_keys=True),
                     body,
@@ -213,3 +244,27 @@ class ModelInvocationStore:
         with self._connect() as db:
             rows = db.execute(query, args).fetchall()
         return [ModelInvocationRecord(**dict(row)) for row in rows]
+
+
+def _lock_file(lock_file: BinaryIO) -> None:
+    if _fcntl is not None:
+        _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX)
+        return
+    if _msvcrt is not None:
+        lock_file.seek(0, 2)
+        if lock_file.tell() == 0:
+            lock_file.write(b"\0")
+            lock_file.flush()
+        lock_file.seek(0)
+        _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_LOCK, 1)
+        return
+    raise RuntimeError("cross-process file locking is unavailable on this platform")
+
+
+def _unlock_file(lock_file: BinaryIO) -> None:
+    if _fcntl is not None:
+        _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
+        return
+    if _msvcrt is not None:
+        lock_file.seek(0)
+        _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_UNLCK, 1)

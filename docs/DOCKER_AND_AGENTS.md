@@ -5,14 +5,12 @@ service. The CLI and MCP server return the same project and analysis contract;
 Codex or Claude then follows the repository's pipeline instructions and approval
 gates to produce the new video.
 
-All model-backed stages are fail-closed to the DoFe Airouter at
-`https://model.local.dofe.ai/api`. Direct vendor model fallbacks are disabled
-when `DOFE_ENABLED=true`; the container receives the gateway key from `.env`.
-Video generation defaults to `seedance-2.0-fast`; recording-file STT uses the
-restricted `openspeech-auc` alias. Grant that alias to the deployment tenant
-and configure a positive tenant-effective `PER_MINUTE` price before expecting
-reference transcription to pass preflight. AIRouter rejects zero-priced or
-unresolved pricing before task creation so provider spend cannot bypass billing.
+All model-backed stages are fail-closed to the DoFe Airouter. Host processes use
+`https://model.local.dofe.ai/api`; Compose services use the shared-network
+address `${DOFE_DOCKER_MODEL_BASE_URL:-http://api:3101}`. Before choosing a
+model, OpenMontage performs an authenticated `GET /v1/models` against that
+effective base URL and accepts only an exact returned ID. Direct vendor model
+fallbacks and guessed defaults are disabled when `DOFE_ENABLED=true`.
 
 HeyGen is not required for the reference-clone example. The car/cinematic
 workflow uses AIRouter video generation plus Remotion, HyperFrames, or FFmpeg
@@ -30,9 +28,8 @@ Price preflight uses AIRouter's HMAC-authenticated internal quote endpoint. Set
 `DOFE_TENANT_ID` and `INTERNAL_API_SECRET` in the OpenMontage deployment
 environment. The Compose service sends these requests over the shared network
 to `http://api:3101/internal/pricing/quote`; secrets are never returned by MCP.
-For `seedance-2.0-fast`, the current tenant rate card is CNY 37/M output tokens
-for text-to-video and CNY 22/M output tokens when the request has video/image
-input. Actual spend is finalized from the provider-reported output-token usage.
+The quote request uses the exact model ID selected from the current tenant
+catalog. Actual spend is finalized from the provider-reported output-token usage.
 
 ## Docker deployment
 

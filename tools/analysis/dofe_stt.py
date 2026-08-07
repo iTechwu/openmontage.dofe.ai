@@ -1,4 +1,4 @@
-"""Speech-to-text through AIRouter's ``openspeech-auc`` model."""
+"""Speech-to-text through a tenant-visible AIRouter catalog model."""
 
 from __future__ import annotations
 
@@ -18,14 +18,16 @@ from tools.base_tool import (
     ToolResult,
     ToolRuntime,
     ToolStability,
+    ToolStatus,
     ToolTier,
 )
 from tools.dofe import DofeClient, DofeError
 from tools.dofe import config as dofe_config
 from tools.dofe.media import is_https_url
 from tools.dofe.media_upload import DofeMediaUploadClient, DofeMediaUploadError
-from tools.dofe.models import resolve_alias
+from tools.dofe.models import catalog_model_ids, resolve_alias, validate_catalog_alias
 from tools.dofe.runtime import _parse_cost, build_metadata
+from tools.dofe.status import configured_model_is_visible
 
 
 class DofeSpeechToText(BaseTool):
@@ -41,8 +43,8 @@ class DofeSpeechToText(BaseTool):
 
     dependencies = ["env:DOFE_MODEL_API_KEY|DOFE_API_KEY"]
     install_instructions = (
-        "Set DOFE_MODEL_API_KEY and grant that tenant access to the restricted "
-        "AIRouter model alias configured by DOFE_STT_MODEL (default openspeech-auc)."
+        "Set DOFE_MODEL_API_KEY, read GET /v1/models, and set DOFE_STT_MODEL "
+        "to an exact model ID returned for that tenant."
     )
     agent_skills = ["speech-to-text"]
     capabilities = ["transcribe", "language_detection"]
@@ -62,7 +64,7 @@ class DofeSpeechToText(BaseTool):
                 "type": "string",
                 "description": (
                     "Local audio file. OpenMontage uploads it through AIRouter's internal "
-                    "API before submitting openspeech-auc."
+                    "API before submitting the selected catalog model."
                 ),
             },
             "duration_seconds": {
@@ -110,6 +112,16 @@ class DofeSpeechToText(BaseTool):
     ]
     user_visible_verification = ["Review transcript text against the source audio"]
 
+    def get_status(self) -> ToolStatus:
+        status = super().get_status()
+        if status == ToolStatus.UNAVAILABLE:
+            return status
+        return (
+            ToolStatus.AVAILABLE
+            if configured_model_is_visible("stt", ("transcribe",))
+            else ToolStatus.UNAVAILABLE
+        )
+
     def resolve_model(self, inputs: dict[str, Any]) -> str | None:
         return resolve_alias("stt", "transcribe", explicit=inputs.get("model_name"))
 
@@ -127,9 +139,31 @@ class DofeSpeechToText(BaseTool):
         except DependencyError as exc:
             return ToolResult(success=False, error=str(exc))
 
-        model = self.resolve_model(inputs)
-        if not model:
-            return ToolResult(success=False, error="Set DOFE_STT_MODEL to an AIRouter STT alias.")
+        requested_model = self.resolve_model(inputs)
+        if not requested_model:
+            return ToolResult(
+                success=False,
+                error=(
+                    "Read GET /v1/models, then set DOFE_STT_MODEL to one returned ID "
+                    "or pass it as model_name."
+                ),
+            )
+
+        try:
+            client = DofeClient()
+            catalog = client.list_models()
+            model = validate_catalog_alias(requested_model, catalog)
+        except DofeError as exc:
+            return ToolResult(
+                success=False,
+                data={"provider": "dofe", "model": requested_model},
+                error=(
+                    "AIRouter model catalog validation failed for "
+                    f"{requested_model!r}: {exc}"
+                ),
+                duration_seconds=round(time.monotonic() - started, 2),
+                model=requested_model,
+            )
 
         audio_url = str(inputs.get("audio_url") or "").strip()
         source_asset: dict[str, Any] | None = None
@@ -150,7 +184,7 @@ class DofeSpeechToText(BaseTool):
             return ToolResult(
                 success=False,
                 error=(
-                    "AIRouter openspeech-auc requires a provider-accessible https:// or "
+                    "AIRouter STT requires a provider-accessible https:// or "
                     "configured tos:// URL. Upload the extracted local audio before STT."
                 ),
                 model=model,
@@ -185,7 +219,7 @@ class DofeSpeechToText(BaseTool):
             payload["metadata"] = metadata
 
         try:
-            result = DofeClient().submit_and_collect(
+            result = client.submit_and_collect(
                 payload,
                 timeout_seconds=dofe_config.poll_max_seconds("stt"),
                 poll_interval=dofe_config.poll_interval(),
@@ -233,6 +267,7 @@ class DofeSpeechToText(BaseTool):
             "provider": "dofe",
             "model": model,
             "dofe_task_id": result.get("task_id"),
+            "catalog_model_count": len(catalog_model_ids(catalog)),
             "billing": billing,
             **({"source_asset": source_asset} if source_asset else {}),
         }

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 import hashlib
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Thread
+from threading import Lock, Thread
 from typing import Any
 from urllib.parse import urlparse
+from weakref import WeakValueDictionary
 import requests
 
 from openmontage.invocation_store import InvocationRequestConflictError, ModelInvocationStore
@@ -95,6 +97,8 @@ class DelegationSigningProxy:
         self._upstream_prefix = parsed.path.rstrip("/")
         self._server: ThreadingHTTPServer | None = None
         self._thread: Thread | None = None
+        self._invocation_locks_guard = Lock()
+        self._invocation_locks: WeakValueDictionary[str, Lock] = WeakValueDictionary()
 
     def __enter__(self) -> "DelegationSigningProxy":
         proxy = self
@@ -133,6 +137,10 @@ class DelegationSigningProxy:
 
     def _forward(self, handler: BaseHTTPRequestHandler) -> None:
         response_cached = False
+        response_started = False
+        invocation_lock: Lock | None = None
+        lock_stack = ExitStack()
+        upstream: requests.Response | None = None
         try:
             length = int(handler.headers.get("Content-Length", "0"))
             if length < 0 or length > _MAX_REQUEST_BYTES:
@@ -166,9 +174,40 @@ class DelegationSigningProxy:
                     request_fingerprint=fingerprint,
                 )
                 invocation_id = record.model_invocation_id
+                invocation_lock = self._get_invocation_lock(invocation_id)
+                invocation_lock.acquire()
+                lock_stack.callback(invocation_lock.release)
+                lock_stack.enter_context(
+                    self.invocation_store.invocation_lock(invocation_id)
+                )
+                record = self.invocation_store.get_or_create(
+                    job_id=self.job_id,
+                    stage=self.stage,
+                    attempt=self.stage_attempt,
+                    request_id=seed,
+                    request_fingerprint=fingerprint,
+                )
                 cached = self.invocation_store.get_cached_response(invocation_id)
                 if cached is not None:
+                    response_cached = True
                     _send_response(handler, cached.status_code, cached.headers, cached.body)
+                    return
+                if record.status == "succeeded":
+                    response_cached = True
+                    _send_response(
+                        handler,
+                        409,
+                        {"Content-Type": "application/json"},
+                        json.dumps(
+                            {
+                                "error": {
+                                    "code": "OPENMONTAGE_RESPONSE_NOT_REPLAYABLE",
+                                    "message": "The successful model response exceeded the replay cache limit",
+                                }
+                            },
+                            separators=(",", ":"),
+                        ).encode("utf-8"),
+                    )
                     return
                 self.invocation_store.mark(invocation_id, "in_flight")
             headers = {
@@ -192,9 +231,51 @@ class DelegationSigningProxy:
                 for key, value in upstream.headers.items()
                 if key.lower() not in _HOP_HEADERS
             }
-            content_type = upstream.headers.get("Content-Type", "").lower()
+            if upstream.headers.get("Content-Type", "").lower().split(";", 1)[0].strip() == (
+                "text/event-stream"
+            ):
+                handler.send_response(upstream.status_code)
+                for key, value in response_headers.items():
+                    handler.send_header(key, value)
+                handler.send_header("Connection", "close")
+                handler.end_headers()
+                response_started = True
+                response_body = bytearray()
+                can_buffer = True
+                downstream_open = True
+                while True:
+                    chunk = upstream.raw.read1(64 * 1024, decode_content=False)
+                    if not chunk:
+                        break
+                    if can_buffer:
+                        if len(response_body) + len(chunk) <= _MAX_CACHED_RESPONSE_BYTES:
+                            response_body.extend(chunk)
+                        else:
+                            can_buffer = False
+                            response_body.clear()
+                    if downstream_open:
+                        try:
+                            handler.wfile.write(chunk)
+                            handler.wfile.flush()
+                        except OSError:
+                            downstream_open = False
+                if self.invocation_store is not None:
+                    if can_buffer:
+                        self.invocation_store.save_response(
+                            invocation_id,
+                            status_code=upstream.status_code,
+                            headers=response_headers,
+                            body=bytes(response_body),
+                        )
+                        response_cached = True
+                    else:
+                        self.invocation_store.mark(
+                            invocation_id,
+                            "succeeded" if upstream.status_code < 400 else "failed",
+                        )
+                return
             content_length = upstream.headers.get("Content-Length", "")
-            can_buffer = "text/event-stream" not in content_type
+            can_buffer = True
             if content_length.isdigit() and int(content_length) > _MAX_CACHED_RESPONSE_BYTES:
                 can_buffer = False
             if can_buffer:
@@ -206,7 +287,7 @@ class DelegationSigningProxy:
             else:
                 response_body = b""
             if can_buffer:
-                if self.invocation_store is not None and upstream.status_code < 400:
+                if self.invocation_store is not None:
                     self.invocation_store.save_response(
                         invocation_id,
                         status_code=upstream.status_code,
@@ -225,14 +306,11 @@ class DelegationSigningProxy:
                     handler.wfile.write(response_body)
                 for chunk in upstream.raw.stream(64 * 1024, decode_content=False):
                     handler.wfile.write(chunk)
-            upstream.close()
-            if self.invocation_store is not None:
-                cached_success = upstream.status_code < 400 and can_buffer
-                if not cached_success:
-                    self.invocation_store.mark(
-                        invocation_id,
-                        "succeeded" if upstream.status_code < 400 else "failed",
-                    )
+            if self.invocation_store is not None and not can_buffer:
+                self.invocation_store.mark(
+                    invocation_id,
+                    "succeeded" if upstream.status_code < 400 else "failed",
+                )
         except InvocationRequestConflictError as exc:
             handler.send_error(409, str(exc))
         except Exception:
@@ -242,4 +320,19 @@ class DelegationSigningProxy:
                 and not response_cached
             ):
                 self.invocation_store.mark(invocation_id, "unknown")
-            handler.send_error(502)
+            if response_started:
+                handler.close_connection = True
+            else:
+                handler.send_error(502)
+        finally:
+            if upstream is not None:
+                upstream.close()
+            lock_stack.close()
+
+    def _get_invocation_lock(self, invocation_id: str) -> Lock:
+        with self._invocation_locks_guard:
+            lock = self._invocation_locks.get(invocation_id)
+            if lock is None:
+                lock = Lock()
+                self._invocation_locks[invocation_id] = lock
+            return lock

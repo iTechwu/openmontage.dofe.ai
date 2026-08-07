@@ -67,10 +67,29 @@ class ModelCredentialBridgeClient:
                 timeout=self.timeout,
                 allow_redirects=False,
             )
-            response.raise_for_status()
-            payload = response.json()
-        except (requests.RequestException, ValueError, TypeError) as exc:
+        except requests.Timeout as exc:
+            raise ModelCredentialBridgeError("AgentSpace model credential request timed out") from exc
+        except requests.ConnectionError as exc:
+            raise ModelCredentialBridgeError("AgentSpace model credential connection failed") from exc
+        except requests.RequestException as exc:
             raise ModelCredentialBridgeError("AgentSpace model credential request failed") from exc
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            status_code = int(getattr(response, "status_code", 0))
+            error_code = _response_error_code(response)
+            diagnostic = f"HTTP {status_code}" if status_code else "HTTP error"
+            if error_code:
+                diagnostic += f", {error_code}"
+            raise ModelCredentialBridgeError(
+                f"AgentSpace model credential request failed ({diagnostic})"
+            ) from exc
+        try:
+            payload = response.json()
+        except (ValueError, TypeError) as exc:
+            raise ModelCredentialBridgeError(
+                "AgentSpace model credential response is invalid"
+            ) from exc
         credential = _parse_credential(payload)
         if credential.external_job_id != normalized_job_id or credential.pipeline_stage != normalized_stage:
             raise ModelCredentialBridgeError("AgentSpace model credential identity does not match the Job stage")
@@ -107,6 +126,25 @@ def _parse_credential(value: Any) -> DelegatedModelCredential:
         runtime_credential_id=_identifier(value["runtimeCredentialId"], "runtime_credential_id"),
         expires_at=expires_at,
     )
+
+
+def _response_error_code(response: Any) -> str | None:
+    try:
+        payload = response.json()
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    code = error.get("code") if isinstance(error, dict) else None
+    if not isinstance(code, str):
+        return None
+    normalized = code.strip()
+    if not normalized or len(normalized) > 128:
+        return None
+    if not all(character.isalnum() or character in "._-" for character in normalized):
+        return None
+    return normalized
 
 
 def _attribution(value: JobAttribution) -> str:

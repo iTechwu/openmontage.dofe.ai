@@ -31,6 +31,7 @@ class SignedEvent:
 class PublishResult:
     delivered: int
     failed: int
+    dead_lettered: int = 0
 
 
 class EventSigner:
@@ -114,7 +115,13 @@ class OutboxPublisher:
         clock: Callable[[], datetime] | None = None,
         nonce_factory: Callable[[], str] | None = None,
         timeout_seconds: float = 10.0,
+        max_attempts: int = 20,
+        not_found_max_attempts: int = 5,
     ):
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be greater than zero")
+        if not_found_max_attempts < 1:
+            raise ValueError("not_found_max_attempts must be greater than zero")
         self.service = service
         self.endpoint = endpoint
         self.signer = EventSigner(secret)
@@ -122,6 +129,8 @@ class OutboxPublisher:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.nonce_factory = nonce_factory or (lambda: uuid4().hex)
         self.timeout_seconds = timeout_seconds
+        self.max_attempts = max_attempts
+        self.not_found_max_attempts = not_found_max_attempts
 
     @classmethod
     def from_environment(cls, service: JobService | None = None) -> "OutboxPublisher":
@@ -135,13 +144,33 @@ class OutboxPublisher:
             from openmontage.job_api import default_job_service
 
             service = default_job_service()
-        return cls(service, endpoint=endpoint, secret=secret)
+        return cls(
+            service,
+            endpoint=endpoint,
+            secret=secret,
+            max_attempts=_positive_env_int("OPENMONTAGE_EVENT_MAX_ATTEMPTS", 20),
+            not_found_max_attempts=_positive_env_int(
+                "OPENMONTAGE_EVENT_NOT_FOUND_MAX_ATTEMPTS", 5
+            ),
+        )
 
     def publish_pending(self, *, limit: int = 100) -> PublishResult:
-        now = self.clock()
+        lease_seconds = max(30.0, self.timeout_seconds * 2)
         delivered = 0
         failed = 0
-        for record in self.service.list_pending_outbox(now=now, limit=limit):
+        dead_lettered = 0
+        for _ in range(limit):
+            now = self.clock()
+            lease_token = uuid4().hex
+            records = self.service.claim_pending_outbox(
+                lease_token=lease_token,
+                now=now,
+                lease_seconds=lease_seconds,
+                limit=1,
+            )
+            if not records:
+                break
+            record = records[0]
             signed = self.signer.sign(
                 record.event,
                 timestamp=now,
@@ -154,16 +183,94 @@ class OutboxPublisher:
                     headers=signed.headers,
                     timeout=self.timeout_seconds,
                 )
-                if not 200 <= int(response.status_code) < 300:
-                    raise RuntimeError(f"AgentSpace event bridge returned HTTP {response.status_code}")
-                self.service.mark_event_delivered(record.event.event_id, delivered_at=now)
-                delivered += 1
+                status_code = int(response.status_code)
             except Exception as exc:
-                delay_seconds = min(300, 2 ** (record.delivery_attempts + 1))
-                self.service.mark_event_failed(
-                    record.event.event_id,
-                    error=str(exc),
-                    next_attempt_at=now + timedelta(seconds=delay_seconds),
-                )
-                failed += 1
-        return PublishResult(delivered=delivered, failed=failed)
+                error = str(exc)
+                failed_at = self.clock()
+                if record.delivery_attempts + 1 >= self.max_attempts:
+                    self.service.mark_event_dead_lettered(
+                        record.event.event_id,
+                        lease_token=lease_token,
+                        error=error,
+                    )
+                    dead_lettered += 1
+                else:
+                    self._schedule_retry(
+                        record.event.event_id,
+                        lease_token,
+                        record.delivery_attempts,
+                        error,
+                        failed_at,
+                    )
+                    failed += 1
+                continue
+            completed_at = self.clock()
+            if not 200 <= status_code < 300:
+                error = f"AgentSpace event bridge returned HTTP {status_code}"
+                if self._should_dead_letter(record.delivery_attempts, status_code):
+                    self.service.mark_event_dead_lettered(
+                        record.event.event_id,
+                        lease_token=lease_token,
+                        error=error,
+                    )
+                    dead_lettered += 1
+                else:
+                    self._schedule_retry(
+                        record.event.event_id,
+                        lease_token,
+                        record.delivery_attempts,
+                        error,
+                        completed_at,
+                    )
+                    failed += 1
+                continue
+            self.service.mark_event_delivered(
+                record.event.event_id,
+                lease_token=lease_token,
+                delivered_at=completed_at,
+            )
+            delivered += 1
+        return PublishResult(
+            delivered=delivered,
+            failed=failed,
+            dead_lettered=dead_lettered,
+        )
+
+    def _should_dead_letter(self, previous_attempts: int, status_code: int) -> bool:
+        attempt = previous_attempts + 1
+        if attempt >= self.max_attempts:
+            return True
+        if status_code == 404:
+            return attempt >= self.not_found_max_attempts
+        if status_code in {408, 425, 429} or 500 <= status_code < 600:
+            return False
+        return True
+
+    def _schedule_retry(
+        self,
+        event_id: str,
+        lease_token: str,
+        previous_attempts: int,
+        error: str,
+        now: datetime,
+    ) -> None:
+        delay_seconds = min(300, 2 ** (previous_attempts + 1))
+        self.service.mark_event_failed(
+            event_id,
+            lease_token=lease_token,
+            error=error,
+            next_attempt_at=now + timedelta(seconds=delay_seconds),
+        )
+
+
+def _positive_env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if value < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return value

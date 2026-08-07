@@ -35,6 +35,10 @@ def test_status_gating(monkeypatch):
     assert tool.get_status() == ToolStatus.UNAVAILABLE
     monkeypatch.setenv("DOFE_API_KEY", "test-key")
     monkeypatch.setenv("DOFE_TTS_MODEL", "tts-test")
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.list_models",
+        lambda _self: [{"id": "tts-test"}],
+    )
     assert tool.get_status() == ToolStatus.AVAILABLE
 
 
@@ -60,6 +64,10 @@ def test_tts_selector_switch_on_picks_dofe(monkeypatch, isolated_tool_registry):
     monkeypatch.setenv("DOFE_ENABLED", "true")
     monkeypatch.setenv("DOFE_API_KEY", "test-key")
     monkeypatch.setenv("DOFE_TTS_MODEL", "tts-test")
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.list_models",
+        lambda _self: [{"id": "tts-test"}],
+    )
     isolated_tool_registry.discover("tools")
     monkeypatch.setattr(DofeTTS, "execute", _fake_execute)
 

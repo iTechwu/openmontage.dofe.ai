@@ -12,7 +12,7 @@ def test_event_publisher_can_flush_once_for_container_jobs(monkeypatch, capsys) 
     class Publisher:
         def publish_pending(self, *, limit: int) -> PublishResult:
             limits.append(limit)
-            return PublishResult(delivered=2, failed=1)
+            return PublishResult(delivered=2, failed=1, dead_lettered=1)
 
     monkeypatch.setattr(
         OutboxPublisher,
@@ -24,4 +24,8 @@ def test_event_publisher_can_flush_once_for_container_jobs(monkeypatch, capsys) 
 
     assert exit_code == 1
     assert limits == [25]
-    assert json.loads(capsys.readouterr().out) == {"delivered": 2, "failed": 1}
+    assert json.loads(capsys.readouterr().out) == {
+        "deadLettered": 1,
+        "delivered": 2,
+        "failed": 1,
+    }

@@ -148,3 +148,19 @@ def test_job_transition_requires_cancel_confirmation_before_cancelled() -> None:
 def test_job_terminal_state_cannot_regress() -> None:
     with pytest.raises(ValueError, match="Invalid job transition"):
         validate_job_transition(JobStatus.SUCCEEDED, JobStatus.RUNNING)
+
+
+def test_transition_validators_accept_pydantic_enum_values_as_strings() -> None:
+    validate_stage_transition("PENDING", "RUNNING")
+    validate_job_transition("QUEUED", "RUNNING")
+
+    with pytest.raises(
+        ValueError,
+        match="Invalid stage transition: SUCCEEDED -> RUNNING",
+    ):
+        validate_stage_transition("SUCCEEDED", "RUNNING")
+    with pytest.raises(
+        ValueError,
+        match="Invalid job transition: SUCCEEDED -> RUNNING",
+    ):
+        validate_job_transition("SUCCEEDED", "RUNNING")
