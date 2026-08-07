@@ -25,7 +25,7 @@ from openmontage.contracts import (
     StageSnapshot,
     StageStatus,
 )
-from openmontage.job_service import JobLease, JobLeaseError, JobService
+from openmontage.job_service import JobLease, JobLeaseError, JobService, _summarize_error
 from openmontage.model_credential_bridge import (
     ModelCredentialBridgeClient,
     ModelCredentialBridgeError,
@@ -782,11 +782,11 @@ def _bounded_executor_error(error: PipelineExecutionError) -> str:
     message = " ".join(str(error).split())
     if not message:
         return "External Agent executor failed"
-    return message[:1000]
+    return _summarize_error(message, 1000)
 
 
 def _bounded_model_credential_error(error: ModelCredentialBridgeError) -> str:
     message = " ".join(str(error).split())
     if not message:
         return "Job-scoped model credential was unavailable"
-    return message[:1000]
+    return _summarize_error(message, 1000)

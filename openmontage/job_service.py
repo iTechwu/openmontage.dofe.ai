@@ -81,6 +81,22 @@ def _same_request_identity(snapshot_json: str, expected: dict[str, Any]) -> bool
     return stored_request == expected_request and stored_attribution == expected_attribution
 
 
+def _summarize_error(message: str, max_len: int) -> str:
+    """Return a compact error summary that preserves both head and tail.
+
+    Truncating only the end loses root causes that happen to be at the tail
+    of a long diagnostic chain; truncating only the beginning loses context.
+    A head+tail ellipsis keeps the start (what failed) and the end (why it
+    failed) while fitting the caller's budget.
+    """
+    message = " ".join(message.split())
+    if not message or len(message) <= max_len:
+        return message
+    head_len = (max_len - 5) // 2
+    tail_len = max_len - head_len - 5
+    return f"{message[:head_len]} ... {message[-tail_len:]}"
+
+
 class JobService:
     def __init__(self, database_path: str | Path):
         self.database_path = Path(database_path)
@@ -1299,10 +1315,10 @@ class JobService:
                     "code": code,
                     # AgentSpace's signed event contract caps failure summaries at
                     # 500 characters. Full executor diagnostics remain in the
-                    # per-assignment execution log.
-                    # Executor diagnostics place the failure closest to the end.
-                    # Preserve that root cause when crossing the 500-char event contract.
-                    "message": message[-500:],
+                    # per-assignment execution log. Preserve both the start
+                    # (what failed) and the end (root cause) in the bounded
+                    # public event instead of keeping only the trailing bytes.
+                    "message": _summarize_error(message, 500),
                     "retryable": retryable,
                 },
             },

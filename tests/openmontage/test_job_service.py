@@ -410,9 +410,25 @@ def test_fail_job_limits_cross_service_error_message_to_event_contract(tmp_path:
     )
 
     event = service.list_events(job.job_id)[-1]
-    assert len(event.payload["error"]["message"]) == 500
-    assert event.payload["error"]["message"].endswith("root cause: endpoint not found")
-    assert not event.payload["error"]["message"].startswith("startup context")
+    message = event.payload["error"]["message"]
+    assert len(message) == 500
+    assert message.startswith("startup context:")
+    assert message.endswith("root cause: endpoint not found")
+    assert " ... " in message
+
+
+def test_summarize_error_keeps_head_and_tail_under_budget() -> None:
+    from openmontage.job_service import _summarize_error
+
+    short = "short error"
+    assert _summarize_error(short, 500) == "short error"
+
+    long_text = "HEAD: " + ("x" * 1200) + " TAIL: root cause"
+    summary = _summarize_error(long_text, 100)
+    assert len(summary) == 100
+    assert summary.startswith("HEAD:")
+    assert summary.endswith("TAIL: root cause")
+    assert " ... " in summary
 
 
 def test_cancellation_uses_requested_then_confirmed_terminal_states(tmp_path: Path) -> None:
