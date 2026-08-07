@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import socket
 import sys
@@ -16,6 +17,74 @@ from openmontage.reference_clone import (
     ReferenceCloneService,
     capability_summary,
 )
+
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+_OPENMONTAGE_HANDLER_MARK = "_openmontage_logging"
+
+
+class _StderrHandler(logging.StreamHandler):
+    """StreamHandler that resolves ``sys.stderr`` at emit time.
+
+    pytest's ``capsys`` swaps ``sys.stderr`` per test, but a handler caches the
+    stream it was constructed with. Re-resolving on every emit keeps captured
+    logs inside the active test (and out of the terminal) without leaking.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:  # noqa: D401
+        self.stream = sys.stderr
+        super().emit(record)
+
+
+class _StructuredFormatter(logging.Formatter):
+    """Append non-reserved ``extra=`` fields as ``key=value`` after the message.
+
+    Lets the delegation proxy's replay records (``replay_key_source``,
+    ``invocation_id``, ...) surface as structured fields on one line instead of
+    being dropped by a formatter that only knows ``%(message)s``.
+    """
+
+    _RESERVED = frozenset(
+        {
+            "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
+            "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
+            "created", "msecs", "relativeCreated", "thread", "threadName",
+            "processName", "process", "taskName", "message", "asctime",
+        }
+    )
+
+    def format(self, record: logging.LogRecord) -> str:
+        base = super().format(record)
+        extras = [
+            f"{key}={record.__dict__[key]!r}"
+            for key in sorted(record.__dict__)
+            if key not in self._RESERVED and not key.startswith("_")
+        ]
+        return f"{base} {' '.join(extras)}" if extras else base
+
+
+def _configure_logging(level_name: str) -> None:
+    """Attach an OpenMontage stderr handler so INFO records actually emit.
+
+    Without this the root logger's default effective level is WARNING, so the
+    delegation proxy's wrong-merge replay records (logged at INFO) stay silent
+    under the Worker/CLI default configuration. Idempotent: repeated CLI entry
+    (e.g. in tests) reuses the tagged handler instead of stacking new ones.
+    """
+    level = getattr(logging, str(level_name).upper(), logging.INFO)
+    root = logging.getLogger()
+    handler = next(
+        (h for h in root.handlers if getattr(h, _OPENMONTAGE_HANDLER_MARK, False)),
+        None,
+    )
+    if handler is None:
+        handler = _StderrHandler()
+        handler.setFormatter(
+            _StructuredFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        )
+        setattr(handler, _OPENMONTAGE_HANDLER_MARK, True)
+        root.addHandler(handler)
+    handler.setLevel(level)
+    root.setLevel(level)
 
 
 def _print(value: dict[str, Any], *, as_json: bool) -> None:
@@ -37,6 +106,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="openmontage",
         description="Prepare and operate agent-led OpenMontage video productions.",
+    )
+    parser.add_argument(
+        "--log-level",
+        default=os.environ.get("OPENMONTAGE_LOG_LEVEL", "INFO").upper(),
+        choices=_LOG_LEVELS,
+        help="Logging verbosity for the OpenMontage process (default: INFO, or "
+        "$OPENMONTAGE_LOG_LEVEL). INFO is required for the delegation replay "
+        "audit records to be observable.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -137,6 +214,7 @@ def _worker_document(result: Any | None) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    _configure_logging(args.log_level)
     try:
         if args.command == "clone":
             value = ReferenceCloneService().prepare(
