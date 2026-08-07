@@ -278,10 +278,14 @@ Use /recreate-video on this Douyin link: <url>. Create an original 9:16 version.
 - `reference_clone_status`: current project and next pipeline stage.
 - `submit_video_job`: create an asynchronous, attributable video Job.
 - `get_video_job`: return the durable Job and manifest-derived stage snapshot.
-- `list_video_job_events`: replay ordered events after a sequence cursor.
+- `list_video_job_events`: replay ordered Job events after a sequence cursor.
 - `list_video_artifacts`: list durable AgentSpace-backed outputs for a Job.
-- `cancel_video_job`: request cooperative cancellation.
-- `approve_video_stage`: approve or reject a pending human gate.
+- `cancel_video_job(job_id, expected_sequence, idempotency_key)`: request cooperative
+  cancellation. `expected_sequence` is the current `lastSequence` from `get_video_job`
+  or event replay; `idempotency_key` is a caller-generated stable key for retries.
+- `approve_video_stage(job_id, stage, expected_sequence, idempotency_key, approved=true)`:
+  approve or reject a pending human gate. `expected_sequence` and `idempotency_key`
+  follow the same optimistic-fencing contract as `cancel_video_job`.
 - `openmontage://reference-clone-guide`: shared agent workflow resource.
 
 The Job tools never accept workspace, employee, conversation, task, invocation,

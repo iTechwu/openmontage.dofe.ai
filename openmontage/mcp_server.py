@@ -111,7 +111,16 @@ def create_server(
         idempotency_key: str,
         ctx: Context,
     ) -> dict[str, Any]:
-        """Request cancellation with optimistic fencing and a stable retry key."""
+        """Request cancellation with optimistic fencing and a stable retry key.
+
+        Args:
+            job_id: Durable Job identifier.
+            expected_sequence: Current ``lastSequence`` from the Job snapshot or
+                event replay. The request is rejected if the Job has moved past
+                this sequence.
+            idempotency_key: Caller-generated stable key. Retries with the same
+                key and sequence return the same result without duplicate events.
+        """
         from openmontage.job_api import require_same_workspace
 
         attribution = resolve_attribution(ctx.headers)
@@ -134,7 +143,16 @@ def create_server(
         ctx: Context,
         approved: bool = True,
     ) -> dict[str, Any]:
-        """Resolve approval with optimistic fencing and a stable retry key."""
+        """Resolve approval with optimistic fencing and a stable retry key.
+
+        Args:
+            job_id: Durable Job identifier.
+            stage: Stage code waiting for approval, e.g. ``proposal``.
+            expected_sequence: Current ``lastSequence`` observed for the Job.
+                Rejected if the Job has moved past this sequence.
+            idempotency_key: Caller-generated stable key for idempotent retries.
+            approved: ``True`` to approve the gate, ``False`` to reject it.
+        """
         from openmontage.job_api import require_same_workspace
 
         attribution = resolve_attribution(ctx.headers)
