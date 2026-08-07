@@ -721,3 +721,121 @@ def test_expired_token_rejected_on_legacy_public_api_but_settlement_succeeds(
         now=expired_now,
     )
     assert settled.status != JobStatus.CANCELLED
+
+
+NAIVE_NOW = datetime(2026, 8, 5, 12, 5)  # no tzinfo — would TypeError vs aware expiry
+
+
+def test_claim_rejects_naive_now(tmp_path: Path) -> None:
+    """claim_job compares ``now`` against the parsed aware-UTC expiry in the
+    reclaim loop; a naive ``now`` would raise TypeError there and crash the
+    Worker claim loop. It is rejected at entry as a JobLeaseError instead."""
+    service = JobService(tmp_path / "jobs.sqlite3")
+    service.create_job(_request("naive-claim"), _attribution())
+    with pytest.raises(JobLeaseError, match="timezone-aware"):
+        service.claim_job(
+            worker_id="worker-a",
+            lease_duration=timedelta(seconds=30),
+            now=NAIVE_NOW,
+        )
+
+
+def test_active_lease_check_rejects_naive_now(tmp_path: Path) -> None:
+    """The active-lease gate compares the parsed aware expiry against ``now``;
+    a naive ``now`` is rejected as a JobLeaseError before that comparison,
+    on both the direct public entry and the lease_now mutation path."""
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request("naive-active"), _attribution())
+    lease = service.claim_job(
+        worker_id="worker-a",
+        lease_duration=timedelta(seconds=30),
+        now=NOW,
+    )
+    assert lease is not None
+
+    with pytest.raises(JobLeaseError, match="timezone-aware"):
+        service.require_active_lease(
+            job.job_id, lease_token=lease.lease_token, now=NAIVE_NOW
+        )
+    with pytest.raises(JobLeaseError, match="timezone-aware"):
+        service.complete_stage(
+            job.job_id,
+            "research",
+            lease_token=lease.lease_token,
+            lease_now=NAIVE_NOW,
+        )
+
+
+def test_heartbeat_rejects_naive_now(tmp_path: Path) -> None:
+    """heartbeat_lease routes through the active-lease gate, so a naive ``now``
+    is rejected rather than TypeError-ing at the expiry comparison."""
+    service = JobService(tmp_path / "jobs.sqlite3")
+    service.create_job(_request("naive-heartbeat"), _attribution())
+    lease = service.claim_job(
+        worker_id="worker-a",
+        lease_duration=timedelta(seconds=30),
+        now=NOW,
+    )
+    assert lease is not None
+    with pytest.raises(JobLeaseError, match="timezone-aware"):
+        service.heartbeat_lease(
+            lease,
+            lease_duration=timedelta(seconds=30),
+            now=NAIVE_NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    "settle",
+    [
+        pytest.param(
+            lambda service, lease, naive: service.release_lease(
+                lease.job_id, lease_token=lease.lease_token, now=naive
+            ),
+            id="release",
+        ),
+        pytest.param(
+            lambda service, lease, naive: service.release_lease_or_confirm_cancel(
+                lease.job_id, lease_token=lease.lease_token, now=naive
+            ),
+            id="release-or-confirm",
+        ),
+        pytest.param(
+            lambda service, lease, naive: service.complete_stage_or_confirm_cancel(
+                lease.job_id,
+                "research",
+                lease_token=lease.lease_token,
+                now=naive,
+            ),
+            id="complete-stage-or-confirm",
+        ),
+        pytest.param(
+            lambda service, lease, naive: service.fail_job_or_confirm_cancel(
+                lease.job_id,
+                code="OPENMONTAGE_AGENT_EXECUTOR_FAILED",
+                message="executor failed",
+                retryable=False,
+                lease_token=lease.lease_token,
+                now=naive,
+            ),
+            id="fail-job-or-confirm",
+        ),
+    ],
+)
+def test_settlement_rejects_naive_now(tmp_path: Path, settle) -> None:
+    """Every atomic settlement path (release, release-or-confirm,
+    complete-stage-or-confirm, fail-job-or-confirm) routes through the fencing
+    gate — or normalizes ``now`` at its own entry — so a naive clock is rejected
+    as a JobLeaseError consistently, never a TypeError leaking from the
+    expiry/token comparison."""
+    service = JobService(tmp_path / "jobs.sqlite3")
+    service.create_job(_request("naive-settle"), _attribution())
+    lease = service.claim_job(
+        worker_id="worker-a",
+        lease_duration=timedelta(seconds=30),
+        now=NOW,
+    )
+    assert lease is not None
+    with pytest.raises(JobLeaseError, match="timezone-aware"):
+        settle(service, lease, NAIVE_NOW)
+

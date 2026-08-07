@@ -84,6 +84,28 @@ def _parse_lease_expiry(raw: str | None) -> datetime | None:
     return parsed
 
 
+def _normalize_now(now: datetime | None) -> datetime:
+    """Resolve the optional clock argument to an aware-UTC datetime.
+
+    Lease expiry is parsed from storage as aware-UTC, so comparing it against a
+    naive ``now`` raises ``TypeError`` at the comparison site (claim reclaim, or
+    the active-lease expiry gate). That surfaces as an unhandled 500 and leaves
+    the Job stuck under a token the reclaim path cannot take back. Rather than
+    silently assume a naive value means UTC — which would mask a local-time
+    clock bug in a lease/security path — reject naive explicitly. ``None``
+    resolves to the current UTC instant.
+
+    Applied at the lease gate (``_require_active_lease``,
+    ``_require_current_fencing_token``) and at ``claim_job`` / ``release_lease``,
+    which compare ``now`` before or outside those helpers.
+    """
+    if now is None:
+        return _now()
+    if now.tzinfo is None:
+        raise JobLeaseError("now/lease_now must be timezone-aware (UTC)")
+    return now
+
+
 def _canonical_json(value: dict[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
@@ -315,7 +337,7 @@ class JobService:
 
         with self._connect() as connection:
             self._begin_write(connection)
-            effective_now = now if now is not None else _now()
+            effective_now = _normalize_now(now)
             expires_at = effective_now + lease_duration
             rows = connection.execute(
                 """
@@ -446,12 +468,12 @@ class JobService:
             raise JobLeaseError("retry_at and retry_delay are mutually exclusive")
         if retry_delay is not None and retry_delay < timedelta(0):
             raise JobLeaseError("retry_delay must not be negative")
-        call_now = now if now is not None else _now()
+        call_now = _normalize_now(now)
         if retry_at is not None and retry_at < call_now:
             raise JobLeaseError("retry_at must not be earlier than now")
         with self._connect() as connection:
             self._begin_write(connection)
-            effective_now = now if now is not None else _now()
+            effective_now = _normalize_now(now)
             effective_retry_at = (
                 effective_now + retry_delay if retry_delay is not None else retry_at
             )
@@ -485,12 +507,12 @@ class JobService:
             raise JobLeaseError("retry_at and retry_delay are mutually exclusive")
         if retry_delay is not None and retry_delay < timedelta(0):
             raise JobLeaseError("retry_delay must not be negative")
-        call_now = now if now is not None else _now()
+        call_now = _normalize_now(now)
         if retry_at is not None and retry_at < call_now:
             raise JobLeaseError("retry_at must not be earlier than now")
         with self._connect() as connection:
             self._begin_write(connection)
-            effective_now = now if now is not None else _now()
+            effective_now = _normalize_now(now)
             effective_retry_at = (
                 effective_now + retry_delay if retry_delay is not None else retry_at
             )
@@ -1420,7 +1442,12 @@ class JobService:
         at any moment, so letting it start a stage (which begins paid execution)
         would open a double-Worker window. The lapsed owner's own next claim is
         the recovery path.
+
+        ``now`` is normalized to aware-UTC here so a naive clock argument is
+        rejected before the expiry comparison (which would otherwise raise
+        TypeError against the parsed aware expiry).
         """
+        now = _normalize_now(now)
         row = cls._fetch_lease_row(connection, job_id)
         if row is None or row["lease_token"] != lease_token:
             raise JobLeaseError("Job lease token is no longer active")
@@ -1443,7 +1470,7 @@ class JobService:
         connection: sqlite3.Connection,
         job_id: str,
         lease_token: str,
-        now: datetime,  # retained for the clock-based call contract; not a gate here
+        now: datetime,  # validated aware-UTC at entry; not an expiry gate here
     ) -> sqlite3.Row:
         """Require only that the token has not been superseded by a newer claim.
 
@@ -1457,7 +1484,11 @@ class JobService:
         token, so when a reaper takes over an expired lease the previous owner's
         next settle fails the token match below. Expiry alone never fences a
         settle; only a newer token does.
+
+        ``now`` is normalized to aware-UTC so a naive clock argument is rejected
+        consistently with the active-lease path (it is still not an expiry gate).
         """
+        now = _normalize_now(now)
         row = cls._fetch_lease_row(connection, job_id)
         if row is None or row["lease_token"] != lease_token:
             raise JobLeaseError("Job lease token is no longer current")
