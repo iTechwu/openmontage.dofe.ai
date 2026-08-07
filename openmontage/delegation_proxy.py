@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import ExitStack
 import hashlib
 import json
+import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock, Thread
 from typing import Any
@@ -31,6 +32,7 @@ _HOP_HEADERS = {
 }
 _MAX_REQUEST_BYTES = 32 * 1024 * 1024
 _MAX_CACHED_RESPONSE_BYTES = 8 * 1024 * 1024
+_LOGGER = logging.getLogger("openmontage.delegation_proxy")
 # Logical-call identity policy (deliberate, audited — not a heuristic).
 #
 # Codex is the only executor whose OpenAI-compatible traffic crosses this proxy,
@@ -54,6 +56,19 @@ _MAX_CACHED_RESPONSE_BYTES = 8 * 1024 * 1024
 # one stage. Callers that CAN supply a stable identity (e.g. native tool paths)
 # set X-OpenMontage-Logical-Call-Id, which is then used strictly and never
 # falls back to the fingerprint.
+#
+# A true per-call identity (stage + attempt + call_sequence) is the only way to
+# fully close the wrong-merge case, but it must originate on the caller side:
+# this proxy cannot tell a retransmitted call from a distinct same-content call
+# by bytes alone. Codex owns its HTTP client and the only seam OpenMontage
+# controls (pipeline_executor._configure_agent_command_for_delegation) can set
+# at most a STATIC provider header, which would collapse every call in a stage
+# onto one id — strictly worse than the fingerprint. So the real fix is blocked
+# on a Codex capability (per-call header interpolation or a stable per-call
+# Idempotency-Key) that is not available today. Until then, every replay this
+# proxy serves is logged with replay_key_source = "logical_call_id" (the safe
+# case) or "content_fingerprint" (the wrong-merge-prone case), so the limitation
+# is observable and auditable rather than silent.
 _LOGICAL_CALL_HEADERS = (
     "X-OpenMontage-Logical-Call-Id",
 )
@@ -192,13 +207,17 @@ class DelegationSigningProxy:
                 body,
                 handler.headers.get("Content-Type", ""),
             )
-            seed = next(
+            logical_call_id = next(
                 (
                     value
                     for name in _LOGICAL_CALL_HEADERS
                     if (value := handler.headers.get(name, "").strip())
                 ),
-                fingerprint,
+                "",
+            )
+            seed = logical_call_id or fingerprint
+            replay_key_source = (
+                "logical_call_id" if logical_call_id else "content_fingerprint"
             )
             if self.invocation_store is None:
                 invocation_id = "om-" + hashlib.sha256(
@@ -229,10 +248,20 @@ class DelegationSigningProxy:
                 cached = self.invocation_store.get_cached_response(invocation_id)
                 if cached is not None:
                     response_cached = True
+                    self._log_replay(
+                        invocation_id,
+                        replay_key_source=replay_key_source,
+                        outcome="replayed_cached",
+                    )
                     _send_response(handler, cached.status_code, cached.headers, cached.body)
                     return
                 if record.status == "succeeded":
                     response_cached = True
+                    self._log_replay(
+                        invocation_id,
+                        replay_key_source=replay_key_source,
+                        outcome="not_replayable_409",
+                    )
                     _send_response(
                         handler,
                         409,
@@ -375,3 +404,30 @@ class DelegationSigningProxy:
                 lock = Lock()
                 self._invocation_locks[invocation_id] = lock
             return lock
+
+    def _log_replay(
+        self,
+        invocation_id: str,
+        *,
+        replay_key_source: str,
+        outcome: str,
+    ) -> None:
+        """Emit a structured record when a cached/deduped response is served.
+
+        replay_key_source distinguishes the safe dedup case (a caller-supplied
+        logical call id) from the wrong-merge-prone fallback (content
+        fingerprint), so the documented limitation is observable rather than
+        silent. See the logical-call identity policy above.
+        """
+        _LOGGER.info(
+            "openmontage delegation replay served",
+            extra={
+                "event": "replay_served",
+                "outcome": outcome,
+                "job_id": self.job_id,
+                "stage": self.stage,
+                "attempt": self.stage_attempt,
+                "invocation_id": invocation_id,
+                "replay_key_source": replay_key_source,
+            },
+        )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import hashlib
 import hmac
+import logging
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -892,3 +893,125 @@ def test_proxy_retries_persisted_upstream_error_with_same_invocation_id(tmp_path
     assert responses[1].json() == responses[2].json() == {"ok": True}
     assert forwarded == 2
     assert len(set(invocation_ids)) == 1
+
+
+def _replay_log_upstream(forwarded: list):
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            forwarded.append(
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            )
+            body = b'{"id":"resp-1","output":[]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:  # noqa: N802
+            return None
+
+    return Handler
+
+
+def test_proxy_logs_replay_keyed_on_content_fingerprint(tmp_path, caplog) -> None:
+    """Two identical Responses calls with no logical-call header collapse to one
+    invocation; the replayed second response is logged as keyed on the content
+    fingerprint — the wrong-merge-prone case, made observable."""
+    forwarded: list = []
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), _replay_log_upstream(forwarded))
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = upstream.server_address
+        credential = DelegatedModelCredential(
+            api_key="delegated-api-key",
+            models_base_url=f"http://{host}:{port}/api",
+            delegation_id="delegation-1",
+            external_job_id="job-fingerprint-replay",
+            pipeline_stage="idea",
+            runtime_credential_id="runtime-credential-1",
+            expires_at="2099-08-06T09:00:01Z",
+        )
+        store = ModelInvocationStore(tmp_path / "jobs.sqlite3")
+        payload = {"model": "catalog-model", "input": "same assignment"}
+        with DelegationSigningProxy(
+            credential, invocation_store=store, stage_attempt=1
+        ) as proxy:
+            with caplog.at_level(logging.INFO, logger="openmontage.delegation_proxy"):
+                first = requests.post(
+                    f"{proxy.base_url}/v1/responses", json=payload, timeout=5
+                )
+                second = requests.post(
+                    f"{proxy.base_url}/v1/responses", json=payload, timeout=5
+                )
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+    assert first.status_code == second.status_code == 200
+    assert first.content == second.content
+    assert len(forwarded) == 1  # only the first call reached upstream
+    sources = [
+        getattr(record, "replay_key_source", None)
+        for record in caplog.records
+        if getattr(record, "event", None) == "replay_served"
+    ]
+    assert sources == ["content_fingerprint"]
+
+
+def test_proxy_logs_replay_keyed_on_logical_call_id(tmp_path, caplog) -> None:
+    """When the caller supplies X-OpenMontage-Logical-Call-Id, a same-id replay
+    is logged as keyed on the logical call id — the safe dedup case that the
+    fingerprint fallback exists to approximate."""
+    forwarded: list = []
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), _replay_log_upstream(forwarded))
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = upstream.server_address
+        credential = DelegatedModelCredential(
+            api_key="delegated-api-key",
+            models_base_url=f"http://{host}:{port}/api",
+            delegation_id="delegation-1",
+            external_job_id="job-logical-id-replay",
+            pipeline_stage="idea",
+            runtime_credential_id="runtime-credential-1",
+            expires_at="2099-08-06T09:00:01Z",
+        )
+        store = ModelInvocationStore(tmp_path / "jobs.sqlite3")
+        headers = {"X-OpenMontage-Logical-Call-Id": "idea-call-1"}
+        payload = {"model": "catalog-model", "input": "same assignment"}
+        with DelegationSigningProxy(
+            credential, invocation_store=store, stage_attempt=1
+        ) as proxy:
+            with caplog.at_level(logging.INFO, logger="openmontage.delegation_proxy"):
+                first = requests.post(
+                    f"{proxy.base_url}/v1/responses",
+                    json=payload,
+                    headers=headers,
+                    timeout=5,
+                )
+                second = requests.post(
+                    f"{proxy.base_url}/v1/responses",
+                    json=payload,
+                    headers=headers,
+                    timeout=5,
+                )
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+    assert first.status_code == second.status_code == 200
+    assert first.content == second.content
+    assert len(forwarded) == 1
+    sources = [
+        getattr(record, "replay_key_source", None)
+        for record in caplog.records
+        if getattr(record, "event", None) == "replay_served"
+    ]
+    assert sources == ["logical_call_id"]
