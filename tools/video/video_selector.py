@@ -352,7 +352,7 @@ class VideoSelector(BaseTool):
             adapted = self._adapt_inputs_for_tool(tool, preflight_inputs)
             report = tool.preflight(
                 adapted,
-                live=bool(inputs.get("live_preflight", True)),
+                live=True,
             )
             return ToolResult(
                 success=True,
@@ -385,7 +385,7 @@ class VideoSelector(BaseTool):
         adapted = self._adapt_inputs_for_tool(tool, inputs)
         preflight = tool.preflight(
             adapted,
-            live=bool(inputs.get("live_preflight", True)),
+            live=True,
         )
         if preflight["status"] == "blocked":
             return ToolResult(

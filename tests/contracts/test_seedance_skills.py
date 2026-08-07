@@ -235,7 +235,8 @@ def test_selector_passes_local_first_frame_through_seedance_contract(
             "preferred_provider": "seedance",
             "allowed_providers": ["seedance"],
             "reference_image_path": str(image_path),
-            "live_preflight": False,
+            "execution_scope": "sample",
+            "allow_degraded_preflight": True,
         }
     )
 
@@ -356,12 +357,11 @@ def test_selector_preflight_resolves_provider_without_generation(monkeypatch):
                     "role": "identity",
                 }
             ],
-            "live_preflight": False,
         }
     )
 
     assert result.success
-    assert result.data["status"] == "passed"
+    assert result.data["status"] == "degraded"
     assert result.data["selected_tool"] == "runway_video"
     assert not generated
 
