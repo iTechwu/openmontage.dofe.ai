@@ -33,8 +33,10 @@ stage).
 `DelegationSigningProxy` signs Codex's OpenAI-compatible traffic. Native
 OpenMontage tool paths supply a stable logical-call identity
 (`X-OpenMontage-Logical-Call-Id`), so the proxy keys replay strictly on it.
-Codex cannot: verified against codex-cli 0.146.0, `ModelProviderInfo` exposes
-`http_headers` but they are resolved once executor-side (static-per-process), so
+Codex cannot: verified against codex-cli 0.146.0 (and re-verified behaviorally —
+see the probe in `docs/codex_capability_probe.json`), `ModelProviderInfo` has no
+model-request header field at all. `http_headers` belongs to `RawMcpServerConfig`
+/ MCP servers and is resolved once executor-side (static-per-process), so
 any identity derived from them would collapse every call in a stage onto one id
 — strictly worse than the content fingerprint. There is no model-request-level
 per-call header or `Idempotency-Key`. The proxy therefore dedups Codex Responses

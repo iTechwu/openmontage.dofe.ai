@@ -119,11 +119,17 @@ def test_codex_version_pin_is_the_single_source() -> None:
         f"({dockerfile_version})"
     )
     # KB-001 records the revision the blocker was first verified against; that
-    # literal must move with the pin or the tracking goes stale.
+    # literal must move with the pin or the tracking goes stale. Match EVERY
+    # codex-cli <semver> literal so a partial update (one of two bumped) is caught.
     known_blockers = (PROJECT_ROOT / "docs" / "KNOWN_BLOCKERS.md").read_text()
-    assert f"codex-cli {dockerfile_version}" in known_blockers, (
-        f"KNOWN_BLOCKERS.md must reference the pinned codex-cli {dockerfile_version} "
+    kb_versions = set(re.findall(r"codex-cli\s+(\d+\.\d+\.\d+)", known_blockers))
+    assert kb_versions, (
+        "KNOWN_BLOCKERS.md must reference the codex-cli pin "
         "(KB-001 First verified revision)"
+    )
+    assert kb_versions == {dockerfile_version}, (
+        f"KNOWN_BLOCKERS.md codex-cli version(s) {kb_versions} must all match the "
+        f"Dockerfile pin ({dockerfile_version}); a partial update leaves a stale literal"
     )
     # The proxy module body must not re-literal the version outside the constant,
     # so the constant is the sole in-file source.
