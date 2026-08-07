@@ -1297,7 +1297,10 @@ class JobService:
                 "status": JobStatus.FAILED.value,
                 "error": {
                     "code": code,
-                    "message": message,
+                    # AgentSpace's signed event contract caps failure summaries at
+                    # 500 characters. Full executor diagnostics remain in the
+                    # per-assignment execution log.
+                    "message": message[:500],
                     "retryable": retryable,
                 },
             },
