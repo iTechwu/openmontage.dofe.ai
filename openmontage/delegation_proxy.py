@@ -43,6 +43,12 @@ def _request_fingerprint(method: str, path: str, body: bytes | None, content_typ
     if normalized_body and "json" in content_type.lower():
         try:
             parsed = json.loads(normalized_body)
+            if _is_responses_path(path) and isinstance(parsed, dict):
+                parsed = {
+                    key: value
+                    for key, value in parsed.items()
+                    if key not in {"client_metadata", "prompt_cache_key"}
+                }
             normalized_body = json.dumps(
                 parsed,
                 ensure_ascii=False,
@@ -58,6 +64,10 @@ def _request_fingerprint(method: str, path: str, body: bytes | None, content_typ
     digest.update(b"\n")
     digest.update(normalized_body)
     return digest.hexdigest()
+
+
+def _is_responses_path(path: str) -> bool:
+    return urlparse(path).path.rstrip("/").endswith("/responses")
 
 
 def _send_response(

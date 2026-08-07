@@ -249,6 +249,70 @@ def test_proxy_replays_persisted_success_after_restart_without_forwarding_again(
     assert store.list_recoverable(job_id="job-1") == []
 
 
+def test_proxy_reuses_responses_invocation_across_codex_process_metadata(tmp_path) -> None:
+    forwarded: list[bytes] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            forwarded.append(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+            body = b'{"id":"resp-stable","output":[]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = upstream.server_address
+        credential = DelegatedModelCredential(
+            api_key="delegated-api-key",
+            models_base_url=f"http://{host}:{port}/api",
+            delegation_id="delegation-1",
+            external_job_id="job-codex-restart",
+            pipeline_stage="idea",
+            runtime_credential_id="runtime-credential-1",
+            expires_at="2099-08-06T09:00:01Z",
+        )
+        store = ModelInvocationStore(tmp_path / "jobs.sqlite3")
+        responses: list[requests.Response] = []
+        for session_id in ("codex-session-before-crash", "codex-session-after-restart"):
+            with DelegationSigningProxy(
+                credential,
+                invocation_store=store,
+                stage_attempt=1,
+            ) as proxy:
+                responses.append(requests.post(
+                    f"{proxy.base_url}/v1/responses",
+                    json={
+                        "model": "catalog-model",
+                        "instructions": "execute the durable idea stage",
+                        "input": [{"role": "user", "content": "same assignment"}],
+                        "stream": True,
+                        "prompt_cache_key": session_id,
+                        "client_metadata": {
+                            "thread_id": session_id,
+                            "turn_id": f"{session_id}-turn",
+                            "turn_started_at_unix_ms": 1 if "before" in session_id else 2,
+                        },
+                    },
+                    timeout=5,
+                ))
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert responses[0].content == responses[1].content
+    assert len(forwarded) == 1
+
+
 def test_proxy_keeps_cached_success_when_downstream_disconnects(monkeypatch, tmp_path) -> None:
     forwarded = 0
 
