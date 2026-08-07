@@ -9,7 +9,7 @@ from time import sleep
 
 import pytest
 
-from openmontage.contracts import JobAttribution, JobCreateRequest
+from openmontage.contracts import JobAttribution, JobCreateRequest, JobStatus
 from openmontage.job_service import JobLeaseError, JobService
 
 
@@ -151,10 +151,21 @@ def test_expired_lease_is_recovered_and_old_worker_is_fenced(tmp_path: Path) -> 
     "operation",
     ["heartbeat", "release", "retry_settlement", "terminal_settlement"],
 )
-def test_lease_mutation_rechecks_default_clock_after_waiting_for_write_lock(
+def test_lease_mutation_by_owner_succeeds_after_lease_lapses_during_write_lock_wait(
     tmp_path: Path,
     operation: str,
 ) -> None:
+    """The owning worker's mutation survives a lease lapse caused by write-lock
+    contention.
+
+    Both the heartbeat and a settle take ``BEGIN IMMEDIATE``. When the settle's
+    write queues the heartbeat's renewal, the lease may lapse before the settle
+    acquires the lock. Because ownership is token-primary (expiry is only a
+    claim-eligibility signal, not an ownership revocation), the same owner's
+    mutation must still apply — otherwise the publish-once guarantee degrades
+    into retries and duplicate work. A different worker is never fenced by its
+    own lapsed lease; only a newer token (a successful reclaim) fences it.
+    """
     database_path = tmp_path / "jobs.sqlite3"
     service = WriteLockObservedJobService(database_path)
     job = service.create_job(_request(operation), _attribution())
@@ -165,6 +176,7 @@ def test_lease_mutation_rechecks_default_clock_after_waiting_for_write_lock(
     assert lease is not None
     snapshot_before = service.get_job(job.job_id)
     with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
         lease_before = connection.execute(
             """
             SELECT worker_id, lease_token, lease_expires_at, next_attempt_at,
@@ -209,14 +221,17 @@ def test_lease_mutation_rechecks_default_clock_after_waiting_for_write_lock(
         future = executor.submit(mutate_lease)
         assert service.begin_write_attempted.wait(timeout=1)
         remaining = (lease.expires_at - datetime.now(timezone.utc)).total_seconds()
+        # Let the lease lapse while the mutation waits for the write lock.
         sleep(max(remaining, 0) + 0.05)
         blocker.commit()
-        with pytest.raises(JobLeaseError, match="expired"):
-            future.result(timeout=2)
+        # The owner's mutation applies despite the lapsed lease — reaching
+        # result() without raising is itself the proof; release returns None.
+        future.result(timeout=2)
     blocker.close()
 
-    assert service.get_job(job.job_id) == snapshot_before
+    snapshot_after = service.get_job(job.job_id)
     with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
         lease_after = connection.execute(
             """
             SELECT worker_id, lease_token, lease_expires_at, next_attempt_at,
@@ -226,7 +241,25 @@ def test_lease_mutation_rechecks_default_clock_after_waiting_for_write_lock(
             """,
             (job.job_id,),
         ).fetchone()
-    assert lease_after == lease_before
+
+    if operation == "heartbeat":
+        # Job state untouched; only the expiry advanced.
+        assert snapshot_after == snapshot_before
+        assert lease_after["lease_token"] == lease_before["lease_token"]
+        assert lease_after["lease_expires_at"] != lease_before["lease_expires_at"]
+    elif operation == "release":
+        assert snapshot_after == snapshot_before
+        assert lease_after["lease_token"] is None
+        assert lease_after["next_attempt_at"] is None
+    elif operation == "retry_settlement":
+        assert snapshot_after == snapshot_before
+        assert lease_after["lease_token"] is None
+        assert lease_after["next_attempt_at"] is not None
+        assert lease_after["last_error"] == "executor failed"
+    else:  # terminal_settlement
+        assert snapshot_after.status == JobStatus.FAILED
+        assert snapshot_after.last_sequence > snapshot_before.last_sequence
+        assert lease_after["lease_token"] is None
 
 
 def test_claim_lease_starts_after_waiting_for_write_lock(tmp_path: Path) -> None:

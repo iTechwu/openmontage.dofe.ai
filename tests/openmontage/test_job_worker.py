@@ -1196,36 +1196,58 @@ def test_worker_rejects_final_video_outside_job_workspace(tmp_path: Path) -> Non
     assert bridge.upload_calls == []
 
 
-def test_worker_heartbeat_keeps_lease_alive_through_slow_settle(tmp_path: Path) -> None:
-    """A final settle slower than the lease TTL must not expire the lease."""
-    service = JobService(tmp_path / "jobs.sqlite3")
-    job = service.create_job(_request(request_id="slow-settle"), _attribution())
+def test_worker_settle_publishes_once_when_lease_lapses_under_write_lock_contention(
+    tmp_path: Path,
+) -> None:
+    """The final settle publishes the artifact exactly once even when its own
+    transaction holds the SQLite write lock long enough to lapse the lease.
+
+    Both the heartbeat renewal and the settle take ``BEGIN IMMEDIATE``. The
+    settle's transaction here outlasts the lease TTL, so the heartbeat cannot
+    renew while the settle holds the lock and the lease lapses mid-settle.
+    Token-primary admission still lets the owning worker settle, and the
+    publish-once path uploads the final video exactly once — no retry-driven
+    duplicate work.
+    """
+    database_path = tmp_path / "jobs.sqlite3"
+    lease_ttl_seconds = 0.3
+    # Hold the settle's write lock past the lease TTL. The sleep runs inside the
+    # transaction (the write lock is already acquired), blocking the heartbeat.
+    hold_seconds = lease_ttl_seconds + 0.25
+
+    class WriteLockHoldingSettleJobService(JobService):
+        @staticmethod
+        def _require_active_lease(
+            connection: sqlite3.Connection,
+            job_id: str,
+            lease_token: str,
+            now: datetime,
+        ) -> sqlite3.Row:
+            sleep(hold_seconds)
+            return JobService._require_active_lease(connection, job_id, lease_token, now)
+
+    service = WriteLockHoldingSettleJobService(database_path)
+    job = service.create_job(_request(request_id="contended-settle"), _attribution())
     projects_dir = tmp_path / "projects"
     final_video = projects_dir / job.job_id / "final.mp4"
     final_video.parent.mkdir(parents=True, exist_ok=True)
     final_video.write_bytes(b"final-video")
     _complete_all_stages(service, job.job_id, projects_dir, final_video)
 
-    original_complete = service.complete_job_or_confirm_cancel
-
-    def slow_complete(*args, **kwargs):
-        sleep(0.45)
-        return original_complete(*args, **kwargs)
-
-    service.complete_job_or_confirm_cancel = slow_complete  # type: ignore[method-assign]
-
+    bridge = FakeArtifactBridge()
     worker = JobWorker(
         service,
         FakeExecutor([]),
         projects_dir=projects_dir,
         worker_id="test-worker",
-        lease_duration=timedelta(seconds=0.3),
+        lease_duration=timedelta(seconds=lease_ttl_seconds),
         heartbeat_interval=timedelta(seconds=0.1),
         retry_delay=timedelta(0),
-        artifact_bridge=FakeArtifactBridge(),
+        artifact_bridge=bridge,
     )
 
     result = worker.run_once()
 
     assert result is not None and result.outcome == "job_completed"
     assert service.get_job(job.job_id).status == JobStatus.SUCCEEDED
+    assert len(bridge.upload_calls) == 1

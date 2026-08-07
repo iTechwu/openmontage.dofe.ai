@@ -1362,6 +1362,26 @@ class JobService:
         lease_token: str,
         now: datetime,
     ) -> sqlite3.Row:
+        """Confirm the caller still owns the Job lease (token-primary).
+
+        Ownership is proven by the lease token alone: only the worker that
+        claimed (or reclaimed) the lease holds it, and every claim mints a fresh
+        token. Lease expiry is deliberately NOT an ownership revocation here —
+        it is only a takeover-eligibility signal honored by ``claim_job``
+        (``lease_token IS NULL OR lease_expires_at <= now``). When a claim reaps
+        an expired lease it changes the token, so the previous owner's very next
+        call fails the token match below.
+
+        Treating expiry as non-blocking for the token holder is what makes a
+        settle deterministic under SQLite write-lock contention: the heartbeat
+        and the settle both take ``BEGIN IMMEDIATE``. If the heartbeat cannot
+        renew in time because its write is queued behind the settle's write, the
+        lease may lapse before the settle acquires the lock — yet the same owner
+        must still be allowed to settle, or the publish-once guarantee degrades
+        into retries and duplicate work. ``now`` is retained in the signature for
+        the consistent clock-based call contract but no longer gates the token
+        holder; only a newer token fences a worker.
+        """
         row = connection.execute(
             """
             SELECT lease_token, lease_expires_at
@@ -1372,9 +1392,6 @@ class JobService:
         ).fetchone()
         if row is None or row["lease_token"] != lease_token:
             raise JobLeaseError("Job lease token is no longer active")
-        expires_at = datetime.fromisoformat(row["lease_expires_at"])
-        if expires_at <= now:
-            raise JobLeaseError("Job lease has expired")
         return row
 
     @classmethod
