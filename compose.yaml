@@ -4,6 +4,8 @@ x-openmontage-common: &openmontage-common
   platform: ${OPENMONTAGE_PLATFORM:-linux/amd64}
   build:
     context: .
+    args:
+      OPENMONTAGE_IMAGE_REVISION: ${OPENMONTAGE_IMAGE_REVISION:-unknown}
   image: openmontage:local
   shm_size: "512mb"
   env_file:

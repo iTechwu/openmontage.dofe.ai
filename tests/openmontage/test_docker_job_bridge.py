@@ -56,9 +56,15 @@ def test_worker_image_pins_the_approved_codex_cli() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
     compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     services = yaml.safe_load(compose)["services"]
 
     assert "ARG CODEX_CLI_VERSION=0.146.0" in dockerfile
+    assert "org.opencontainers.image.revision=${OPENMONTAGE_IMAGE_REVISION}" in dockerfile
+    assert services["openmontage-worker"]["build"]["args"]["OPENMONTAGE_IMAGE_REVISION"] == (
+        "${OPENMONTAGE_IMAGE_REVISION:-unknown}"
+    )
+    assert "OPENMONTAGE_IMAGE_REVISION=\"$(IMAGE_REVISION)\" docker compose build" in makefile
     assert "@openai/codex@${CODEX_CLI_VERSION}" in dockerfile
     assert "hyperframes telemetry disable" in dockerfile
     assert "HYPERFRAMES_NO_TELEMETRY=1" in dockerfile

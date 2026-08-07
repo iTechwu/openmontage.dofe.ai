@@ -1,6 +1,7 @@
 PYTHON_VERSION ?= 3.10
 VENV_DIR ?= .venv
 BASE_PYTHON ?= $(shell command -v python$(PYTHON_VERSION) 2>/dev/null || command -v python3 2>/dev/null || command -v python 2>/dev/null)
+IMAGE_REVISION ?= $(shell git rev-parse --verify HEAD 2>/dev/null || printf unknown)
 RUN_PYTHON = $(shell for dir in "$$VIRTUAL_ENV" "$$CONDA_PREFIX" "$(VENV_DIR)"; do if [ -n "$$dir" ] && [ -x "$$dir/bin/python" ]; then printf "%s/bin/python" "$$dir"; exit 0; elif [ -n "$$dir" ] && [ -x "$$dir/Scripts/python.exe" ]; then printf "%s/Scripts/python.exe" "$$dir"; exit 0; fi; done; if [ "$(OS)" = "Windows_NT" ]; then printf "%s/Scripts/python.exe" "$(VENV_DIR)"; else printf "%s/bin/python" "$(VENV_DIR)"; fi)
 PIP = $(RUN_PYTHON) -m pip
 
@@ -136,7 +137,7 @@ clean:
 	$(BASE_PYTHON) -c "import pathlib, shutil; excluded=[pathlib.Path('$(VENV_DIR)'), pathlib.Path('venv')]; skip=lambda p: any(p == root or root in p.parents for root in excluded); roots=[p for p in pathlib.Path('.').rglob('__pycache__') if not skip(p)]; [shutil.rmtree(p) for p in roots]; files=[p for p in pathlib.Path('.').rglob('*.pyc') if not skip(p)]; [p.unlink() for p in files]"
 
 docker-build:
-	docker compose build openmontage-mcp
+	OPENMONTAGE_IMAGE_REVISION="$(IMAGE_REVISION)" docker compose build openmontage-mcp
 
 docker-up:
 	docker compose up -d openmontage-mcp
