@@ -149,22 +149,23 @@ def test_expired_lease_is_recovered_and_old_worker_is_fenced(tmp_path: Path) -> 
 
 @pytest.mark.parametrize(
     "operation",
-    ["heartbeat", "release", "retry_settlement", "terminal_settlement"],
+    ["release", "retry_settlement", "terminal_settlement"],
 )
-def test_lease_mutation_by_owner_succeeds_after_lease_lapses_during_write_lock_wait(
+def test_settlement_mutation_by_owner_succeeds_after_lease_lapses_during_write_lock_wait(
     tmp_path: Path,
     operation: str,
 ) -> None:
-    """The owning worker's mutation survives a lease lapse caused by write-lock
+    """An atomic settlement survives a lease lapse caused by write-lock
     contention.
 
-    Both the heartbeat and a settle take ``BEGIN IMMEDIATE``. When the settle's
-    write queues the heartbeat's renewal, the lease may lapse before the settle
-    acquires the lock. Because ownership is token-primary (expiry is only a
-    claim-eligibility signal, not an ownership revocation), the same owner's
-    mutation must still apply — otherwise the publish-once guarantee degrades
-    into retries and duplicate work. A different worker is never fenced by its
-    own lapsed lease; only a newer token (a successful reclaim) fences it.
+    A settle and any concurrent writer both take ``BEGIN IMMEDIATE``. When
+    another write queues the settle, the lease may lapse before the settle
+    acquires the lock. Settlement uses the fencing token (ownership is proven by
+    the token alone; expiry is only a claim-eligibility signal), so the same
+    owner's settle must still apply — otherwise the publish-once guarantee
+    degrades into retries and duplicate work. Only a newer token (a successful
+    reclaim by another worker) fences a settle; a worker is never fenced by its
+    own lapsed lease.
     """
     database_path = tmp_path / "jobs.sqlite3"
     service = WriteLockObservedJobService(database_path)
@@ -191,12 +192,7 @@ def test_lease_mutation_by_owner_succeeds_after_lease_lapses_during_write_lock_w
     blocker.execute("BEGIN IMMEDIATE")
     service.begin_write_attempted.clear()
 
-    def mutate_lease():
-        if operation == "heartbeat":
-            return service.heartbeat_lease(
-                lease,
-                lease_duration=timedelta(seconds=1),
-            )
+    def settle_lease():
         if operation == "release":
             return service.release_lease(
                 lease.job_id,
@@ -218,13 +214,13 @@ def test_lease_mutation_by_owner_succeeds_after_lease_lapses_during_write_lock_w
         )
 
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(mutate_lease)
+        future = executor.submit(settle_lease)
         assert service.begin_write_attempted.wait(timeout=1)
         remaining = (lease.expires_at - datetime.now(timezone.utc)).total_seconds()
-        # Let the lease lapse while the mutation waits for the write lock.
+        # Let the lease lapse while the settle waits for the write lock.
         sleep(max(remaining, 0) + 0.05)
         blocker.commit()
-        # The owner's mutation applies despite the lapsed lease — reaching
+        # The owner's settle applies despite the lapsed lease — reaching
         # result() without raising is itself the proof; release returns None.
         future.result(timeout=2)
     blocker.close()
@@ -242,12 +238,7 @@ def test_lease_mutation_by_owner_succeeds_after_lease_lapses_during_write_lock_w
             (job.job_id,),
         ).fetchone()
 
-    if operation == "heartbeat":
-        # Job state untouched; only the expiry advanced.
-        assert snapshot_after == snapshot_before
-        assert lease_after["lease_token"] == lease_before["lease_token"]
-        assert lease_after["lease_expires_at"] != lease_before["lease_expires_at"]
-    elif operation == "release":
+    if operation == "release":
         assert snapshot_after == snapshot_before
         assert lease_after["lease_token"] is None
         assert lease_after["next_attempt_at"] is None
@@ -260,6 +251,98 @@ def test_lease_mutation_by_owner_succeeds_after_lease_lapses_during_write_lock_w
         assert snapshot_after.status == JobStatus.FAILED
         assert snapshot_after.last_sequence > snapshot_before.last_sequence
         assert lease_after["lease_token"] is None
+
+
+@pytest.mark.parametrize("operation", ["heartbeat", "start"])
+def test_live_mutation_fails_after_lease_lapses_during_write_lock_wait(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    """Live mutations (heartbeat, start) require a genuinely live lease.
+
+    These are fenced by expiry, not only by a newer token: a worker whose lease
+    lapsed while waiting for the write lock may be reaped at any moment, so
+    letting it renew or start a stage (which begins paid execution) would reopen
+    the double-Worker window the active/fencing split closes. The owning worker
+    treats this the same as a reclaim-induced heartbeat loss and aborts the unit.
+    """
+    database_path = tmp_path / "jobs.sqlite3"
+    service = WriteLockObservedJobService(database_path)
+    service.create_job(_request(operation), _attribution())
+    lease = service.claim_job(
+        worker_id="worker-a",
+        lease_duration=timedelta(milliseconds=150),
+    )
+    assert lease is not None
+
+    blocker = sqlite3.connect(database_path)
+    blocker.execute("BEGIN IMMEDIATE")
+    service.begin_write_attempted.clear()
+
+    def mutate_live():
+        if operation == "heartbeat":
+            return service.heartbeat_lease(lease, lease_duration=timedelta(seconds=1))
+        return service.start_stage_or_confirm_cancel(
+            lease.job_id,
+            "research",
+            lease_token=lease.lease_token,
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(mutate_live)
+        assert service.begin_write_attempted.wait(timeout=1)
+        remaining = (lease.expires_at - datetime.now(timezone.utc)).total_seconds()
+        sleep(max(remaining, 0) + 0.05)
+        blocker.commit()
+        with pytest.raises(JobLeaseError, match="expired"):
+            future.result(timeout=2)
+    blocker.close()
+
+
+def test_expired_unreclaimed_lease_rejects_live_mutation_but_allows_settlement(
+    tmp_path: Path,
+) -> None:
+    """An expired lease that has NOT been reaped: live mutations are rejected
+    (active lease required), but atomic settlement still succeeds (the fencing
+    token only checks that no newer claim took over). This is the precise
+    active/fencing contract that closes the double-Worker execution window.
+    """
+    service = JobService(tmp_path / "jobs.sqlite3")
+    service.create_job(_request("contract"), _attribution())
+    lease = service.claim_job(
+        worker_id="worker-a",
+        lease_duration=timedelta(seconds=30),
+        now=NOW,
+    )
+    assert lease is not None
+    # Lease (NOW + 30s) has lapsed; no other worker has reclaimed it.
+    expired_now = NOW + timedelta(seconds=31)
+
+    with pytest.raises(JobLeaseError, match="expired"):
+        service.heartbeat_lease(
+            lease,
+            lease_duration=timedelta(seconds=30),
+            now=expired_now,
+        )
+    with pytest.raises(JobLeaseError, match="expired"):
+        service.start_stage_or_confirm_cancel(
+            lease.job_id,
+            "research",
+            lease_token=lease.lease_token,
+            now=expired_now,
+        )
+    # No mutation was applied — only the JOB_CREATED event remains.
+    assert service.get_job(lease.job_id).last_sequence == 1
+
+    # Atomic settlement still succeeds: the fencing token is current (no newer
+    # claim), so the lapsed owner may release the lease for recovery.
+    settled = service.release_lease_or_confirm_cancel(
+        lease.job_id,
+        lease_token=lease.lease_token,
+        reset_attempts=True,
+        now=expired_now,
+    )
+    assert settled.status != JobStatus.CANCELLED
 
 
 def test_claim_lease_starts_after_waiting_for_write_lock(tmp_path: Path) -> None:

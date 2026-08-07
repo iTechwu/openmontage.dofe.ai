@@ -64,6 +64,19 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _parse_lease_expiry(raw: str | None) -> datetime | None:
+    """Parse a stored lease expiry, tolerating naive (legacy) timestamps."""
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def _canonical_json(value: dict[str, Any]) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
@@ -420,7 +433,7 @@ class JobService:
             effective_retry_at = (
                 effective_now + retry_delay if retry_delay is not None else retry_at
             )
-            self._require_active_lease(
+            self._require_current_fencing_token(
                 connection,
                 job_id,
                 lease_token,
@@ -459,7 +472,7 @@ class JobService:
             effective_retry_at = (
                 effective_now + retry_delay if retry_delay is not None else retry_at
             )
-            self._require_active_lease(connection, job_id, lease_token, effective_now)
+            self._require_current_fencing_token(connection, job_id, lease_token, effective_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             cancelled = snapshot.status == JobStatus.CANCEL_REQUESTED
             if cancelled:
@@ -507,7 +520,7 @@ class JobService:
     ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
-            self._require_lease_if_present(connection, job_id, lease_token, lease_now)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=True)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             return self._publish_artifact_snapshot(connection, snapshot, artifact)
 
@@ -749,7 +762,7 @@ class JobService:
     ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
-            self._require_lease_if_present(connection, job_id, lease_token, lease_now)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=True)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             return self._complete_stage_snapshot(connection, snapshot, stage_code)
 
@@ -764,7 +777,7 @@ class JobService:
         with self._connect() as connection:
             self._begin_write(connection)
             effective_now = now if now is not None else _now()
-            self._require_active_lease(connection, job_id, lease_token, effective_now)
+            self._require_current_fencing_token(connection, job_id, lease_token, effective_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             if snapshot.status == JobStatus.CANCEL_REQUESTED:
                 snapshot = self._confirm_cancel_snapshot(connection, snapshot)
@@ -832,7 +845,7 @@ class JobService:
     ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
-            self._require_lease_if_present(connection, job_id, lease_token, lease_now)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=True)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             return self._request_stage_approval_snapshot(
                 connection,
@@ -853,7 +866,7 @@ class JobService:
         with self._connect() as connection:
             self._begin_write(connection)
             effective_now = now if now is not None else _now()
-            self._require_active_lease(connection, job_id, lease_token, effective_now)
+            self._require_current_fencing_token(connection, job_id, lease_token, effective_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             if snapshot.status == JobStatus.CANCEL_REQUESTED:
                 snapshot = self._confirm_cancel_snapshot(connection, snapshot)
@@ -957,7 +970,7 @@ class JobService:
 
         with self._connect() as connection:
             self._begin_write(connection)
-            self._require_lease_if_present(connection, job_id, lease_token, lease_now)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=True)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             return self._fail_job_snapshot(
                 connection,
@@ -981,7 +994,7 @@ class JobService:
         with self._connect() as connection:
             self._begin_write(connection)
             effective_now = now if now is not None else _now()
-            self._require_active_lease(connection, job_id, lease_token, effective_now)
+            self._require_current_fencing_token(connection, job_id, lease_token, effective_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             if snapshot.status == JobStatus.CANCEL_REQUESTED:
                 snapshot = self._confirm_cancel_snapshot(connection, snapshot)
@@ -1051,7 +1064,7 @@ class JobService:
     ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
-            self._require_lease_if_present(connection, job_id, lease_token, lease_now)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=True)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             return self._confirm_cancel_snapshot(connection, snapshot)
 
@@ -1064,7 +1077,7 @@ class JobService:
     ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
-            self._require_lease_if_present(connection, job_id, lease_token, lease_now)
+            self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=True)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             return self._complete_job_snapshot(connection, snapshot)
 
@@ -1079,7 +1092,7 @@ class JobService:
         with self._connect() as connection:
             self._begin_write(connection)
             effective_now = now if now is not None else _now()
-            self._require_active_lease(connection, job_id, lease_token, effective_now)
+            self._require_current_fencing_token(connection, job_id, lease_token, effective_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             if snapshot.status == JobStatus.CANCEL_REQUESTED:
                 snapshot = self._confirm_cancel_snapshot(connection, snapshot)
@@ -1356,33 +1369,11 @@ class JobService:
         return JobSnapshot.model_validate_json(row["snapshot_json"])
 
     @staticmethod
-    def _require_active_lease(
+    def _fetch_lease_row(
         connection: sqlite3.Connection,
         job_id: str,
-        lease_token: str,
-        now: datetime,
-    ) -> sqlite3.Row:
-        """Confirm the caller still owns the Job lease (token-primary).
-
-        Ownership is proven by the lease token alone: only the worker that
-        claimed (or reclaimed) the lease holds it, and every claim mints a fresh
-        token. Lease expiry is deliberately NOT an ownership revocation here —
-        it is only a takeover-eligibility signal honored by ``claim_job``
-        (``lease_token IS NULL OR lease_expires_at <= now``). When a claim reaps
-        an expired lease it changes the token, so the previous owner's very next
-        call fails the token match below.
-
-        Treating expiry as non-blocking for the token holder is what makes a
-        settle deterministic under SQLite write-lock contention: the heartbeat
-        and the settle both take ``BEGIN IMMEDIATE``. If the heartbeat cannot
-        renew in time because its write is queued behind the settle's write, the
-        lease may lapse before the settle acquires the lock — yet the same owner
-        must still be allowed to settle, or the publish-once guarantee degrades
-        into retries and duplicate work. ``now`` is retained in the signature for
-        the consistent clock-based call contract but no longer gates the token
-        holder; only a newer token fences a worker.
-        """
-        row = connection.execute(
+    ) -> sqlite3.Row | None:
+        return connection.execute(
             """
             SELECT lease_token, lease_expires_at
             FROM openmontage_job_execution
@@ -1390,8 +1381,56 @@ class JobService:
             """,
             (job_id,),
         ).fetchone()
+
+    @classmethod
+    def _require_active_lease(
+        cls,
+        connection: sqlite3.Connection,
+        job_id: str,
+        lease_token: str,
+        now: datetime,
+    ) -> sqlite3.Row:
+        """Require a genuinely live lease: token match AND not yet expired.
+
+        Used by live, in-flight mutations — heartbeat, start, progress — where a
+        worker whose lease has lapsed must NOT keep driving the Job. A lapsed
+        owner has lost its liveness guarantee: another Worker may reap the lease
+        at any moment, so letting it start a stage (which begins paid execution)
+        would open a double-Worker window. The lapsed owner's own next claim is
+        the recovery path.
+        """
+        row = cls._fetch_lease_row(connection, job_id)
         if row is None or row["lease_token"] != lease_token:
             raise JobLeaseError("Job lease token is no longer active")
+        expires_at = _parse_lease_expiry(row["lease_expires_at"])
+        if expires_at is not None and expires_at <= now:
+            raise JobLeaseError("Job lease has expired")
+        return row
+
+    @classmethod
+    def _require_current_fencing_token(
+        cls,
+        connection: sqlite3.Connection,
+        job_id: str,
+        lease_token: str,
+        now: datetime,  # retained for the clock-based call contract; not a gate here
+    ) -> sqlite3.Row:
+        """Require only that the token has not been superseded by a newer claim.
+
+        Used by atomic settlement (complete, fail, cancel, release, publish) so
+        the publish-once guarantee survives SQLite write-lock contention: the
+        heartbeat and the settle both take ``BEGIN IMMEDIATE``. If the heartbeat
+        cannot renew in time because its write is queued behind the settle's
+        write, the lease may lapse before the settle acquires the lock — yet the
+        same owner must still be allowed to settle, or the publish-once guarantee
+        degrades into retries and duplicate work. Every claim mints a fresh
+        token, so when a reaper takes over an expired lease the previous owner's
+        next settle fails the token match below. Expiry alone never fences a
+        settle; only a newer token does.
+        """
+        row = cls._fetch_lease_row(connection, job_id)
+        if row is None or row["lease_token"] != lease_token:
+            raise JobLeaseError("Job lease token is no longer current")
         return row
 
     @classmethod
@@ -1401,10 +1440,13 @@ class JobService:
         job_id: str,
         lease_token: str | None,
         lease_now: datetime | None,
+        *,
+        fencing: bool = False,
     ) -> None:
         if lease_token is None:
             return
-        cls._require_active_lease(connection, job_id, lease_token, lease_now or _now())
+        checker = cls._require_current_fencing_token if fencing else cls._require_active_lease
+        checker(connection, job_id, lease_token, lease_now or _now())
 
     @staticmethod
     def _require_expected_sequence(
