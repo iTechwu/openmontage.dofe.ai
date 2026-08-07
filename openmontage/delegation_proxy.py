@@ -33,6 +33,13 @@ _HOP_HEADERS = {
 }
 _MAX_REQUEST_BYTES = 32 * 1024 * 1024
 _MAX_CACHED_RESPONSE_BYTES = 8 * 1024 * 1024
+# OpenAI Responses SSE streams are only complete once they emit a terminal
+# marker — the response.completed event or the [DONE] sentinel. A stream that
+# ends (upstream closes) without one is TRUNCATED and must not be cached as a
+# success (see KB-001 / _forward). Scanned as a rolling window so a marker split
+# across read1 boundaries is still detected.
+_SSE_TERMINAL_MARKERS = (b"response.completed", b"[DONE]")
+_SSE_MARKER_SCAN_WINDOW = 64
 _LOGGER = logging.getLogger("openmontage.delegation_proxy")
 # The Codex CLI revision the KB-001 analysis below was verified against. This is
 # the single code-side source of that version: it is kept in sync with
@@ -66,13 +73,31 @@ PINNED_CODEX_CLI_VERSION = "0.146.0"
 #     the sibling has already committed to the shared seed before _locally_served
 #     is marked at serve completion.
 #
+# _locally_served is marked ONLY on a committed success — a cached successful
+# response (or a replay of one). A FAILED forward (upstream error, exception,
+# or a TRUNCATED SSE stream — one that closed without its response.completed /
+# [DONE] terminal marker) marks nothing, so an in-instance retry of that same
+# logical call reuses the same content-keyed seed and the same invocation id
+# (no double-billing, no split attribution). A truncated stream is also marked
+# failed (not cached), so a restart recovers by re-forwarding instead of
+# replaying a broken response forever.
+#
 # Callers that CAN supply a stable identity (native tool paths) set
 # X-OpenMontage-Logical-Call-Id, which is used strictly and never falls back.
 #
-# Residual edge: two CONCURRENT same-content arrivals AFTER the instance already
-# served that content both forward (each gets a distinct seed). This is the
-# conservative choice — prefer a possible double-bill over any wrong-merge —
-# and is far rarer than the sequential distinct calls the guard now handles.
+# Residual edge (concurrent): two CONCURRENT same-content arrivals AFTER the
+# instance already served that content both forward (each gets a distinct seed).
+# This is the conservative choice — prefer a possible double-bill over any
+# wrong-merge — and is far rarer than the sequential distinct calls the guard
+# now handles.
+#
+# Residual edge (restart): within one instance, the 2nd..Nth distinct same-
+# content call gets a random ::distinct:: uuid seed that cannot be re-derived
+# after a restart. So crash-restart recovery replays the 1st such call from the
+# ledger but RE-FORWARDS the 2nd..Nth (a re-bill for those), since no caller
+# re-supplies that random seed. Both residuals are inherent to having no native
+# per-call identity; a native Codex per-call identity removes the guard (and
+# both residuals) entirely.
 # A native Codex per-call identity (per-call header interpolation or a stable
 # per-call Idempotency-Key) would remove the need for the _locally_served
 # heuristic entirely; the capability probe tracks when that arrives. Verified
@@ -343,11 +368,15 @@ class DelegationSigningProxy:
                 allow_redirects=False,
                 timeout=(10, 3600),
             )
-            # Upstream received this request, so the content has now been
-            # served by this instance: a later same-content arrival here is a
-            # distinct call. (content_keyed is False for logical/distinct seeds,
-            # so only the durable content-keyed path records the fingerprint.)
-            served_content = content_keyed
+            # served_content is set ONLY when a content-keyed forward reaches a
+            # committed success below (a cached success, or a replay of one) —
+            # see KB-001. A FAILED forward (upstream error or a truncated SSE
+            # stream) must NOT mark the content served, so an in-instance retry
+            # reuses the same content-keyed seed (same invocation id) instead of
+            # minting a distinct one — which would split one logical call across
+            # two ids (double-billing + broken attribution). content_keyed is
+            # False for logical/distinct seeds, so only the content-keyed path
+            # can record the fingerprint.
             response_headers = {
                 key: value
                 for key, value in upstream.headers.items()
@@ -365,10 +394,20 @@ class DelegationSigningProxy:
                 response_body = bytearray()
                 can_buffer = True
                 downstream_open = True
+                seen_completed = False
+                scan_tail = b""
                 while True:
                     chunk = upstream.raw.read1(64 * 1024, decode_content=False)
                     if not chunk:
                         break
+                    if not seen_completed:
+                        scan_window = scan_tail + chunk
+                        if any(
+                            marker in scan_window
+                            for marker in _SSE_TERMINAL_MARKERS
+                        ):
+                            seen_completed = True
+                        scan_tail = scan_window[-_SSE_MARKER_SCAN_WINDOW:]
                     if can_buffer:
                         if len(response_body) + len(chunk) <= _MAX_CACHED_RESPONSE_BYTES:
                             response_body.extend(chunk)
@@ -382,18 +421,27 @@ class DelegationSigningProxy:
                         except OSError:
                             downstream_open = False
                 if self.invocation_store is not None:
+                    # Only a stream that reached its terminal marker is a
+                    # success. A stream that ended without one is truncated —
+                    # cache nothing and mark failed so a restart retries instead
+                    # of replaying a broken response forever.
+                    stream_succeeded = seen_completed and upstream.status_code < 400
                     if can_buffer:
-                        self.invocation_store.save_response(
-                            invocation_id,
-                            status_code=upstream.status_code,
-                            headers=response_headers,
-                            body=bytes(response_body),
-                        )
-                        response_cached = True
+                        if stream_succeeded:
+                            self.invocation_store.save_response(
+                                invocation_id,
+                                status_code=upstream.status_code,
+                                headers=response_headers,
+                                body=bytes(response_body),
+                            )
+                            response_cached = True
+                            served_content = content_keyed
+                        else:
+                            self.invocation_store.mark(invocation_id, "failed")
                     else:
                         self.invocation_store.mark(
                             invocation_id,
-                            "succeeded" if upstream.status_code < 400 else "failed",
+                            "succeeded" if stream_succeeded else "failed",
                         )
                 return
             content_length = upstream.headers.get("Content-Length", "")
@@ -417,6 +465,11 @@ class DelegationSigningProxy:
                         body=response_body,
                     )
                     response_cached = True
+                    # Only a successful (cacheable) response commits the content
+                    # for this instance — a failed response leaves the content
+                    # unmarked so a retry reuses the same invocation id.
+                    if upstream.status_code < 400:
+                        served_content = content_keyed
                 _send_response(handler, upstream.status_code, response_headers, response_body)
             else:
                 handler.send_response(upstream.status_code)

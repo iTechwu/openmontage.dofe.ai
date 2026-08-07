@@ -547,7 +547,7 @@ def test_proxy_replays_persisted_event_stream_after_restart(tmp_path) -> None:
             nonlocal forwarded
             forwarded += 1
             self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            body = b"data: done\n\n"
+            body = b"data: done\n\ndata: [DONE]\n\n"
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Content-Length", str(len(body)))
@@ -580,7 +580,7 @@ def test_proxy_replays_persisted_event_stream_after_restart(tmp_path) -> None:
                     json={"model": "gpt-test", "stream": True},
                     timeout=5,
                 )
-                assert response.content == b"data: done\n\n"
+                assert response.content == b"data: done\n\ndata: [DONE]\n\n"
     finally:
         upstream.shutdown()
         upstream.server_close()
@@ -604,7 +604,7 @@ def test_proxy_forwards_event_stream_before_upstream_completes(tmp_path) -> None
             self.wfile.flush()
             upstream_started.set()
             assert finish_upstream.wait(timeout=5)
-            self.wfile.write(b"data: done\n\n")
+            self.wfile.write(b"data: done\n\ndata: [DONE]\n\n")
             self.wfile.flush()
 
         def log_message(self, _format: str, *_args: object) -> None:
@@ -654,7 +654,7 @@ def test_proxy_forwards_event_stream_before_upstream_completes(tmp_path) -> None
         upstream.server_close()
         thread.join(timeout=2)
 
-    assert body == b"data: first\n\ndata: done\n\n"
+    assert body == b"data: first\n\ndata: done\n\ndata: [DONE]\n\n"
 
 
 def test_proxy_does_not_repeat_uncacheable_successful_event_stream(
@@ -662,7 +662,7 @@ def test_proxy_does_not_repeat_uncacheable_successful_event_stream(
     tmp_path,
 ) -> None:
     forwarded = 0
-    body = b"data: oversized\n\n"
+    body = b"data: oversized\n\ndata: [DONE]\n\n"
     monkeypatch.setattr(delegation_proxy, "_MAX_CACHED_RESPONSE_BYTES", 8)
 
     class Handler(BaseHTTPRequestHandler):
@@ -1107,3 +1107,153 @@ def test_proxy_logs_replay_keyed_on_logical_call_id(tmp_path, caplog) -> None:
         if getattr(record, "event", None) == "replay_served"
     ]
     assert sources == ["logical_call_id"]
+
+
+def test_proxy_does_not_cache_truncated_event_stream_and_recovers_on_restart(
+    tmp_path,
+) -> None:
+    """A truncated SSE stream — upstream closes after response.created without
+    the response.completed/[DONE] terminal marker — is NOT cached as success.
+
+    Caching it would replay a broken response forever and make the call
+    unrecoverable. The invocation is marked failed instead, so a restart
+    forwards the call again rather than replaying the truncated body."""
+    forwarded = 0
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            nonlocal forwarded
+            forwarded += 1
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(
+                b'event: response.created\n'
+                b'data: {"type":"response.created","response":'
+                b'{"id":"resp-trunc","status":"in_progress"}}\n\n'
+            )
+            self.wfile.flush()
+            if forwarded == 1:
+                # Truncated: close mid-stream, no terminal marker.
+                return
+            self.wfile.write(
+                b'event: response.completed\n'
+                b'data: {"type":"response.completed","response":'
+                b'{"id":"resp-trunc","status":"completed"}}\n\n'
+                b'data: [DONE]\n\n'
+            )
+            self.wfile.flush()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = upstream.server_address
+        credential = DelegatedModelCredential(
+            api_key="delegated-api-key",
+            models_base_url=f"http://{host}:{port}/api",
+            delegation_id="delegation-1",
+            external_job_id="job-truncated-stream",
+            pipeline_stage="script",
+            runtime_credential_id="runtime-credential-1",
+            expires_at="2099-08-06T09:00:01Z",
+        )
+        store = ModelInvocationStore(tmp_path / "jobs.sqlite3")
+        responses: list[requests.Response] = []
+        for _ in range(2):
+            with DelegationSigningProxy(credential, invocation_store=store) as proxy:
+                responses.append(
+                    requests.post(
+                        f"{proxy.base_url}/v1/responses",
+                        headers={"X-Request-Id": "truncated-stream-request"},
+                        json={"model": "gpt-test", "stream": True},
+                        timeout=5,
+                    )
+                )
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+    assert [response.status_code for response in responses] == [200, 200]
+    # The truncated first stream was not cached as success, so the restart
+    # forwarded again (recovered) instead of replaying the broken body.
+    assert forwarded == 2
+    assert b"response.completed" not in responses[0].content
+    assert b"response.completed" in responses[1].content
+
+
+def test_proxy_retries_failed_forward_with_same_invocation_id_within_one_instance(
+    tmp_path,
+) -> None:
+    """A failed forward within ONE live instance must NOT mark the content
+    served, so an in-instance retry reuses the same content-keyed seed — the
+    same invocation id — instead of minting a distinct one.
+
+    Previously any upstream response (even a 504) marked _locally_served, so the
+    retry picked a fresh ::distinct:: seed and the 504 and the 200 landed on two
+    different invocation ids: double-billing and broken attribution for what is
+    one logical call."""
+    forwarded = 0
+    invocation_ids: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            nonlocal forwarded
+            forwarded += 1
+            invocation_ids.append(self.headers.get("X-Dofe-Model-Invocation-Id", ""))
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            failed = forwarded == 1
+            body = (
+                b'{"error":{"code":"MODEL_TIMEOUT","message":"provider timed out"}}'
+                if failed
+                else b'{"ok":true}'
+            )
+            self.send_response(504 if failed else 200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = upstream.server_address
+        credential = DelegatedModelCredential(
+            api_key="delegated-api-key",
+            models_base_url=f"http://{host}:{port}/api",
+            delegation_id="delegation-1",
+            external_job_id="job-in-instance-retry",
+            pipeline_stage="script",
+            runtime_credential_id="runtime-credential-1",
+            expires_at="2099-08-06T09:00:01Z",
+        )
+        store = ModelInvocationStore(tmp_path / "jobs.sqlite3")
+        with DelegationSigningProxy(credential, invocation_store=store) as proxy:
+            first = requests.post(
+                f"{proxy.base_url}/v1/responses",
+                json={"model": "gpt-test", "input": "hello"},
+                timeout=5,
+            )
+            second = requests.post(
+                f"{proxy.base_url}/v1/responses",
+                json={"model": "gpt-test", "input": "hello"},
+                timeout=5,
+            )
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+    assert [first.status_code, second.status_code] == [504, 200]
+    assert forwarded == 2
+    # Same logical call retried within one instance → one invocation id (no split).
+    assert len(set(invocation_ids)) == 1
