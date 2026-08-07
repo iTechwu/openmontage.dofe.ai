@@ -285,13 +285,16 @@ class AgentCommandPipelineExecutor:
                     )
                     # Lock a catalog-verified model into the delegated Codex
                     # executor before any paid task is created (dev-guide
-                    # §model-catalog). Non-Codex executors keep their own model
-                    # selection; the loopback proxy already pins the provider.
-                    delegated_model = (
-                        self._agent_model_resolver(credential)
-                        if _is_codex_exec_command(command)
-                        else None
-                    )
+                    # §model-catalog). Other executors do not implement the
+                    # delegated model-lock protocol, so they are fail-closed
+                    # rather than allowed to choose their own model.
+                    if not _is_codex_exec_command(command):
+                        raise PipelineExecutionError(
+                            "Delegated model execution is only supported for Codex; "
+                            f"the configured executor {command[0]!r} does not implement "
+                            "the tenant-catalog model-lock protocol"
+                        )
+                    delegated_model = self._agent_model_resolver(credential)
                     completed = self._run(
                         _configure_agent_command_for_delegation(
                             command,

@@ -113,6 +113,31 @@ def _delegated_credential(job, *, api_key: str) -> DelegatedModelCredential:
     )
 
 
+def _codex_command(tmp_path: Path, *real_command: str) -> list[str]:
+    """Return a Codex-shaped argv that actually execs ``real_command``.
+
+    Tests can exercise the delegated Codex model-lock path without requiring
+    the real Codex binary to be installed. The fake ``codex`` executable
+    strips any ``-c key=value`` provider config injected by
+    ``_configure_agent_command_for_delegation`` and the ``exec`` subcommand,
+    then forwards to the underlying command.
+    """
+    codex = tmp_path / "codex"
+    codex.write_text(
+        '#!/usr/bin/env python3\n'
+        'import os, sys\n'
+        'args = sys.argv[1:]\n'
+        '# Consume Codex -c provider_config pairs injected by the executor.\n'
+        'while len(args) >= 2 and args[0] == "-c":\n'
+        '    args = args[2:]\n'
+        'if args and args[0] == "exec":\n'
+        '    args = args[1:]\n'
+        'os.execvp(args[0], args)\n'
+    )
+    codex.chmod(0o755)
+    return [str(codex), "exec"] + list(real_command)
+
+
 def _exception_chain_diagnostics(error: BaseException) -> str:
     pending = [error]
     seen: set[int] = set()
@@ -213,7 +238,8 @@ def test_executor_injects_delegation_only_into_the_stage_process(
     environment_capture = tmp_path / "environment.json"
     project_argument_capture = tmp_path / "project-argument.txt"
     executor = AgentCommandPipelineExecutor(
-        [
+        _codex_command(
+            tmp_path,
             sys.executable,
             "-c",
             WRITE_CHECKPOINT_SCRIPT,
@@ -221,8 +247,9 @@ def test_executor_injects_delegation_only_into_the_stage_process(
             str(environment_capture),
             str(project_argument_capture),
             "{project_dir}",
-        ],
+        ),
         timeout_seconds=5,
+        agent_model_resolver=lambda _cred: "catalog-agent-model",
     )
     assignment = StageAssignment.from_job(
         job,
@@ -394,10 +421,11 @@ def test_delegated_codex_fails_closed_before_launch_when_model_unresolved(
     assert run_calls == []  # the Agent process never launched
 
 
-def test_non_codex_delegated_executor_does_not_resolve_an_agent_model(
+def test_non_codex_delegated_executor_is_fail_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Non-Codex executors cannot start a delegated paid stage without a model lock."""
     job, projects_dir, _ = _job(tmp_path)
     credential = _delegated_credential(job, api_key="delegated-key")
     resolver_calls: list[DelegatedModelCredential] = []
@@ -408,14 +436,14 @@ def test_non_codex_delegated_executor_does_not_resolve_an_agent_model(
         or "must-not-be-used",
     )
 
-    result = executor.execute(
-        StageAssignment.from_job(
-            job, stage="research", stage_attempt=1, projects_dir=projects_dir
-        ),
-        credential=credential,
-    )
+    with pytest.raises(PipelineExecutionError, match="tenant-catalog model-lock"):
+        executor.execute(
+            StageAssignment.from_job(
+                job, stage="research", stage_attempt=1, projects_dir=projects_dir
+            ),
+            credential=credential,
+        )
 
-    assert result.status == "in_progress"
     assert resolver_calls == []  # model resolution is Codex-only
 
 
@@ -546,8 +574,9 @@ sys.stderr.write("https://models.test/v1/responses?token=query-token-secret&requ
 sys.exit(7)
 """
     executor = AgentCommandPipelineExecutor(
-        [sys.executable, "-c", diagnostic_script],
+        _codex_command(tmp_path, sys.executable, "-c", diagnostic_script),
         timeout_seconds=5,
+        agent_model_resolver=lambda _cred: "catalog-agent-model",
     )
 
     with pytest.raises(PipelineExecutionError) as error_info:
@@ -612,8 +641,9 @@ sys.stderr.write(json.dumps({sys.argv[1]: sys.argv[2]}) + "\n")
 sys.exit(7)
 """
     executor = AgentCommandPipelineExecutor(
-        [sys.executable, "-c", diagnostic_script, api_key, secondary_secret],
+        _codex_command(tmp_path, sys.executable, "-c", diagnostic_script, api_key, secondary_secret),
         timeout_seconds=5,
+        agent_model_resolver=lambda _cred: "catalog-agent-model",
     )
 
     with pytest.raises(PipelineExecutionError) as error_info:
@@ -650,8 +680,9 @@ def test_executor_redacts_process_start_error_from_the_full_exception_chain(
     credential = _delegated_credential(job, api_key="os-error-runtime-secret")
     query_secret = "os-error-query-secret"
     executor = AgentCommandPipelineExecutor(
-        [f"/definitely-missing/{credential.api_key}?token={query_secret}"],
+        _codex_command(tmp_path, f"/definitely-missing/{credential.api_key}?token={query_secret}"),
         timeout_seconds=5,
+        agent_model_resolver=lambda _cred: "catalog-agent-model",
     )
 
     with pytest.raises(PipelineExecutionError) as error_info:
@@ -687,13 +718,15 @@ def test_executor_persists_timeout_diagnostics(tmp_path: Path) -> None:
     credential = _delegated_credential(job, api_key="timeout-runtime-secret")
     oauth_query_secret = "timeout-oauth-query-secret"
     executor = AgentCommandPipelineExecutor(
-        [
+        _codex_command(
+            tmp_path,
             sys.executable,
             "-c",
             "import os,sys,time; sys.stderr.write('partial timeout context\\n' + os.environ['DOFE_MODEL_API_KEY']); sys.stderr.flush(); time.sleep(2)",
             f"https://models.test/v1/responses?access_token={oauth_query_secret}&request_id=timeout-1",
-        ],
+        ),
         timeout_seconds=0.5,
+        agent_model_resolver=lambda _cred: "catalog-agent-model",
     )
 
     with pytest.raises(PipelineExecutionError, match="timed out") as error_info:
@@ -737,8 +770,9 @@ def test_executor_preserves_timeout_output_types_while_redacting(
     job, projects_dir, _ = _job(tmp_path)
     credential = _delegated_credential(job, api_key="bytes-runtime-secret")
     executor = AgentCommandPipelineExecutor(
-        [sys.executable, "-c", "pass"],
+        _codex_command(tmp_path, sys.executable, "-c", "pass"),
         timeout_seconds=5,
+        agent_model_resolver=lambda _cred: "catalog-agent-model",
     )
 
     def raise_timeout(*_args, **_kwargs):
@@ -815,13 +849,15 @@ def test_executor_terminates_process_when_job_cancellation_is_requested(tmp_path
     oauth_query_secret = "cancel-oauth-query-secret"
     started = time.monotonic()
     executor = AgentCommandPipelineExecutor(
-        [
+        _codex_command(
+            tmp_path,
             sys.executable,
             "-c",
             "import os,sys,time; sys.stderr.write('cancel context\\n' + os.environ['DOFE_MODEL_API_KEY']); sys.stderr.flush(); time.sleep(30)",
             f"https://models.test/v1/responses?access_token={oauth_query_secret}&request_id=cancel-1",
-        ],
+        ),
         timeout_seconds=30,
+        agent_model_resolver=lambda _cred: "catalog-agent-model",
     )
 
     with pytest.raises(PipelineExecutionCancelled) as error_info:
@@ -859,8 +895,15 @@ def test_executor_redacts_delegated_credential_from_success_log(tmp_path: Path) 
         + WRITE_CHECKPOINT_SCRIPT
     )
     executor = AgentCommandPipelineExecutor(
-        [sys.executable, "-c", script, str(tmp_path / "success-prompt.txt")],
+        _codex_command(
+            tmp_path,
+            sys.executable,
+            "-c",
+            script,
+            str(tmp_path / "success-prompt.txt"),
+        ),
         timeout_seconds=5,
+        agent_model_resolver=lambda _cred: "catalog-agent-model",
     )
 
     result = executor.execute(
