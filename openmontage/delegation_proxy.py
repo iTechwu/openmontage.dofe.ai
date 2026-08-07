@@ -31,10 +31,15 @@ _HOP_HEADERS = {
 }
 _MAX_REQUEST_BYTES = 32 * 1024 * 1024
 _MAX_CACHED_RESPONSE_BYTES = 8 * 1024 * 1024
+# Only the OpenMontage-controlled logical-call header is trusted to group
+# invocations. Codex's X-Request-Id and Idempotency-Key are regenerated per
+# ephemeral session, so honoring them would give every crash-restart a fresh
+# invocation id and defeat replay recovery. When this header is absent the
+# stable content fingerprint (below) is the seed, so a same-content crash
+# replay recovers the same invocation while genuinely different content gets a
+# new one.
 _LOGICAL_CALL_HEADERS = (
     "X-OpenMontage-Logical-Call-Id",
-    "Idempotency-Key",
-    "X-Request-Id",
 )
 
 
@@ -44,10 +49,17 @@ def _request_fingerprint(method: str, path: str, body: bytes | None, content_typ
         try:
             parsed = json.loads(normalized_body)
             if _is_responses_path(path) and isinstance(parsed, dict):
+                # prompt_cache_key and client_metadata are volatile: Codex
+                # regenerates them per ephemeral session (cache key, thread/turn
+                # ids, turn timestamps). Including them would make the content
+                # fingerprint change across a crash-restart, so a same-content
+                # replay would mint a new invocation instead of recovering the
+                # cached response. Stripping them keeps the fingerprint a pure
+                # function of the durable request content.
                 parsed = {
                     key: value
                     for key, value in parsed.items()
-                    if key not in {"prompt_cache_key"}
+                    if key not in {"prompt_cache_key", "client_metadata"}
                 }
             normalized_body = json.dumps(
                 parsed,

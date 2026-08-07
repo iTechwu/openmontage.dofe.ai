@@ -313,7 +313,17 @@ def test_proxy_reuses_responses_invocation_across_codex_process_metadata(tmp_pat
     assert len(forwarded) == 1
 
 
-def test_proxy_does_not_merge_responses_with_different_client_metadata(tmp_path) -> None:
+def test_proxy_merges_same_content_responses_despite_volatile_client_metadata(tmp_path) -> None:
+    """A crash-restart with identical request content recovers one invocation
+    even when Codex regenerates its volatile client_metadata.
+
+    ``prompt_cache_key`` and ``client_metadata`` are stripped from the content
+    fingerprint because Codex regenerates them per ephemeral session. Two calls
+    carrying the same durable content but different session metadata must map to
+    the same invocation so the persisted response is replayed instead of
+    re-billed. Genuinely different content still gets a distinct invocation
+    (asserted by the second pair below).
+    """
     forwarded: list[bytes] = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -344,14 +354,15 @@ def test_proxy_does_not_merge_responses_with_different_client_metadata(tmp_path)
             expires_at="2099-08-06T09:00:01Z",
         )
         store = ModelInvocationStore(tmp_path / "jobs.sqlite3")
-        responses: list[requests.Response] = []
+        # Same durable content, different volatile client_metadata → one forward.
+        same_content_responses: list[requests.Response] = []
         for session_id in ("codex-session-a", "codex-session-b"):
             with DelegationSigningProxy(
                 credential,
                 invocation_store=store,
                 stage_attempt=1,
             ) as proxy:
-                responses.append(requests.post(
+                same_content_responses.append(requests.post(
                     f"{proxy.base_url}/v1/responses",
                     json={
                         "model": "catalog-model",
@@ -367,12 +378,33 @@ def test_proxy_does_not_merge_responses_with_different_client_metadata(tmp_path)
                     },
                     timeout=5,
                 ))
+        # Different durable content (no logical-call header) → a new invocation.
+        with DelegationSigningProxy(
+            credential,
+            invocation_store=store,
+            stage_attempt=1,
+        ) as proxy:
+            different_content = requests.post(
+                f"{proxy.base_url}/v1/responses",
+                json={
+                    "model": "catalog-model",
+                    "instructions": "execute the durable idea stage",
+                    "input": [{"role": "user", "content": "a different assignment"}],
+                    "stream": True,
+                    "prompt_cache_key": "shared-cache-key",
+                    "client_metadata": {"thread_id": "codex-session-a"},
+                },
+                timeout=5,
+            )
     finally:
         upstream.shutdown()
         upstream.server_close()
         thread.join(timeout=2)
 
-    assert [response.status_code for response in responses] == [200, 200]
+    assert [r.status_code for r in same_content_responses] == [200, 200]
+    assert same_content_responses[0].content == same_content_responses[1].content
+    assert different_content.status_code == 200
+    # One forward for the recovered same-content call, one for the new content.
     assert len(forwarded) == 2
 
 
