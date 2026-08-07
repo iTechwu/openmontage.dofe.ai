@@ -199,6 +199,23 @@ class SeedanceVideo(BaseTool):
         return 60.0 if variant == "fast" else 120.0
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
+        # DoFe fail-closed routing policy: when DOFE_ENABLED=true the selector
+        # forces every video generation through the unified Airouter
+        # (select_dofe_if_enabled). A direct Seedance call bypasses that route
+        # and the authenticated model catalog, so it is rejected before any key
+        # lookup or paid submit — mirroring the selector's fail-closed contract.
+        from tools.dofe.config import is_dofe_enabled
+
+        if is_dofe_enabled():
+            return ToolResult(
+                success=False,
+                error=(
+                    "DOFE_ENABLED=true: direct Seedance calls are disabled; "
+                    "video generation must route through the DoFe Airouter "
+                    "(video_selector)."
+                ),
+            )
+
         api_key = self._get_api_key()
         if not api_key:
             return ToolResult(
@@ -219,6 +236,23 @@ class SeedanceVideo(BaseTool):
                 data={"provider": "seedance", "provider_preflight": preflight},
                 error="Provider preflight blocked Seedance generation: "
                 + "; ".join(error["message"] for error in preflight["errors"]),
+            )
+        # A degraded preflight (no live probe) may proceed for a sample, but a
+        # batch run requires explicit approval — the same gate the selector
+        # enforces (video_selector._execute_impl). Without it a direct batch
+        # call would reach a paid fal.ai POST on an unverified contract.
+        if (
+            preflight["status"] == "degraded"
+            and preflight.get("execution_scope", "sample") == "batch"
+            and not preflight.get("degraded_preflight_approved", False)
+        ):
+            return ToolResult(
+                success=False,
+                data={"provider": "seedance", "provider_preflight": preflight},
+                error=(
+                    "Provider live contract is unverified; batch generation "
+                    "requires allow_degraded_preflight=true after explicit approval."
+                ),
             )
 
         import requests
