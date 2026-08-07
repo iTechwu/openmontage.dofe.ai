@@ -20,7 +20,10 @@ from lib.pipeline_loader import get_stage_skill, load_pipeline_readonly
 from openmontage.contracts import JobSnapshot
 from openmontage.delegation_proxy import DelegationSigningProxy
 from openmontage.invocation_store import ModelInvocationStore
+from tools.dofe.client import DofeClient
 from tools.dofe.delegation import DelegatedModelCredential
+from tools.dofe.errors import DofeError
+from tools.dofe.models import validate_catalog_alias
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -177,18 +180,23 @@ class AgentCommandPipelineExecutor:
         *,
         timeout_seconds: float = 3600,
         invocation_store: ModelInvocationStore | None = None,
+        agent_model_resolver: Callable[[DelegatedModelCredential], str] | None = None,
     ) -> None:
         self.command = _validate_command(command)
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise PipelineExecutionError("timeout_seconds must be greater than zero")
         self.timeout_seconds = timeout_seconds
         self.invocation_store = invocation_store
+        self._agent_model_resolver = (
+            agent_model_resolver or _resolve_delegated_agent_model
+        )
 
     @classmethod
     def from_environment(
         cls,
         *,
         invocation_store: ModelInvocationStore | None = None,
+        agent_model_resolver: Callable[[DelegatedModelCredential], str] | None = None,
     ) -> "AgentCommandPipelineExecutor":
         raw = os.environ.get("OPENMONTAGE_AGENT_EXECUTOR_JSON", "")
         try:
@@ -208,7 +216,12 @@ class AgentCommandPipelineExecutor:
             raise PipelineExecutionError(
                 "OPENMONTAGE_AGENT_TIMEOUT_SECONDS must be a positive number"
             ) from exc
-        return cls(command, timeout_seconds=timeout_seconds, invocation_store=invocation_store)
+        return cls(
+            command,
+            timeout_seconds=timeout_seconds,
+            invocation_store=invocation_store,
+            agent_model_resolver=agent_model_resolver,
+        )
 
     def execute(
         self,
@@ -270,10 +283,20 @@ class AgentCommandPipelineExecutor:
                             dofe_base_url=proxy.base_url,
                         )
                     )
+                    # Lock a catalog-verified model into the delegated Codex
+                    # executor before any paid task is created (dev-guide
+                    # §model-catalog). Non-Codex executors keep their own model
+                    # selection; the loopback proxy already pins the provider.
+                    delegated_model = (
+                        self._agent_model_resolver(credential)
+                        if _is_codex_exec_command(command)
+                        else None
+                    )
                     completed = self._run(
                         _configure_agent_command_for_delegation(
                             command,
                             openai_base_url,
+                            model=delegated_model,
                         ),
                         prompt,
                         environment=environment,
@@ -478,16 +501,54 @@ def _validate_command(command: Sequence[str]) -> tuple[str, ...]:
     return tuple(command)
 
 
+def _is_codex_exec_command(command: Sequence[str]) -> bool:
+    """True when the Agent argv is a Codex ``exec`` invocation."""
+
+    if not command or Path(command[0]).name != "codex":
+        return False
+    try:
+        command.index("exec", 1)
+    except ValueError:
+        return False
+    return True
+
+
+def _resolve_delegated_agent_model(credential: DelegatedModelCredential) -> str:
+    """Return a tenant-catalog-verified model id for the delegated Codex executor.
+
+    The candidate is read from ``OPENMONTAGE_AGENT_MODEL_ID`` and must be visible
+    in a live ``GET /v1/models`` for the delegated credential. Fail closed — no
+    paid task is created while the model is unset, unreachable, or invisible.
+    """
+
+    candidate = os.environ.get("OPENMONTAGE_AGENT_MODEL_ID", "").strip()
+    if not candidate:
+        raise PipelineExecutionError(
+            "OPENMONTAGE_AGENT_MODEL_ID is not set; the delegated Agent executor "
+            "requires a tenant-catalog-verified model before any paid task"
+        )
+    try:
+        catalog = DofeClient(
+            api_key=credential.api_key,
+            base_url=credential.models_base_url,
+        ).list_models()
+        return validate_catalog_alias(candidate, catalog)
+    except DofeError as exc:
+        raise PipelineExecutionError(
+            f"Delegated Agent model {candidate!r} is not visible to the tenant "
+            f"model catalog: {exc}"
+        ) from exc
+
+
 def _configure_agent_command_for_delegation(
     command: tuple[str, ...],
     openai_base_url: str,
+    *,
+    model: str | None = None,
 ) -> tuple[str, ...]:
-    if Path(command[0]).name != "codex":
+    if not _is_codex_exec_command(command):
         return command
-    try:
-        exec_index = command.index("exec", 1)
-    except ValueError:
-        return command
+    exec_index = command.index("exec", 1)
 
     provider = "dofe-delegated"
     provider_config = (
@@ -504,6 +565,10 @@ def _configure_agent_command_for_delegation(
         "-c",
         f"model_providers.{provider}.requires_openai_auth=true",
     )
+    # The catalog-verified model pins exactly which Responses model Codex calls,
+    # so execution never silently falls back to the host's default model.
+    if model:
+        provider_config = provider_config + ("-c", f"model={json.dumps(model)}")
     return command[:exec_index] + provider_config + command[exec_index:]
 
 

@@ -304,6 +304,113 @@ def test_delegated_non_codex_executor_command_is_unchanged() -> None:
     ) == command
 
 
+def test_delegated_codex_command_injects_catalog_verified_model() -> None:
+    command = _configure_agent_command_for_delegation(
+        ("codex", "exec", "-"),
+        "http://127.0.0.1:43127/api/v1",
+        model="catalog-agent-model",
+    )
+
+    assert command[:1] == ("codex",)
+    assert command[-2:] == ("exec", "-")
+    assert 'model_provider="dofe-delegated"' in command
+    assert 'model="catalog-agent-model"' in command
+
+
+def test_delegated_codex_locks_catalog_verified_model_into_the_stage_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job, projects_dir, _ = _job(tmp_path)
+    credential = _delegated_credential(job, api_key="delegated-key")
+    captured: dict[str, object] = {}
+
+    def fake_run(self, command, prompt, *, environment, cancellation_requested):
+        captured["command"] = command
+        raise PipelineExecutionError("stop after codex config")
+
+    monkeypatch.setattr(AgentCommandPipelineExecutor, "_run", fake_run)
+
+    resolver_calls: list[DelegatedModelCredential] = []
+    executor = AgentCommandPipelineExecutor(
+        [str(tmp_path / "codex"), "exec", "-"],
+        timeout_seconds=5,
+        agent_model_resolver=lambda cred: resolver_calls.append(cred)
+        or "catalog-agent-model",
+    )
+
+    with pytest.raises(PipelineExecutionError, match="stop after codex config"):
+        executor.execute(
+            StageAssignment.from_job(
+                job, stage="research", stage_attempt=1, projects_dir=projects_dir
+            ),
+            credential=credential,
+        )
+
+    assert resolver_calls == [credential]
+    command = captured["command"]
+    assert 'model_provider="dofe-delegated"' in command
+    assert 'model="catalog-agent-model"' in command
+
+
+def test_delegated_codex_fails_closed_before_launch_when_model_unresolved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job, projects_dir, _ = _job(tmp_path)
+    credential = _delegated_credential(job, api_key="delegated-key")
+    run_calls: list[int] = []
+    monkeypatch.setattr(
+        AgentCommandPipelineExecutor,
+        "_run",
+        lambda *a, **k: run_calls.append(1),
+    )
+
+    def fail_resolver(_cred: DelegatedModelCredential) -> str:
+        raise PipelineExecutionError("OPENMONTAGE_AGENT_MODEL_ID is not set")
+
+    executor = AgentCommandPipelineExecutor(
+        [str(tmp_path / "codex"), "exec", "-"],
+        timeout_seconds=5,
+        agent_model_resolver=fail_resolver,
+    )
+
+    with pytest.raises(PipelineExecutionError, match="AGENT_MODEL_ID"):
+        executor.execute(
+            StageAssignment.from_job(
+                job, stage="research", stage_attempt=1, projects_dir=projects_dir
+            ),
+            credential=credential,
+        )
+
+    assert run_calls == []  # the Agent process never launched
+
+
+def test_non_codex_delegated_executor_does_not_resolve_an_agent_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job, projects_dir, _ = _job(tmp_path)
+    credential = _delegated_credential(job, api_key="delegated-key")
+    resolver_calls: list[DelegatedModelCredential] = []
+    executor = AgentCommandPipelineExecutor(
+        [sys.executable, "-c", WRITE_CHECKPOINT_SCRIPT, str(tmp_path / "prompt.txt")],
+        timeout_seconds=5,
+        agent_model_resolver=lambda cred: resolver_calls.append(cred)
+        or "must-not-be-used",
+    )
+
+    result = executor.execute(
+        StageAssignment.from_job(
+            job, stage="research", stage_attempt=1, projects_dir=projects_dir
+        ),
+        credential=credential,
+    )
+
+    assert result.status == "in_progress"
+    assert resolver_calls == []  # model resolution is Codex-only
+
+
 def test_executor_reports_nonzero_exit_without_accepting_a_checkpoint(tmp_path: Path) -> None:
     job, projects_dir, _ = _job(tmp_path)
     diagnostic_script = r"""
