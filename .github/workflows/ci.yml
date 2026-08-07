@@ -44,3 +44,52 @@ jobs:
 
       - name: Run test suite
         run: make test
+
+  codex-capability-probe:
+    name: Codex capability probe (strict)
+    runs-on: ubuntu-latest
+    # Dedicated job that installs the PINNED Codex and opts into the strict gate
+    # (OPENMONTAGE_CODEX_PROBE_STRICT=1). Without Codex the behavioral probe
+    # would silently SKIP (generic validate() runs no Codex), letting a changed
+    # request surface or a stale pin pass green. Here the probe FAILS on: a
+    # missing/discoverable binary, an installed-vs-pinned version mismatch, or a
+    # request header/body field-name set that differs from the audited baseline
+    # (docs/codex_capability_probe.json). The manifest-invariant tests
+    # (version sync, external tracker, fingerprint fallback) also run here.
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read pinned Codex version
+        id: pin
+        run: |
+          set -euo pipefail
+          version=$(grep -E '^ARG CODEX_CLI_VERSION=' Dockerfile | head -n1 | cut -d= -f2)
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install pinned @openai/codex
+        run: npm install -g @openai/codex@${{ steps.pin.outputs.version }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install Python dependencies
+        run: make install-dev
+
+      - name: Run strict capability probe
+        env:
+          OPENMONTAGE_CODEX_PROBE_STRICT: "1"
+          # Dummy credential for the mock upstream; codex is pointed at loopback.
+          PROBE_KEY: "dummy"
+        run: python -m pytest tests/openmontage/test_codex_capability_probe.py -q
