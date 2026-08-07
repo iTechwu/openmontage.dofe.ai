@@ -99,9 +99,16 @@ export OPENMONTAGE_AGENT_TIMEOUT_SECONDS=3600
 # The Worker verifies it against the live catalog and fails closed if unset or
 # invisible, so Codex can never silently fall back to the host default model.
 export OPENMONTAGE_AGENT_MODEL_ID="<exact-id-from-catalog>"
-# Discover it with an authenticated request to the effective DoFe base URL:
-#   host:    curl -H "Authorization: Bearer $DOFE_MODEL_API_KEY" https://model.local.dofe.ai/api/v1/models
-#   Compose: curl -H "Authorization: Bearer $DOFE_MODEL_API_KEY" ${DOFE_DOCKER_MODEL_BASE_URL:-http://api:3101}/v1/models
+# Discover it with an authenticated request to the model catalog. The key lives
+# in .env (loaded into each service via the env_file directive); export it in a
+# host shell before any host-side curl:
+#   set -a; . ./.env; set +a
+#   # Host-reachable endpoint (needs the model.local.dofe.ai CA + name resolution):
+#   curl -H "Authorization: Bearer $DOFE_MODEL_API_KEY" "${DOFE_MODEL_BASE_URL:-https://model.local.dofe.ai/api}/v1/models"
+#   # Container-internal only: api:3101 is Compose DNS on the shared dofe-models
+#   # network, so it is NOT reachable from the host. Run it inside a service
+#   # (the key is already in the container env, no .env sourcing needed):
+#   docker compose exec openmontage-mcp curl -H "Authorization: Bearer $DOFE_MODEL_API_KEY" "${DOFE_DOCKER_MODEL_BASE_URL:-http://api:3101}/v1/models"
 openmontage worker run --once --json
 openmontage worker run --interval 2 --json
 ```
