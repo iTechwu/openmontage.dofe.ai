@@ -95,9 +95,13 @@ rejected:
 export OPENMONTAGE_AGENT_EXECUTOR_JSON='["codex","exec","--skip-git-repo-check","--ephemeral","--ignore-user-config","-s","workspace-write","-C","/absolute/path/to/OpenMontage","--add-dir","{project_dir}","-"]'
 export OPENMONTAGE_AGENT_TIMEOUT_SECONDS=3600
 # Required: an exact model id visible in the delegated tenant GET /v1/models.
+# The model catalog is the ONLY source of model ids — never hardcode one here.
 # The Worker verifies it against the live catalog and fails closed if unset or
 # invisible, so Codex can never silently fall back to the host default model.
-export OPENMONTAGE_AGENT_MODEL_ID=gpt-oss:latest
+export OPENMONTAGE_AGENT_MODEL_ID="<exact-id-from-catalog>"
+# Discover it with an authenticated request to the effective DoFe base URL:
+#   host:    curl -H "Authorization: Bearer $DOFE_MODEL_API_KEY" https://model.local.dofe.ai/api/v1/models
+#   Compose: curl -H "Authorization: Bearer $DOFE_MODEL_API_KEY" ${DOFE_DOCKER_MODEL_BASE_URL:-http://api:3101}/v1/models
 openmontage worker run --once --json
 openmontage worker run --interval 2 --json
 ```
