@@ -206,6 +206,21 @@ class SeedanceVideo(BaseTool):
                 error="FAL_KEY not set. " + self.install_instructions,
             )
 
+        # Enforce the same preflight gate as the selector and the DoFe paid
+        # boundary so a direct Seedance call cannot reach a paid fal.ai POST with
+        # inputs that fail schema or reference-binding validation, or while the
+        # tool is unavailable. Seedance honestly reports no side-effect-free live
+        # probe (preflight degrades rather than blocks), which is allowed to
+        # proceed; a blocked preflight fail-closes before any paid submit.
+        preflight = self.preflight(inputs, live=True)
+        if preflight["status"] == "blocked":
+            return ToolResult(
+                success=False,
+                data={"provider": "seedance", "provider_preflight": preflight},
+                error="Provider preflight blocked Seedance generation: "
+                + "; ".join(error["message"] for error in preflight["errors"]),
+            )
+
         import requests
 
         start = time.time()
@@ -336,6 +351,7 @@ class SeedanceVideo(BaseTool):
                 "output": str(output_path),
                 "output_path": str(output_path),
                 "format": "mp4",
+                "provider_preflight": preflight,
                 **probed,
             },
             artifacts=[str(output_path)],
