@@ -39,6 +39,9 @@ start the Streamable HTTP MCP server:
 ```bash
 openssl rand -hex 32  # OPENMONTAGE_SERVICE_TOKEN
 openssl rand -hex 32  # OPENMONTAGE_EVENT_SIGNING_SECRET
+# Tag the built image with the current commit so the OCI revision label carries
+# real provenance instead of "unknown". `make docker-build` does this for you.
+export OPENMONTAGE_IMAGE_REVISION="$(git rev-parse --verify HEAD 2>/dev/null || printf unknown)"
 docker compose up --build -d openmontage-mcp
 curl http://localhost:8765/healthz
 ```
@@ -53,6 +56,10 @@ When AgentSpace is available, start the signed event publisher as well:
 ```bash
 docker compose --profile agentspace up --build -d openmontage-mcp openmontage-events
 ```
+
+`OPENMONTAGE_IMAGE_REVISION` (exported above) flows through the Compose build
+arg into the image's `org.opencontainers.image.revision` label, so every
+standard launch records the commit it was built from.
 
 `OPENMONTAGE_SERVICE_TOKEN` authenticates AgentSpace requests to OpenMontage.
 `OPENMONTAGE_EVENT_SIGNING_SECRET` signs the exact event body sent to
@@ -75,14 +82,22 @@ recoverable across restarts. Media bytes never belong in MCP JSON.
 
 The Job control plane does not execute creative stages inside Python. A
 dedicated Worker claims a fenced SQLite lease, writes a stage assignment, and
-invokes an external AI Agent process. The Agent reads the repository pipeline
-manifest and director skills, uses the normal OpenMontage tools, and records its
-result as a validated checkpoint. Configure the process as a JSON argv array;
-shell strings are intentionally rejected:
+invokes a Codex `exec` process. Delegated model execution is **Codex-only**:
+Codex is the only executor that implements the tenant-catalog model-lock
+protocol, so any non-Codex `OPENMONTAGE_AGENT_EXECUTOR_JSON` fails closed before
+a paid task is created rather than being allowed to choose its own model. The
+Agent reads the repository pipeline manifest and director skills, uses the
+normal OpenMontage tools, and records its result as a validated checkpoint.
+Configure the process as a JSON argv array; shell strings are intentionally
+rejected:
 
 ```bash
 export OPENMONTAGE_AGENT_EXECUTOR_JSON='["codex","exec","--skip-git-repo-check","--ephemeral","--ignore-user-config","-s","workspace-write","-C","/absolute/path/to/OpenMontage","--add-dir","{project_dir}","-"]'
 export OPENMONTAGE_AGENT_TIMEOUT_SECONDS=3600
+# Required: an exact model id visible in the delegated tenant GET /v1/models.
+# The Worker verifies it against the live catalog and fails closed if unset or
+# invisible, so Codex can never silently fall back to the host default model.
+export OPENMONTAGE_AGENT_MODEL_ID=gpt-oss:latest
 openmontage worker run --once --json
 openmontage worker run --interval 2 --json
 ```
@@ -120,9 +135,12 @@ docker compose --profile agentspace up --build -d \
 ```
 
 `openmontage-worker` fails closed when the Agent executor, Artifact Bridge, or
-AgentSpace model credential bridge configuration is absent. This is deliberate:
-the service does not fall back to a Python creative orchestrator, a shared
-provider key, or a Runtime's parent credential.
+AgentSpace model credential bridge configuration is absent, or when
+`OPENMONTAGE_AGENT_MODEL_ID` is unset or not visible in the delegated tenant
+`GET /v1/models`. Compose passes `OPENMONTAGE_AGENT_MODEL_ID` through from
+`.env`; set it to an exact catalog id before starting the worker. This is
+deliberate: the service does not fall back to a Python creative orchestrator, a
+shared provider key, a Runtime's parent credential, or an unverified model.
 
 ### Recovery and publication semantics
 
