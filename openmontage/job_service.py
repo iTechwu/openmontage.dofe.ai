@@ -103,17 +103,43 @@ def _to_utc(value: datetime, field: str) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _normalize_now(now: datetime | None) -> datetime:
+def _normalize_now(now: datetime | None, *, field: str = "now") -> datetime:
     """Resolve the optional clock argument to an aware-UTC datetime (see
     ``_to_utc``). ``None`` resolves to the current UTC instant.
 
-    Applied at the lease gate (``_require_active_lease``,
-    ``_require_current_fencing_token``) and at ``claim_job`` / ``release_lease``,
-    which compare ``now`` before or outside those helpers.
+    Applied everywhere a caller-supplied clock is persisted or compared: the
+    lease gate (``_require_active_lease``, ``_require_current_fencing_token``),
+    ``claim_job`` / ``release_lease`` / settlement, ``heartbeat_lease``, and the
+    outbox delivery paths. ``field`` labels the value in the rejection error so
+    a naive-clock bug points at the offending entry point.
     """
     if now is None:
         return _now()
-    return _to_utc(now, "now/lease_now")
+    return _to_utc(now, field)
+
+
+def _resolve_release_retry(
+    *,
+    now: datetime | None,
+    retry_at: datetime | None,
+    retry_delay: timedelta | None,
+) -> tuple[datetime, datetime | None]:
+    """Validate and normalize the release retry arguments shared by
+    ``release_lease`` and ``release_lease_or_confirm_cancel``.
+
+    Returns ``(call_now, retry_at)`` with ``call_now`` aware-UTC and ``retry_at``
+    aware-UTC or ``None``. Raises ``JobLeaseError`` on mutual exclusion, a
+    negative delay, a naive clock, or a ``retry_at`` earlier than ``now``.
+    """
+    if retry_at is not None and retry_delay is not None:
+        raise JobLeaseError("retry_at and retry_delay are mutually exclusive")
+    if retry_delay is not None and retry_delay < timedelta(0):
+        raise JobLeaseError("retry_delay must not be negative")
+    call_now = _normalize_now(now)
+    retry_at = _to_utc(retry_at, "retry_at") if retry_at is not None else None
+    if retry_at is not None and retry_at < call_now:
+        raise JobLeaseError("retry_at must not be earlier than now")
+    return call_now, retry_at
 
 
 def _canonical_json(value: dict[str, Any]) -> str:
@@ -437,7 +463,7 @@ class JobService:
             raise JobLeaseError("lease_duration must be greater than zero")
         with self._connect() as connection:
             self._begin_write(connection)
-            effective_now = now if now is not None else _now()
+            effective_now = _normalize_now(now)
             expires_at = effective_now + lease_duration
             self._require_active_lease(
                 connection,
@@ -474,14 +500,9 @@ class JobService:
         reset_attempts: bool = False,
         now: datetime | None = None,
     ) -> None:
-        if retry_at is not None and retry_delay is not None:
-            raise JobLeaseError("retry_at and retry_delay are mutually exclusive")
-        if retry_delay is not None and retry_delay < timedelta(0):
-            raise JobLeaseError("retry_delay must not be negative")
-        call_now = _normalize_now(now)
-        retry_at = _to_utc(retry_at, "retry_at") if retry_at is not None else None
-        if retry_at is not None and retry_at < call_now:
-            raise JobLeaseError("retry_at must not be earlier than now")
+        _, retry_at = _resolve_release_retry(
+            now=now, retry_at=retry_at, retry_delay=retry_delay
+        )
         with self._connect() as connection:
             self._begin_write(connection)
             effective_now = _normalize_now(now)
@@ -514,14 +535,9 @@ class JobService:
         reset_attempts: bool = False,
         now: datetime | None = None,
     ) -> JobSnapshot:
-        if retry_at is not None and retry_delay is not None:
-            raise JobLeaseError("retry_at and retry_delay are mutually exclusive")
-        if retry_delay is not None and retry_delay < timedelta(0):
-            raise JobLeaseError("retry_delay must not be negative")
-        call_now = _normalize_now(now)
-        retry_at = _to_utc(retry_at, "retry_at") if retry_at is not None else None
-        if retry_at is not None and retry_at < call_now:
-            raise JobLeaseError("retry_at must not be earlier than now")
+        _, retry_at = _resolve_release_retry(
+            now=now, retry_at=retry_at, retry_delay=retry_delay
+        )
         with self._connect() as connection:
             self._begin_write(connection)
             effective_now = _normalize_now(now)
@@ -586,7 +602,7 @@ class JobService:
         now: datetime | None = None,
         limit: int = 100,
     ) -> list[OutboxRecord]:
-        effective_now = now or _now()
+        effective_now = _normalize_now(now, field="now/outbox")
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -624,7 +640,7 @@ class JobService:
             raise ValueError("limit must be greater than zero")
         with self._connect() as connection:
             self._begin_write(connection)
-            effective_now = now if now is not None else _now()
+            effective_now = _normalize_now(now)
             expires_at = effective_now + timedelta(seconds=lease_seconds)
             rows = connection.execute(
                 """
@@ -692,7 +708,7 @@ class JobService:
         lease_token: str,
         delivered_at: datetime | None = None,
     ) -> None:
-        timestamp = delivered_at or _now()
+        timestamp = _normalize_now(delivered_at, field="delivered_at")
         with self._connect() as connection:
             self._begin_write(connection)
             cursor = connection.execute(
@@ -720,6 +736,7 @@ class JobService:
         error: str,
         next_attempt_at: datetime,
     ) -> None:
+        next_attempt_at = _to_utc(next_attempt_at, "next_attempt_at/outbox")
         with self._connect() as connection:
             self._begin_write(connection)
             cursor = connection.execute(
@@ -792,7 +809,7 @@ class JobService:
     ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
-            effective_now = now if now is not None else _now()
+            effective_now = _normalize_now(now)
             self._require_active_lease(connection, job_id, lease_token, effective_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             if snapshot.status == JobStatus.CANCEL_REQUESTED:
@@ -832,7 +849,7 @@ class JobService:
     ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
-            effective_now = now if now is not None else _now()
+            effective_now = _normalize_now(now)
             self._require_current_fencing_token(connection, job_id, lease_token, effective_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             if snapshot.status == JobStatus.CANCEL_REQUESTED:
@@ -921,7 +938,7 @@ class JobService:
     ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
-            effective_now = now if now is not None else _now()
+            effective_now = _normalize_now(now)
             self._require_current_fencing_token(connection, job_id, lease_token, effective_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             if snapshot.status == JobStatus.CANCEL_REQUESTED:
@@ -1049,7 +1066,7 @@ class JobService:
         self._validate_job_failure(code, message)
         with self._connect() as connection:
             self._begin_write(connection)
-            effective_now = now if now is not None else _now()
+            effective_now = _normalize_now(now)
             self._require_current_fencing_token(connection, job_id, lease_token, effective_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             if snapshot.status == JobStatus.CANCEL_REQUESTED:
@@ -1147,7 +1164,7 @@ class JobService:
     ) -> JobSnapshot:
         with self._connect() as connection:
             self._begin_write(connection)
-            effective_now = now if now is not None else _now()
+            effective_now = _normalize_now(now)
             self._require_current_fencing_token(connection, job_id, lease_token, effective_now)
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             if snapshot.status == JobStatus.CANCEL_REQUESTED:

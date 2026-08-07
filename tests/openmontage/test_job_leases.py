@@ -901,3 +901,59 @@ def test_naive_retry_at_is_rejected(tmp_path: Path) -> None:
             error="temporary failure",
             now=NOW,
         )
+
+
+def test_heartbeat_converts_offset_now_to_utc_before_persisting(tmp_path: Path) -> None:
+    """heartbeat_lease must convert an offset ``now`` to UTC before persisting
+    ``lease_expires_at``, else the raw offset ISO (e.g. 2026-08-05T17:32:00+05:30)
+    is stored and later lexical comparisons against UTC strings misorder it."""
+    service = JobService(tmp_path / "jobs.sqlite3")
+    service.create_job(_request("heartbeat-offset"), _attribution())
+    lease = service.claim_job(
+        worker_id="worker-a", lease_duration=timedelta(minutes=5), now=NOW
+    )
+    assert lease is not None
+    offset_now = datetime(2026, 8, 5, 17, 31, 0, tzinfo=_OFFSET_TZ)  # == 12:01:00Z
+    renewed = service.heartbeat_lease(
+        lease, lease_duration=timedelta(seconds=60), now=offset_now
+    )
+    with sqlite3.connect(service.database_path) as connection:
+        stored = connection.execute(
+            "SELECT lease_expires_at FROM openmontage_job_execution WHERE job_id = ?",
+            (lease.job_id,),
+        ).fetchone()[0]
+    persisted = datetime.fromisoformat(stored)
+    assert persisted.utcoffset() == timedelta(0), "persisted expiry must be UTC, not a raw offset"
+    assert persisted == datetime(2026, 8, 5, 12, 2, 0, tzinfo=timezone.utc)
+    assert renewed.expires_at.utcoffset() == timedelta(0)
+
+
+def test_settlement_converts_offset_now_to_utc_before_persisting(tmp_path: Path) -> None:
+    """Atomic settlement (fail-job-or-confirm-cancel) persists the clock as
+    ``updated_at`` via _release_lease_record; an offset ``now`` must be converted
+    to UTC first, else the raw offset ISO is stored. The same normalization runs
+    in every *_or_confirm_cancel path (they share the effective_now resolution),
+    so this is a witness for the whole settlement family."""
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request("settlement-offset"), _attribution())
+    lease = service.claim_job(
+        worker_id="worker-a", lease_duration=timedelta(minutes=5), now=NOW
+    )
+    assert lease is not None
+    offset_now = datetime(2026, 8, 5, 17, 30, 15, tzinfo=_OFFSET_TZ)  # == 12:00:15Z
+    service.fail_job_or_confirm_cancel(
+        job.job_id,
+        code="OPENMONTAGE_AGENT_EXECUTOR_FAILED",
+        message="executor failed",
+        retryable=False,
+        lease_token=lease.lease_token,
+        now=offset_now,
+    )
+    with sqlite3.connect(service.database_path) as connection:
+        stored = connection.execute(
+            "SELECT updated_at FROM openmontage_job_execution WHERE job_id = ?",
+            (job.job_id,),
+        ).fetchone()[0]
+    persisted = datetime.fromisoformat(stored)
+    assert persisted.utcoffset() == timedelta(0), "persisted settlement time must be UTC"
+    assert persisted == datetime(2026, 8, 5, 12, 0, 15, tzinfo=timezone.utc)

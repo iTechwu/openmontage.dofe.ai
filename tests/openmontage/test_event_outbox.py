@@ -513,3 +513,39 @@ def test_publisher_from_environment_requires_a_complete_bridge_configuration(
     publisher = OutboxPublisher.from_environment(service)
 
     assert publisher.endpoint == "https://agentspace.internal/events"
+
+
+_OFFSET_TZ = timezone(timedelta(hours=5, minutes=30))  # +05:30 == the IST-style case
+
+
+def test_offset_now_compared_by_instant_in_outbox_retry_window(tmp_path: Path) -> None:
+    """Outbox clock queries must normalize an offset ``now`` to UTC before the
+    lexical SQL comparison ``next_attempt_at <= ?``, otherwise 17:31:59+05:30
+    (== 12:01:59Z) is ordered after a 12:02Z retry and the event is claimed
+    ~5.5 hours early — the same miscompare the job-lease retry window had."""
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(), _attribution())
+    event_id = service.list_events(job.job_id)[0].event_id
+
+    claimed = service.claim_pending_outbox(
+        lease_token="owner", now=NOW, lease_seconds=30, limit=5
+    )
+    assert claimed
+    retry_at = NOW + timedelta(minutes=2)  # 12:02Z, persisted as UTC ISO
+    service.mark_event_failed(
+        event_id, lease_token="owner", error="transient", next_attempt_at=retry_at
+    )
+
+    before = retry_at.astimezone(_OFFSET_TZ) - timedelta(seconds=1)  # 17:31:59+05:30
+    at_due = retry_at.astimezone(_OFFSET_TZ)  # 17:32:00+05:30
+
+    assert service.list_pending_outbox(now=before, limit=5) == []
+    assert (
+        service.claim_pending_outbox(
+            lease_token="owner-b", now=before, lease_seconds=30, limit=5
+        )
+        == []
+    )
+
+    due = service.list_pending_outbox(now=at_due, limit=5)
+    assert [record.event.event_id for record in due] == [event_id]
