@@ -54,6 +54,78 @@ class FinalArtifactError(RuntimeError):
     """Raised when a completed pipeline has no safe final MP4."""
 
 
+class _LeaseHeartbeat:
+    """Renews the Job lease across the full owned section of a Worker unit.
+
+    The heartbeat thread is active only under the real clock (``now is None``).
+    Under the deterministic test clock the context is a no-op so frozen-time
+    tests are not perturbed by a background thread. ``release()`` marks an
+    intentional settle (the lease is about to be released by a settle call) and
+    stops the thread so the heartbeat cannot fail spuriously after the settle.
+    ``__exit__`` raises ``JobLeaseError`` only when the lease was lost during the
+    section and no intentional release preceded it.
+    """
+
+    def __init__(self, worker: JobWorker, lease: JobLease, *, now: datetime | None) -> None:
+        self._worker = worker
+        self._now = now
+        self._stop = Event()
+        self._lost = Event()
+        self._releasing = False
+        self._state: dict[str, Any] = {"lease": lease}
+        self._thread: Thread | None = None
+
+    @property
+    def lease(self) -> JobLease:
+        current = self._state["lease"]
+        assert isinstance(current, JobLease)
+        return current
+
+    def cancellation_requested(self, job_id: str) -> bool:
+        return self._lost.is_set() or self._worker._is_cancel_requested(job_id)
+
+    def __enter__(self) -> _LeaseHeartbeat:
+        if self._now is None:
+            self._thread = Thread(
+                target=self._run,
+                name=f"openmontage-heartbeat-{self.lease.job_id}",
+                daemon=True,
+            )
+            self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> bool:
+        self._stop.set()
+        self._join()
+        if self._lost.is_set() and not self._releasing:
+            raise JobLeaseError("Job lease heartbeat failed")
+        return False
+
+    def release(self) -> None:
+        """Stop renewing because the section is settling the lease intentionally."""
+
+        self._releasing = True
+        self._stop.set()
+        self._join()
+
+    def _run(self) -> None:
+        interval = self._worker.heartbeat_interval.total_seconds()
+        while not self._stop.wait(interval):
+            try:
+                self._state["lease"] = self._worker.service.heartbeat_lease(
+                    self.lease,
+                    lease_duration=self._worker.lease_duration,
+                )
+            except BaseException:
+                self._lost.set()
+                self._stop.set()
+
+    def _join(self) -> None:
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=self._worker.heartbeat_interval.total_seconds() + 1)
+
+
 class JobWorker:
     def __init__(
         self,
@@ -106,100 +178,115 @@ class JobWorker:
             )
             return JobWorkerResult(snapshot.job_id, snapshot.current_stage, "job_cancelled")
 
-        try:
-            self._ensure_project(snapshot)
-        except OSError:
-            # Disk permission/space/corruption during project init must not
-            # escape run_once and leave the lease to expire naturally.
-            return self._schedule_retry_or_confirm_cancel(
-                lease,
-                stage=None,
-                outcome="project_retry_scheduled",
+        # The heartbeat spans the entire owned section — project setup, input
+        # download, credential issue, executor run, and final upload — so slow
+        # external I/O cannot let a second Worker reclaim the lease mid-flight.
+        # Settle calls release the heartbeat intentionally before they release
+        # the lease; a lease lost during the section surfaces as JobLeaseError.
+        with self._heartbeat(lease, now=now) as heartbeat:
+            try:
+                self._ensure_project(snapshot)
+            except OSError:
+                # Disk permission/space/corruption during project init must not
+                # escape run_once and leave the lease to expire naturally.
+                return self._schedule_retry_or_confirm_cancel(
+                    heartbeat,
+                    stage=None,
+                    outcome="project_retry_scheduled",
+                    now=now,
+                    error="Project workspace initialization failed",
+                )
+            stage = self._next_stage(snapshot)
+            if stage is None:
+                return self._finalize_job(heartbeat, snapshot, now=now)
+            try:
+                checkpoint = read_checkpoint(
+                    self.projects_dir,
+                    snapshot.job_id,
+                    stage.code,
+                )
+            except (CheckpointValidationError, OSError, ValueError):
+                return self._terminal_failure(
+                    heartbeat,
+                    stage=stage.code,
+                    code="OPENMONTAGE_VALIDATION_FAILED",
+                    message="Pipeline checkpoint validation failed",
+                    now=now,
+                )
+            return self._advance(
+                heartbeat,
+                snapshot,
+                stage,
+                checkpoint,
                 now=now,
-                error="Project workspace initialization failed",
-            )
-        stage = self._next_stage(snapshot)
-        if stage is None:
-            published = None
-            if not any(artifact.role == "final_video" for artifact in snapshot.artifacts):
-                if self.artifact_bridge is None:
-                    return self._terminal_failure(
-                        lease,
-                        stage=None,
-                        code="OPENMONTAGE_ARTIFACT_BRIDGE_UNAVAILABLE",
-                        message="Artifact Bridge is required to publish the final video",
-                        now=now,
-                    )
-                try:
-                    final_video = self._resolve_final_video(snapshot)
-                    published = self.artifact_bridge.upload_output(
-                        job_id=snapshot.job_id,
-                        attribution=snapshot.attribution,
-                        path=final_video,
-                        role="final_video",
-                        media_type="video/mp4",
-                    )
-                except FinalArtifactError:
-                    return self._terminal_failure(
-                        lease,
-                        stage=None,
-                        code="OPENMONTAGE_RENDER_FAILED",
-                        message="Pipeline did not produce a safe final MP4",
-                        now=now,
-                    )
-                except (ArtifactBridgeError, OSError):
-                    if lease.attempt >= self.max_executor_attempts:
-                        return self._terminal_failure(
-                            lease,
-                            stage=None,
-                            code="OPENMONTAGE_ARTIFACT_UPLOAD_FAILED",
-                            message="Final video upload failed after bounded retries",
-                            now=now,
-                        )
-                    return self._schedule_retry_or_confirm_cancel(
-                        lease,
-                        stage=None,
-                        outcome="artifact_retry_scheduled",
-                        now=now,
-                        error="Final video upload failed",
-                    )
-            settled = self.service.complete_job_or_confirm_cancel(
-                snapshot.job_id,
-                artifact=published,
-                lease_token=lease.lease_token,
-                now=now,
-            )
-            if settled.status == JobStatus.CANCELLED:
-                return JobWorkerResult(snapshot.job_id, None, "job_cancelled")
-            return JobWorkerResult(snapshot.job_id, None, "job_completed")
-
-        try:
-            checkpoint = read_checkpoint(
-                self.projects_dir,
-                snapshot.job_id,
-                stage.code,
-            )
-        except (CheckpointValidationError, OSError, ValueError):
-            return self._terminal_failure(
-                lease,
-                stage=stage.code,
-                code="OPENMONTAGE_VALIDATION_FAILED",
-                message="Pipeline checkpoint validation failed",
-                now=now,
+                checkpoint_was_recovered=checkpoint is not None,
             )
 
-        return self._advance(
-            lease,
-            snapshot,
-            stage,
-            checkpoint,
+    def _finalize_job(
+        self,
+        heartbeat: _LeaseHeartbeat,
+        snapshot: JobSnapshot,
+        *,
+        now: datetime | None,
+    ) -> JobWorkerResult:
+        lease = heartbeat.lease
+        published = None
+        if not any(artifact.role == "final_video" for artifact in snapshot.artifacts):
+            if self.artifact_bridge is None:
+                return self._terminal_failure(
+                    heartbeat,
+                    stage=None,
+                    code="OPENMONTAGE_ARTIFACT_BRIDGE_UNAVAILABLE",
+                    message="Artifact Bridge is required to publish the final video",
+                    now=now,
+                )
+            try:
+                final_video = self._resolve_final_video(snapshot)
+                published = self.artifact_bridge.upload_output(
+                    job_id=snapshot.job_id,
+                    attribution=snapshot.attribution,
+                    path=final_video,
+                    role="final_video",
+                    media_type="video/mp4",
+                )
+            except FinalArtifactError:
+                return self._terminal_failure(
+                    heartbeat,
+                    stage=None,
+                    code="OPENMONTAGE_RENDER_FAILED",
+                    message="Pipeline did not produce a safe final MP4",
+                    now=now,
+                )
+            except (ArtifactBridgeError, OSError):
+                if lease.attempt >= self.max_executor_attempts:
+                    return self._terminal_failure(
+                        heartbeat,
+                        stage=None,
+                        code="OPENMONTAGE_ARTIFACT_UPLOAD_FAILED",
+                        message="Final video upload failed after bounded retries",
+                        now=now,
+                    )
+                return self._schedule_retry_or_confirm_cancel(
+                    heartbeat,
+                    stage=None,
+                    outcome="artifact_retry_scheduled",
+                    now=now,
+                    error="Final video upload failed",
+                )
+        heartbeat.release()
+        settled = self.service.complete_job_or_confirm_cancel(
+            snapshot.job_id,
+            artifact=published,
+            lease_token=lease.lease_token,
             now=now,
-            checkpoint_was_recovered=checkpoint is not None,
         )
+        if settled.status == JobStatus.CANCELLED:
+            return JobWorkerResult(snapshot.job_id, None, "job_cancelled")
+        return JobWorkerResult(snapshot.job_id, None, "job_completed")
 
     def _advance(
         self,
-        lease: JobLease,
+        heartbeat: _LeaseHeartbeat,
         snapshot: JobSnapshot,
         stage: StageSnapshot,
         checkpoint: dict | None,
@@ -207,6 +294,7 @@ class JobWorker:
         now: datetime | None,
         checkpoint_was_recovered: bool,
     ) -> JobWorkerResult:
+        lease = heartbeat.lease
         if stage.status == StageStatus.PENDING:
             snapshot = self.service.start_stage_or_confirm_cancel(
                 snapshot.job_id,
@@ -220,6 +308,7 @@ class JobWorker:
 
         if checkpoint is not None and checkpoint["status"] in {"completed", "awaiting_human"}:
             if stage.approval_required and stage.approval_status != ApprovalStatus.APPROVED:
+                heartbeat.release()
                 if stage.status != StageStatus.WAITING_APPROVAL:
                     settled = self.service.request_stage_approval_or_confirm_cancel(
                         snapshot.job_id,
@@ -239,6 +328,7 @@ class JobWorker:
                     return JobWorkerResult(snapshot.job_id, stage.code, "job_cancelled")
                 return JobWorkerResult(snapshot.job_id, stage.code, "waiting_approval")
             if checkpoint["status"] == "completed":
+                heartbeat.release()
                 settled = self.service.complete_stage_or_confirm_cancel(
                     snapshot.job_id,
                     stage.code,
@@ -252,7 +342,7 @@ class JobWorker:
 
         if checkpoint is not None and checkpoint["status"] == "failed":
             return self._terminal_failure(
-                lease,
+                heartbeat,
                 stage=stage.code,
                 code="OPENMONTAGE_PIPELINE_STAGE_FAILED",
                 message="Pipeline stage reported a failed checkpoint",
@@ -264,7 +354,7 @@ class JobWorker:
             local_inputs = self._prepare_inputs(latest)
         except (ArtifactBridgeError, OSError, ValueError):
             return self._terminal_failure(
-                lease,
+                heartbeat,
                 stage=stage.code,
                 code="OPENMONTAGE_ARTIFACT_INPUT_FAILED",
                 message="Job input Artifact could not be prepared safely",
@@ -290,28 +380,29 @@ class JobWorker:
                 failure_message = _bounded_model_credential_error(exc)
                 if lease.attempt >= self.max_executor_attempts:
                     return self._terminal_failure(
-                        lease,
+                        heartbeat,
                         stage=stage.code,
                         code="OPENMONTAGE_MODEL_CREDENTIAL_UNAVAILABLE",
                         message=failure_message,
                         now=now,
                     )
                 return self._schedule_retry_or_confirm_cancel(
-                    lease,
+                    heartbeat,
                     stage=stage.code,
                     outcome="credential_retry_scheduled",
                     now=now,
                     error=failure_message,
                 )
         try:
-            execution, lease = self._execute_with_heartbeat(
+            execution = self.executor.execute(
                 assignment,
-                lease,
                 credential=credential,
-                now=now,
+                cancellation_requested=lambda: heartbeat.cancellation_requested(
+                    assignment.job_id
+                ),
             )
         except PipelineExecutionCancelled:
-            cancellation = self._confirm_cancel_if_requested(lease, stage.code, now=now)
+            cancellation = self._confirm_cancel_if_requested(heartbeat, stage.code, now=now)
             if cancellation is not None:
                 return cancellation
             raise
@@ -319,14 +410,14 @@ class JobWorker:
             failure_message = _bounded_executor_error(exc)
             if lease.attempt >= self.max_executor_attempts:
                 return self._terminal_failure(
-                    lease,
+                    heartbeat,
                     stage=stage.code,
                     code="OPENMONTAGE_AGENT_EXECUTOR_FAILED",
                     message=failure_message,
                     now=now,
                 )
             return self._schedule_retry_or_confirm_cancel(
-                lease,
+                heartbeat,
                 stage=stage.code,
                 outcome="retry_scheduled",
                 now=now,
@@ -334,23 +425,25 @@ class JobWorker:
             )
 
         return self._reconcile_execution(
-            lease,
+            heartbeat,
             execution,
             now=now,
         )
 
     def _reconcile_execution(
         self,
-        lease: JobLease,
+        heartbeat: _LeaseHeartbeat,
         execution: PipelineExecutionResult,
         *,
         now: datetime | None,
     ) -> JobWorkerResult:
+        lease = heartbeat.lease
         snapshot = self.service.get_job(lease.job_id)
         stage = self._stage(snapshot, snapshot.current_stage or execution.checkpoint["stage"])
         checkpoint = execution.checkpoint
         if checkpoint["status"] == "completed":
             if stage.approval_required and stage.approval_status != ApprovalStatus.APPROVED:
+                heartbeat.release()
                 settled = self.service.request_stage_approval_or_confirm_cancel(
                     snapshot.job_id,
                     stage.code,
@@ -361,6 +454,7 @@ class JobWorker:
                 if settled.status == JobStatus.CANCELLED:
                     return JobWorkerResult(snapshot.job_id, stage.code, "job_cancelled")
                 return JobWorkerResult(snapshot.job_id, stage.code, "waiting_approval")
+            heartbeat.release()
             settled = self.service.complete_stage_or_confirm_cancel(
                 snapshot.job_id,
                 stage.code,
@@ -373,12 +467,13 @@ class JobWorker:
         if checkpoint["status"] == "awaiting_human":
             if not stage.approval_required:
                 return self._terminal_failure(
-                    lease,
+                    heartbeat,
                     stage=stage.code,
                     code="OPENMONTAGE_VALIDATION_FAILED",
                     message="Pipeline checkpoint requested an undeclared approval gate",
                     now=now,
                 )
+            heartbeat.release()
             settled = self.service.request_stage_approval_or_confirm_cancel(
                 snapshot.job_id,
                 stage.code,
@@ -391,7 +486,7 @@ class JobWorker:
             return JobWorkerResult(snapshot.job_id, stage.code, "waiting_approval")
         if checkpoint["status"] == "failed":
             return self._terminal_failure(
-                lease,
+                heartbeat,
                 stage=stage.code,
                 code="OPENMONTAGE_PIPELINE_STAGE_FAILED",
                 message="Pipeline stage reported a failed checkpoint",
@@ -410,85 +505,33 @@ class JobWorker:
                 lease_now=now,
             )
         return self._schedule_retry_or_confirm_cancel(
-            lease,
+            heartbeat,
             stage=stage.code,
             outcome="stage_in_progress",
             now=now,
             reset_attempts=True,
         )
 
-    def _execute_with_heartbeat(
+    def _heartbeat(
         self,
-        assignment: StageAssignment,
         lease: JobLease,
         *,
-        credential: DelegatedModelCredential | None,
         now: datetime | None,
-    ) -> tuple[PipelineExecutionResult, JobLease]:
-        if now is not None:
-            return (
-                self.executor.execute(
-                    assignment,
-                    credential=credential,
-                    cancellation_requested=lambda: self._is_cancel_requested(assignment.job_id),
-                ),
-                lease,
-            )
-
-        stop = Event()
-        lease_lost = Event()
-        state: dict[str, JobLease | BaseException] = {"lease": lease}
-
-        def heartbeat() -> None:
-            while not stop.wait(self.heartbeat_interval.total_seconds()):
-                try:
-                    current = state["lease"]
-                    assert isinstance(current, JobLease)
-                    state["lease"] = self.service.heartbeat_lease(
-                        current,
-                        lease_duration=self.lease_duration,
-                    )
-                except BaseException as exc:
-                    state["error"] = exc
-                    lease_lost.set()
-                    stop.set()
-
-        thread = Thread(target=heartbeat, name=f"openmontage-heartbeat-{lease.job_id}", daemon=True)
-        thread.start()
-        result: PipelineExecutionResult | None = None
-        execution_error: BaseException | None = None
-        try:
-            result = self.executor.execute(
-                assignment,
-                credential=credential,
-                cancellation_requested=lambda: lease_lost.is_set()
-                or self._is_cancel_requested(assignment.job_id),
-            )
-        except BaseException as exc:
-            execution_error = exc
-        finally:
-            stop.set()
-            thread.join(timeout=self.heartbeat_interval.total_seconds() + 1)
-        heartbeat_error = state.get("error")
-        if isinstance(heartbeat_error, BaseException):
-            raise JobLeaseError("Job lease heartbeat failed") from heartbeat_error
-        if execution_error is not None:
-            raise execution_error
-        renewed = state["lease"]
-        assert isinstance(renewed, JobLease)
-        assert result is not None
-        return result, renewed
+    ) -> _LeaseHeartbeat:
+        return _LeaseHeartbeat(self, lease, now=now)
 
     def _confirm_cancel_if_requested(
         self,
-        lease: JobLease,
+        heartbeat: _LeaseHeartbeat,
         stage: str,
         *,
         now: datetime | None,
     ) -> JobWorkerResult | None:
+        lease = heartbeat.lease
         snapshot = self.service.get_job(lease.job_id)
         if snapshot.status != JobStatus.CANCEL_REQUESTED:
             return None
+        heartbeat.release()
         self.service.release_lease_or_confirm_cancel(
             snapshot.job_id,
             lease_token=lease.lease_token,
@@ -681,13 +724,15 @@ class JobWorker:
 
     def _terminal_failure(
         self,
-        lease: JobLease,
+        heartbeat: _LeaseHeartbeat,
         *,
         stage: str | None,
         code: str,
         message: str,
         now: datetime | None,
     ) -> JobWorkerResult:
+        heartbeat.release()
+        lease = heartbeat.lease
         settled = self.service.fail_job_or_confirm_cancel(
             lease.job_id,
             code=code,
@@ -701,7 +746,7 @@ class JobWorker:
 
     def _schedule_retry_or_confirm_cancel(
         self,
-        lease: JobLease,
+        heartbeat: _LeaseHeartbeat,
         *,
         stage: str | None,
         outcome: str,
@@ -709,6 +754,8 @@ class JobWorker:
         error: str | None = None,
         reset_attempts: bool = False,
     ) -> JobWorkerResult:
+        heartbeat.release()
+        lease = heartbeat.lease
         settled = self.service.release_lease_or_confirm_cancel(
             lease.job_id,
             lease_token=lease.lease_token,
@@ -721,20 +768,6 @@ class JobWorker:
             "job_cancelled" if settled.status == JobStatus.CANCELLED else outcome
         )
         return JobWorkerResult(lease.job_id, stage, resolved_outcome)
-
-    def _release(
-        self,
-        lease: JobLease,
-        *,
-        now: datetime | None,
-        reset_attempts: bool = False,
-    ) -> None:
-        self.service.release_lease(
-            lease.job_id,
-            lease_token=lease.lease_token,
-            reset_attempts=reset_attempts,
-            now=now,
-        )
 
     def _is_cancel_requested(self, job_id: str) -> bool:
         return self.service.get_job(job_id).status == JobStatus.CANCEL_REQUESTED

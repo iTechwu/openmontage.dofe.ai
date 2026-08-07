@@ -1085,6 +1085,96 @@ def test_worker_recovers_after_upload_before_local_artifact_persistence(
     assert bridge.upload_calls[0] == bridge.upload_calls[1]
 
 
+def test_worker_renews_lease_through_final_upload(tmp_path: Path) -> None:
+    """Slow final upload stays lease-owned: a second Worker cannot reclaim."""
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="slow-upload"), _attribution())
+    projects_dir = tmp_path / "projects"
+    final_video = projects_dir / job.job_id / "renders" / "final.mp4"
+    final_video.parent.mkdir(parents=True, exist_ok=True)
+    final_video.write_bytes(b"final-video")
+    _complete_all_stages(service, job.job_id, projects_dir, final_video)
+
+    lease_duration = timedelta(seconds=0.3)
+    heartbeat_interval = timedelta(seconds=0.03)
+    reclaims_during_upload: list = []
+
+    class SlowUploadBridge(FakeArtifactBridge):
+        def upload_output(self, **kwargs):
+            # Sleep well past the lease duration. Without heartbeat coverage the
+            # lease would expire and a second Worker would reclaim mid-upload.
+            sleep(lease_duration.total_seconds() * 2)
+            reclaims_during_upload.append(
+                service.claim_job(
+                    worker_id="other-worker",
+                    lease_duration=timedelta(seconds=30),
+                )
+            )
+            return super().upload_output(**kwargs)
+
+    worker = JobWorker(
+        service,
+        FakeExecutor([]),
+        projects_dir=projects_dir,
+        worker_id="test-worker",
+        lease_duration=lease_duration,
+        heartbeat_interval=heartbeat_interval,
+        retry_delay=timedelta(0),
+        artifact_bridge=SlowUploadBridge(),
+    )
+
+    result = worker.run_once()
+
+    restored = service.get_job(job.job_id)
+    assert result is not None and result.outcome == "job_completed"
+    assert restored.status == JobStatus.SUCCEEDED
+    # The lease was renewed during the slow upload, so the second claim failed.
+    assert reclaims_during_upload == [None]
+
+
+def test_worker_renews_lease_during_input_preparation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Slow input download stays lease-owned: a second Worker cannot reclaim."""
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="slow-download"), _attribution())
+    projects_dir = tmp_path / "projects"
+
+    lease_duration = timedelta(seconds=0.3)
+    heartbeat_interval = timedelta(seconds=0.03)
+    reclaims_during_prep: list = []
+    real_prepare = JobWorker._prepare_inputs
+
+    def slow_prepare(self, snapshot):
+        sleep(lease_duration.total_seconds() * 2)
+        reclaims_during_prep.append(
+            service.claim_job(
+                worker_id="other-worker",
+                lease_duration=timedelta(seconds=30),
+            )
+        )
+        return real_prepare(self, snapshot)
+
+    monkeypatch.setattr(JobWorker, "_prepare_inputs", slow_prepare)
+
+    worker = JobWorker(
+        service,
+        FakeExecutor(["in_progress"]),
+        projects_dir=projects_dir,
+        worker_id="test-worker",
+        lease_duration=lease_duration,
+        heartbeat_interval=heartbeat_interval,
+        retry_delay=timedelta(0),
+    )
+
+    result = worker.run_once()
+
+    assert result is not None and result.outcome == "stage_in_progress"
+    # The lease was renewed while preparing inputs, so the second claim failed.
+    assert reclaims_during_prep == [None]
+
+
 def test_worker_rejects_final_video_outside_job_workspace(tmp_path: Path) -> None:
     service = JobService(tmp_path / "jobs.sqlite3")
     job = service.create_job(_request(request_id="unsafe-output"), _attribution())
