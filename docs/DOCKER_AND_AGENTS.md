@@ -186,6 +186,24 @@ loopback signing proxy. Both paths use a stable model invocation identifier for
 retries, allowing models to reject replays and preserve authoritative Job and
 employee attribution.
 
+**Known limitation — Codex Responses same-content wrong-merge (tracked external
+blocker, NOT closed).** Native tool paths supply a stable logical-call identity,
+so the proxy keys replay strictly on it. Codex cannot: verified against codex-cli
+0.146.0 (the pinned revision, inspected in the shipped binary), the model-provider
+config exposes only static-per-invocation knobs (`base_url`, `query_params`,
+`env_key`) and no per-call header or Idempotency-Key. With no caller-supplied
+per-call identity available, the proxy dedups Codex Responses on the content
+fingerprint. The designed, accepted consequence is that two genuinely distinct
+same-content Responses calls within one stage/attempt collapse onto one
+invocation and the second replays the first cached response — losing the second
+call's execution, billing, and attribution. The interim mitigation is
+observability only: every fingerprint-keyed replay is logged at INFO with
+`replay_key_source="content_fingerprint"` (the wrong-merge-prone case) versus
+`"logical_call_id"` (the safe case), and the CLI configures logging so the record
+emits under the default Worker config. The real fix requires a Codex per-call
+identity capability (per-call header interpolation or a stable per-call
+Idempotency-Key) and stays open until upstream ships it.
+
 The publisher reads the same SQLite outbox as the MCP server. A successful 2xx
 response marks an event delivered; network and non-2xx failures remain durable
 and retry with bounded exponential backoff. Operators can perform one flush and

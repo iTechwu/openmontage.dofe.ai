@@ -917,7 +917,14 @@ def _replay_log_upstream(forwarded: list):
 def test_proxy_logs_replay_keyed_on_content_fingerprint(tmp_path, caplog) -> None:
     """Two identical Responses calls with no logical-call header collapse to one
     invocation; the replayed second response is logged as keyed on the content
-    fingerprint — the wrong-merge-prone case, made observable."""
+    fingerprint.
+
+    This documents a KNOWN EXTERNAL BLOCKER (see delegation_proxy.py), not a
+    desired or closed behavior: the second call's execution/billing/attribution
+    is lost. The test pins the current interim contract — the wrong-merge is
+    OBSERVABLE via the replay log — so the limitation cannot regress silently.
+    It must not be read as the feature working as intended; the unblock
+    condition is a Codex per-call identity capability that 0.146.0 lacks."""
     forwarded: list = []
 
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), _replay_log_upstream(forwarded))

@@ -33,6 +33,21 @@ _HOP_HEADERS = {
 _MAX_REQUEST_BYTES = 32 * 1024 * 1024
 _MAX_CACHED_RESPONSE_BYTES = 8 * 1024 * 1024
 _LOGGER = logging.getLogger("openmontage.delegation_proxy")
+# ---------------------------------------------------------------------------
+# TRACKED EXTERNAL BLOCKER — Responses same-content wrong-merge is NOT closed.
+#
+# Without a caller-supplied per-call identity, two genuinely distinct same-
+# content Responses calls within one stage/attempt collapse onto one invocation
+# and the second replays the first cached response, losing the second call's
+# execution, billing, and attribution. This is an ACCEPTED, DOCUMENTED limitation
+# — not a completed feature. The interim mitigation is observability only: every
+# fingerprint-keyed replay is logged (replay_key_source="content_fingerprint"),
+# and Fix A (cli._configure_logging) makes that record emit under the default
+# Worker/CLI config. The real fix needs a stable per-call identity
+# (stage + attempt + call_sequence) that the CALLER supplies; Codex 0.146.0
+# (the pinned revision, verified in the shipped binary) cannot inject one — see
+# the policy below. Until Codex exposes that capability, this stays open.
+# ---------------------------------------------------------------------------
 # Logical-call identity policy (deliberate, audited — not a heuristic).
 #
 # Codex is the only executor whose OpenAI-compatible traffic crosses this proxy,
