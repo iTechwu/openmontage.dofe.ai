@@ -502,9 +502,17 @@ def _validate_command(command: Sequence[str]) -> tuple[str, ...]:
 
 
 def _is_codex_exec_command(command: Sequence[str]) -> bool:
-    """True when the Agent argv is a Codex ``exec`` invocation."""
+    """True when the Agent argv is a Codex ``exec`` invocation.
 
-    if not command or Path(command[0]).name != "codex":
+    Accepts both Unix ``codex`` and Windows ``codex.exe`` so absolute paths or
+    explicit executables on either platform enter the delegated model-lock path.
+    """
+
+    if not command:
+        return False
+    # Normalize backslashes so Windows paths parse correctly on POSIX as well.
+    name = Path(str(command[0]).replace("\\", "/")).name.lower()
+    if name not in {"codex", "codex.exe"}:
         return False
     try:
         command.index("exec", 1)

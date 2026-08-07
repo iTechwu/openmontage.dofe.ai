@@ -20,6 +20,7 @@ from openmontage.pipeline_executor import (
     PipelineExecutionIncomplete,
     StageAssignment,
     _configure_agent_command_for_delegation,
+    _is_codex_exec_command,
 )
 from tools.dofe.delegation import DelegatedModelCredential
 
@@ -275,6 +276,13 @@ def test_executor_environment_requires_nonempty_json_argv(
 
     with pytest.raises(PipelineExecutionError, match="JSON argv"):
         AgentCommandPipelineExecutor.from_environment()
+
+
+def test_is_codex_exec_command_recognizes_windows_exe() -> None:
+    assert _is_codex_exec_command([r"C:\Users\dev\AppData\Roaming\npm\codex.exe", "exec", "-"])
+    assert _is_codex_exec_command(["codex.exe", "exec", "--full-auto"])
+    assert not _is_codex_exec_command(["codex.exe"])  # missing exec subcommand
+    assert not _is_codex_exec_command(["claude.exe", "exec", "-"])
 
 
 def test_delegated_codex_uses_the_loopback_proxy_as_its_native_responses_provider() -> None:
