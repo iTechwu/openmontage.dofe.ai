@@ -111,8 +111,11 @@ export OPENMONTAGE_AGENT_MODEL_ID="<exact-id-from-catalog>"
 # so it is NOT reachable from the host. Run curl INSIDE a service. The whole curl
 # is single-quoted so the HOST shell does not expand $DOFE_MODEL_API_KEY (which
 # the host may not have loaded); the container's login shell expands it from the
-# already-injected container env:
-#   docker compose exec openmontage-mcp sh -lc 'curl -fsS -H "Authorization: Bearer $DOFE_MODEL_API_KEY" "${DOFE_DOCKER_MODEL_BASE_URL:-http://api:3101}/v1/models"'
+# already-injected container env. Read $DOFE_MODEL_BASE_URL — that is the var
+# compose.yaml injects into the container (resolved from the host's
+# $DOFE_DOCKER_MODEL_BASE_URL, default http://api:3101); the host-only
+# $DOFE_DOCKER_MODEL_BASE_URL is NOT in the container env:
+#   docker compose exec openmontage-mcp sh -lc 'curl -fsS -H "Authorization: Bearer $DOFE_MODEL_API_KEY" "${DOFE_MODEL_BASE_URL:-http://api:3101}/v1/models"'
 openmontage worker run --once --json
 openmontage worker run --interval 2 --json
 ```
