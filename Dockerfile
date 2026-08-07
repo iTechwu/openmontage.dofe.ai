@@ -8,10 +8,6 @@ ARG DEBIAN_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
 ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 ARG CODEX_CLI_VERSION=0.146.0
-ARG OPENMONTAGE_IMAGE_REVISION=unknown
-
-LABEL org.opencontainers.image.source="https://github.com/iTechwu/openmontage.dofe.ai" \
-      org.opencontainers.image.revision=${OPENMONTAGE_IMAGE_REVISION}
 USER root
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -65,6 +61,10 @@ RUN pip install --no-cache-dir --no-deps -e . \
     && ln -s /data/cache/remotion-webpack /app/remotion-composer/node_modules/.cache \
     && chown -R ${RUNTIME_USER}:${RUNTIME_GROUP} /data \
     && chmod -R a-w /app
+
+ARG OPENMONTAGE_IMAGE_REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/iTechwu/openmontage.dofe.ai" \
+      org.opencontainers.image.revision=${OPENMONTAGE_IMAGE_REVISION}
 
 USER ${RUNTIME_USER}
 VOLUME ["/data/projects", "/data/music_library"]
