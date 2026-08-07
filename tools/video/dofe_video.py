@@ -211,8 +211,18 @@ class DofeVideo(BaseTool):
             else ToolStatus.UNAVAILABLE
         )
 
-    def probe_provider_contract(self, inputs: dict[str, Any]) -> dict[str, Any]:
-        """Validate the exact model and operation against DoFe's live projection."""
+    def probe_provider_contract(
+        self,
+        inputs: dict[str, Any],
+        *,
+        catalog: Any = None,
+    ) -> dict[str, Any]:
+        """Validate the exact model and operation against DoFe's live projection.
+
+        ``catalog`` may carry a tenant ``GET /v1/models`` snapshot the caller
+        already fetched, so a live preflight + paid execution can share one
+        catalog read instead of fetching twice.
+        """
 
         operation = str(inputs.get("operation") or "text_to_video")
         requested_model = self.resolve_model(inputs)
@@ -224,7 +234,9 @@ class DofeVideo(BaseTool):
 
         try:
             client = DofeClient()
-            model = validate_catalog_alias(requested_model, client.list_models())
+            if catalog is None:
+                catalog = client.list_models()
+            model = validate_catalog_alias(requested_model, catalog)
             capability = client.get_playground_capability(model)
         except DofeError as exc:
             return _blocked_probe(
@@ -480,7 +492,29 @@ class DofeVideo(BaseTool):
             self.check_dependencies()
         except DependencyError as exc:
             return ToolResult(success=False, error=str(exc))
-        return run_dofe_generation(self, inputs)
+        # Live provider preflight enforced at the paid execution boundary: a
+        # caller that skipped the Skill (or passed live_preflight=false) still
+        # cannot reach paid generation without a passing live contract. The
+        # tenant catalog is fetched once and shared with run_dofe_generation so
+        # the gate adds no extra GET /v1/models (dev-guide §model-catalog).
+        try:
+            catalog = DofeClient().list_models()
+        except DofeError as exc:
+            return ToolResult(
+                success=False,
+                data={"provider": "dofe"},
+                error=f"DoFe live model catalog is unavailable: {exc}",
+            )
+        probe = self.probe_provider_contract(inputs, catalog=catalog)
+        if probe.get("status") != "passed":
+            return ToolResult(
+                success=False,
+                data={"provider": "dofe", "preflight": probe},
+                error="; ".join(
+                    probe.get("errors") or ["DoFe live preflight blocked paid generation"]
+                ),
+            )
+        return run_dofe_generation(self, inputs, catalog=catalog)
 
 
 def _parse_duration(value: Any, default: int = 5) -> int:

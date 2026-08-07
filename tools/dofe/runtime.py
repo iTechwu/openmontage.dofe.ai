@@ -277,12 +277,21 @@ def _error_result(
 
 # ----------------------------------------------------------------- main entry
 
-def run_dofe_generation(tool: Any, inputs: dict[str, Any]) -> ToolResult:
+def run_dofe_generation(
+    tool: Any,
+    inputs: dict[str, Any],
+    *,
+    catalog: Any = None,
+) -> ToolResult:
     """Execute a dofe generation end-to-end.
 
     ``tool`` must expose: ``dofe_spec`` (DofeToolSpec), ``resolve_model(inputs)``,
     ``_build_payload(inputs, model)``, ``estimate_cost(inputs)``, ``name``,
     ``install_instructions``.
+
+    ``catalog`` may carry a tenant ``GET /v1/models`` snapshot that a caller
+    already fetched (e.g. for a live preflight). When provided, the paid-boundary
+    catalog check reuses it instead of fetching again.
     """
 
     api_key = cfg.dofe_api_key()
@@ -310,7 +319,8 @@ def run_dofe_generation(tool: Any, inputs: dict[str, Any]) -> ToolResult:
 
     client = DofeClient(api_key=api_key)
     try:
-        catalog = client.list_models()
+        if catalog is None:
+            catalog = client.list_models()
         model = validate_catalog_alias(requested_model, catalog)
     except DofeError as exc:
         return _error_result(tool, exc, requested_model, spec, start)

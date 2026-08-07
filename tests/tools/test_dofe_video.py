@@ -16,6 +16,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from tools.base_tool import ToolStatus
 from tools.dofe.client import DofeClient
+from tools.dofe.errors import DofeTaskTimeoutError
 from tools.video.dofe_video import MAX_REFERENCE_IMAGES, DofeVideo
 
 
@@ -444,3 +445,90 @@ def test_live_preflight_fails_closed_on_non_executable_projection(
 
     assert report["status"] == "blocked"
     assert any(expected_error in error["message"] for error in report["errors"])
+
+
+# A passing live capability projection used by the paid-boundary tests below.
+_PASSING_CAPABILITY = {
+    "alias": "catalog-video",
+    "modelType": "video",
+    "state": "ready",
+    "executor": "generation_task",
+    "endpointKind": "video_async",
+    "input": {"text": True},
+    "operations": [
+        {
+            "id": "text_to_video",
+            "constraints": {"acceptedAssetTypes": [], "roles": []},
+        }
+    ],
+    "form": {
+        "fields": [
+            {"key": "durationSeconds", "min": 5},
+            {"key": "ratio", "options": ["16:9", "9:16"]},
+        ]
+    },
+    "output": {"mode": "task"},
+    "readiness": [],
+}
+
+
+def test_execute_fails_closed_at_paid_boundary_when_model_not_in_catalog(monkeypatch):
+    """A direct caller that skipped the Skill cannot reach paid generation."""
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_VIDEO_MODEL", "seedance-2.0-fast")
+
+    list_calls: list[int] = []
+    monkeypatch.setattr(
+        DofeClient,
+        "list_models",
+        lambda _self: list_calls.append(1) or [{"id": "another-model"}],
+    )
+    submit_calls: list[int] = []
+    monkeypatch.setattr(
+        DofeClient,
+        "submit_and_collect",
+        lambda self, *a, **k: submit_calls.append(1),
+    )
+
+    result = DofeVideo().execute({"prompt": "a cat playing piano"})
+
+    assert not result.success
+    # The catalog gate stopped it before any paid generation started.
+    assert submit_calls == []
+    # The tenant catalog is fetched exactly once and shared, not re-fetched.
+    assert len(list_calls) == 1
+
+
+def test_execute_runs_live_probe_and_shares_catalog_before_generation(monkeypatch):
+    """Preflight is enforced at the boundary, then generation reuses the catalog."""
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_VIDEO_MODEL", "catalog-video")
+
+    list_calls: list[int] = []
+    monkeypatch.setattr(
+        DofeClient,
+        "list_models",
+        lambda _self: list_calls.append(1) or [{"id": "catalog-video"}],
+    )
+    capability_calls: list[str] = []
+    monkeypatch.setattr(
+        DofeClient,
+        "get_playground_capability",
+        lambda _self, model: capability_calls.append(model) or _PASSING_CAPABILITY,
+    )
+    submit_calls: list[int] = []
+
+    def fake_submit(self, *a, **k):
+        submit_calls.append(1)
+        raise DofeTaskTimeoutError("task timed out")
+
+    monkeypatch.setattr(DofeClient, "submit_and_collect", fake_submit)
+
+    result = DofeVideo().execute({"prompt": "a cat playing piano"})
+
+    # Live preflight passed (capability probed) and reached paid generation,
+    # which then timed out — proving the catalog was shared, not re-fetched.
+    assert not result.success
+    assert capability_calls == ["catalog-video"]
+    assert len(submit_calls) == 1
+    assert len(list_calls) == 1
