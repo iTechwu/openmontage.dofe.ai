@@ -8,6 +8,7 @@ import logging
 import os
 import socket
 import sys
+import threading
 import time
 from datetime import timedelta
 from typing import Any
@@ -19,7 +20,25 @@ from openmontage.reference_clone import (
 )
 
 _LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+_OPENMONTAGE_LOGGER = "openmontage"
 _OPENMONTAGE_HANDLER_MARK = "_openmontage_logging"
+_CONFIGURE_LOCK = threading.Lock()
+# The ONLY extra fields the structured formatter may render. Anything else
+# attached to a record (e.g. an api_key/authorization that a third-party or
+# future logger accidentally passes via extra=) is dropped rather than written
+# to stderr. This is the credential-leak guard: the formatter never enumerates
+# arbitrary extra fields.
+_ALLOWED_EXTRA_FIELDS = frozenset(
+    {
+        "event",
+        "outcome",
+        "job_id",
+        "stage",
+        "attempt",
+        "invocation_id",
+        "replay_key_source",
+    }
+)
 
 
 class _StderrHandler(logging.StreamHandler):
@@ -36,28 +55,19 @@ class _StderrHandler(logging.StreamHandler):
 
 
 class _StructuredFormatter(logging.Formatter):
-    """Append non-reserved ``extra=`` fields as ``key=value`` after the message.
+    """Append whitelisted ``extra=`` fields as ``key=value`` after the message.
 
-    Lets the delegation proxy's replay records (``replay_key_source``,
-    ``invocation_id``, ...) surface as structured fields on one line instead of
-    being dropped by a formatter that only knows ``%(message)s``.
+    Only fields in ``_ALLOWED_EXTRA_FIELDS`` render; every other extra is
+    dropped so a credential-bearing field can never reach stderr via this
+    formatter.
     """
-
-    _RESERVED = frozenset(
-        {
-            "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
-            "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
-            "created", "msecs", "relativeCreated", "thread", "threadName",
-            "processName", "process", "taskName", "message", "asctime",
-        }
-    )
 
     def format(self, record: logging.LogRecord) -> str:
         base = super().format(record)
         extras = [
             f"{key}={record.__dict__[key]!r}"
             for key in sorted(record.__dict__)
-            if key not in self._RESERVED and not key.startswith("_")
+            if key in _ALLOWED_EXTRA_FIELDS
         ]
         return f"{base} {' '.join(extras)}" if extras else base
 
@@ -65,26 +75,35 @@ class _StructuredFormatter(logging.Formatter):
 def _configure_logging(level_name: str) -> None:
     """Attach an OpenMontage stderr handler so INFO records actually emit.
 
-    Without this the root logger's default effective level is WARNING, so the
-    delegation proxy's wrong-merge replay records (logged at INFO) stay silent
-    under the Worker/CLI default configuration. Idempotent: repeated CLI entry
-    (e.g. in tests) reuses the tagged handler instead of stacking new ones.
+    Scope is deliberately the ``openmontage`` logger namespace, NOT the root
+    logger. Raising root to INFO would also emit third-party library records
+    (httpx/urllib3/requests/...), which may carry credentials in their extra
+    fields or messages, straight to stderr. By configuring only ``openmontage``
+    and disabling its propagation to root, third-party loggers stay at their
+    default WARNING threshold and never pass through this handler.
+
+    Without this the ``openmontage`` logger's default effective level is WARNING,
+    so the delegation proxy's wrong-merge replay records (logged at INFO) stay
+    silent under the Worker/CLI default configuration. Idempotent and
+    thread-safe: concurrent callers reuse the one tagged handler.
     """
     level = getattr(logging, str(level_name).upper(), logging.INFO)
-    root = logging.getLogger()
-    handler = next(
-        (h for h in root.handlers if getattr(h, _OPENMONTAGE_HANDLER_MARK, False)),
-        None,
-    )
-    if handler is None:
-        handler = _StderrHandler()
-        handler.setFormatter(
-            _StructuredFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logger = logging.getLogger(_OPENMONTAGE_LOGGER)
+    with _CONFIGURE_LOCK:
+        handler = next(
+            (h for h in logger.handlers if getattr(h, _OPENMONTAGE_HANDLER_MARK, False)),
+            None,
         )
-        setattr(handler, _OPENMONTAGE_HANDLER_MARK, True)
-        root.addHandler(handler)
-    handler.setLevel(level)
-    root.setLevel(level)
+        if handler is None:
+            handler = _StderrHandler()
+            handler.setFormatter(
+                _StructuredFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+            )
+            setattr(handler, _OPENMONTAGE_HANDLER_MARK, True)
+            logger.addHandler(handler)
+        handler.setLevel(level)
+        logger.setLevel(level)
+        logger.propagate = False
 
 
 def _print(value: dict[str, Any], *, as_json: bool) -> None:
