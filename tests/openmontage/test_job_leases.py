@@ -839,3 +839,65 @@ def test_settlement_rejects_naive_now(tmp_path: Path, settle) -> None:
     with pytest.raises(JobLeaseError, match="timezone-aware"):
         settle(service, lease, NAIVE_NOW)
 
+
+_OFFSET_TZ = timezone(timedelta(hours=5, minutes=30))  # +05:30 == the IST-style case
+
+
+def test_offset_now_compared_by_instant_in_sql_retry_window(tmp_path: Path) -> None:
+    """A non-UTC offset ``now`` must be normalized to UTC before the lexical SQL
+    comparison ``next_attempt_at <= ?``, otherwise the same instant compares
+    inconsistently: 17:31:59+05:30 == 12:01:59Z, but as raw ISO strings
+    '17:31...' > '12:02...' so a retry due at 12:02Z would look already-due and
+    be claimed ~5.5 hours early."""
+    service = JobService(tmp_path / "jobs.sqlite3")
+    service.create_job(_request("offset-now"), _attribution())
+    lease = service.claim_job(
+        worker_id="worker-a", lease_duration=timedelta(seconds=30), now=NOW
+    )
+    assert lease is not None
+
+    retry_at = NOW + timedelta(minutes=2)  # 12:02Z, persisted as UTC ISO
+    service.release_lease(
+        lease.job_id,
+        lease_token=lease.lease_token,
+        retry_at=retry_at,
+        error="temporary failure",
+        now=NOW,
+    )
+
+    due = service.claim_job(
+        worker_id="worker-b",
+        lease_duration=timedelta(seconds=30),
+        # 17:31:59+05:30 == 12:01:59Z — one second before the retry is due.
+        now=datetime(2026, 8, 5, 17, 31, 59, tzinfo=_OFFSET_TZ),
+    )
+    assert due is None, "offset now one second before due must NOT claim"
+
+    reclaimed = service.claim_job(
+        worker_id="worker-c",
+        lease_duration=timedelta(seconds=30),
+        # 17:32:00+05:30 == 12:02:00Z — exactly when the retry is due.
+        now=datetime(2026, 8, 5, 17, 32, 0, tzinfo=_OFFSET_TZ),
+    )
+    assert reclaimed is not None
+    assert reclaimed.job_id == lease.job_id
+
+
+def test_naive_retry_at_is_rejected(tmp_path: Path) -> None:
+    """retry_at is compared against the aware clock and persisted into the SQL
+    retry window, so it must be normalized too: a naive retry_at is rejected
+    rather than TypeError-ing at the comparison or storing a non-UTC string."""
+    service = JobService(tmp_path / "jobs.sqlite3")
+    service.create_job(_request("naive-retry-at"), _attribution())
+    lease = service.claim_job(
+        worker_id="worker-a", lease_duration=timedelta(seconds=30), now=NOW
+    )
+    assert lease is not None
+    with pytest.raises(JobLeaseError, match="timezone-aware"):
+        service.release_lease(
+            lease.job_id,
+            lease_token=lease.lease_token,
+            retry_at=datetime(2026, 8, 5, 12, 5),  # naive
+            error="temporary failure",
+            now=NOW,
+        )

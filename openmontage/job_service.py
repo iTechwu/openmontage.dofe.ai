@@ -71,7 +71,9 @@ def _parse_lease_expiry(raw: str | None) -> datetime | None:
     write can store a BLOB or a number instead of an ISO-8601 string. Any such
     value fails closed to ``None`` ("no valid expiry") so the active-lease check
     rejects the token and the claim/reclaim path can take the record back,
-    rather than raising and leaving a stuck token in place.
+    rather than raising and leaving a stuck token in place. An offset-aware
+    value is normalized to UTC so the lexical SQL comparison of the persisted
+    ISO string agrees with the instant comparison used here.
     """
     if not isinstance(raw, str) or not raw.strip():
         return None
@@ -81,19 +83,29 @@ def _parse_lease_expiry(raw: str | None) -> datetime | None:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
+    return parsed.astimezone(timezone.utc)
+
+
+def _to_utc(value: datetime, field: str) -> datetime:
+    """Reject a naive datetime and convert an aware one to UTC.
+
+    Lease expiries and retry timestamps are normalized to UTC and then persisted
+    as ISO-8601 strings that SQLite compares lexically. A non-UTC offset (e.g.
+    ``+05:30``) serializes to a different string than its UTC instant, so a SQL
+    comparison like ``next_attempt_at <= ?`` would order the same instant
+    inconsistently — delaying a retry by hours or letting a lease be claimed
+    early. Every clock value is therefore converted to UTC before it is
+    persisted or compared. Naive values are rejected (not silently assumed UTC)
+    so a local-time clock bug surfaces at the lease boundary.
+    """
+    if value.tzinfo is None:
+        raise JobLeaseError(f"{field} must be timezone-aware (UTC)")
+    return value.astimezone(timezone.utc)
 
 
 def _normalize_now(now: datetime | None) -> datetime:
-    """Resolve the optional clock argument to an aware-UTC datetime.
-
-    Lease expiry is parsed from storage as aware-UTC, so comparing it against a
-    naive ``now`` raises ``TypeError`` at the comparison site (claim reclaim, or
-    the active-lease expiry gate). That surfaces as an unhandled 500 and leaves
-    the Job stuck under a token the reclaim path cannot take back. Rather than
-    silently assume a naive value means UTC — which would mask a local-time
-    clock bug in a lease/security path — reject naive explicitly. ``None``
-    resolves to the current UTC instant.
+    """Resolve the optional clock argument to an aware-UTC datetime (see
+    ``_to_utc``). ``None`` resolves to the current UTC instant.
 
     Applied at the lease gate (``_require_active_lease``,
     ``_require_current_fencing_token``) and at ``claim_job`` / ``release_lease``,
@@ -101,9 +113,7 @@ def _normalize_now(now: datetime | None) -> datetime:
     """
     if now is None:
         return _now()
-    if now.tzinfo is None:
-        raise JobLeaseError("now/lease_now must be timezone-aware (UTC)")
-    return now
+    return _to_utc(now, "now/lease_now")
 
 
 def _canonical_json(value: dict[str, Any]) -> str:
@@ -469,6 +479,7 @@ class JobService:
         if retry_delay is not None and retry_delay < timedelta(0):
             raise JobLeaseError("retry_delay must not be negative")
         call_now = _normalize_now(now)
+        retry_at = _to_utc(retry_at, "retry_at") if retry_at is not None else None
         if retry_at is not None and retry_at < call_now:
             raise JobLeaseError("retry_at must not be earlier than now")
         with self._connect() as connection:
@@ -508,6 +519,7 @@ class JobService:
         if retry_delay is not None and retry_delay < timedelta(0):
             raise JobLeaseError("retry_delay must not be negative")
         call_now = _normalize_now(now)
+        retry_at = _to_utc(retry_at, "retry_at") if retry_at is not None else None
         if retry_at is not None and retry_at < call_now:
             raise JobLeaseError("retry_at must not be earlier than now")
         with self._connect() as connection:
