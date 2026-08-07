@@ -19,6 +19,7 @@ from openmontage.pipeline_executor import (
     PipelineExecutionError,
     PipelineExecutionIncomplete,
     StageAssignment,
+    _configure_agent_command_for_delegation,
 )
 from tools.dofe.delegation import DelegatedModelCredential
 
@@ -274,6 +275,33 @@ def test_executor_environment_requires_nonempty_json_argv(
 
     with pytest.raises(PipelineExecutionError, match="JSON argv"):
         AgentCommandPipelineExecutor.from_environment()
+
+
+def test_delegated_codex_uses_the_loopback_proxy_as_its_native_responses_provider() -> None:
+    command = _configure_agent_command_for_delegation(
+        ("codex", "exec", "--ephemeral", "-"),
+        "http://127.0.0.1:43127/api/v1",
+    )
+
+    assert command[0] == "codex"
+    assert command[-3:] == ("exec", "--ephemeral", "-")
+    assert 'model_provider="dofe-delegated"' in command
+    assert (
+        'model_providers.dofe-delegated.base_url="http://127.0.0.1:43127/api/v1"'
+        in command
+    )
+    assert 'model_providers.dofe-delegated.wire_api="responses"' in command
+    assert "model_providers.dofe-delegated.supports_websockets=false" in command
+    assert "model_providers.dofe-delegated.requires_openai_auth=true" in command
+
+
+def test_delegated_non_codex_executor_command_is_unchanged() -> None:
+    command = ("claude", "--print", "-")
+
+    assert _configure_agent_command_for_delegation(
+        command,
+        "http://127.0.0.1:43127/api/v1",
+    ) == command
 
 
 def test_executor_reports_nonzero_exit_without_accepting_a_checkpoint(tmp_path: Path) -> None:

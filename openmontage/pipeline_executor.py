@@ -257,6 +257,7 @@ class AgentCommandPipelineExecutor:
                     stage=assignment.stage,
                     stage_attempt=assignment.stage_attempt,
                 ) as proxy:
+                    openai_base_url = f"{proxy.base_url}/v1"
                     environment = {
                         key: value
                         for key, value in os.environ.items()
@@ -265,12 +266,15 @@ class AgentCommandPipelineExecutor:
                     }
                     environment.update(
                         credential.agent_environment(
-                            openai_base_url=f"{proxy.base_url}/v1",
+                            openai_base_url=openai_base_url,
                             dofe_base_url=proxy.base_url,
                         )
                     )
                     completed = self._run(
-                        command,
+                        _configure_agent_command_for_delegation(
+                            command,
+                            openai_base_url,
+                        ),
                         prompt,
                         environment=environment,
                         cancellation_requested=cancellation_requested,
@@ -472,6 +476,35 @@ def _validate_command(command: Sequence[str]) -> tuple[str, ...]:
             "OPENMONTAGE_AGENT_EXECUTOR_JSON must be a nonempty JSON argv array"
         )
     return tuple(command)
+
+
+def _configure_agent_command_for_delegation(
+    command: tuple[str, ...],
+    openai_base_url: str,
+) -> tuple[str, ...]:
+    if Path(command[0]).name != "codex":
+        return command
+    try:
+        exec_index = command.index("exec", 1)
+    except ValueError:
+        return command
+
+    provider = "dofe-delegated"
+    provider_config = (
+        "-c",
+        f'model_provider="{provider}"',
+        "-c",
+        f'model_providers.{provider}.name="DoFe delegated gateway"',
+        "-c",
+        f"model_providers.{provider}.base_url={json.dumps(openai_base_url)}",
+        "-c",
+        f'model_providers.{provider}.wire_api="responses"',
+        "-c",
+        f"model_providers.{provider}.supports_websockets=false",
+        "-c",
+        f"model_providers.{provider}.requires_openai_auth=true",
+    )
+    return command[:exec_index] + provider_config + command[exec_index:]
 
 
 def _stage_prompt(assignment: StageAssignment, assignment_path: Path) -> str:
