@@ -722,10 +722,17 @@ def test_executor_persists_timeout_diagnostics(tmp_path: Path) -> None:
             tmp_path,
             sys.executable,
             "-c",
-            "import os,sys,time; sys.stderr.write('partial timeout context\\n' + os.environ['DOFE_MODEL_API_KEY']); sys.stderr.flush(); time.sleep(2)",
+            # Write+flush the partial-context marker as the FIRST statement so it
+            # lands in the pipe within microseconds of the child starting, before
+            # any env access or heavier imports. The exec path runs two Python
+            # startups (fake codex wrapper -> this -c); a 0.5s deadline raced
+            # against child scheduling under load and occasionally captured an
+            # empty stderr, so the marker is emitted first and the deadline below
+            # gives ample headroom while still exercising the timeout path.
+            "import sys; sys.stderr.write('partial timeout context\\n'); sys.stderr.flush(); import os, time; sys.stderr.write(os.environ['DOFE_MODEL_API_KEY']); sys.stderr.flush(); time.sleep(5)",
             f"https://models.test/v1/responses?access_token={oauth_query_secret}&request_id=timeout-1",
         ),
-        timeout_seconds=0.5,
+        timeout_seconds=1.5,
         agent_model_resolver=lambda _cred: "catalog-agent-model",
     )
 
