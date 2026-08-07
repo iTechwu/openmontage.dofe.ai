@@ -1194,3 +1194,38 @@ def test_worker_rejects_final_video_outside_job_workspace(tmp_path: Path) -> Non
     assert result is not None and result.outcome == "job_failed"
     assert service.get_job(job.job_id).status == JobStatus.FAILED
     assert bridge.upload_calls == []
+
+
+def test_worker_heartbeat_keeps_lease_alive_through_slow_settle(tmp_path: Path) -> None:
+    """A final settle slower than the lease TTL must not expire the lease."""
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(_request(request_id="slow-settle"), _attribution())
+    projects_dir = tmp_path / "projects"
+    final_video = projects_dir / job.job_id / "final.mp4"
+    final_video.parent.mkdir(parents=True, exist_ok=True)
+    final_video.write_bytes(b"final-video")
+    _complete_all_stages(service, job.job_id, projects_dir, final_video)
+
+    original_complete = service.complete_job_or_confirm_cancel
+
+    def slow_complete(*args, **kwargs):
+        sleep(0.45)
+        return original_complete(*args, **kwargs)
+
+    service.complete_job_or_confirm_cancel = slow_complete  # type: ignore[method-assign]
+
+    worker = JobWorker(
+        service,
+        FakeExecutor([]),
+        projects_dir=projects_dir,
+        worker_id="test-worker",
+        lease_duration=timedelta(seconds=0.3),
+        heartbeat_interval=timedelta(seconds=0.1),
+        retry_delay=timedelta(0),
+        artifact_bridge=FakeArtifactBridge(),
+    )
+
+    result = worker.run_once()
+
+    assert result is not None and result.outcome == "job_completed"
+    assert service.get_job(job.job_id).status == JobStatus.SUCCEEDED

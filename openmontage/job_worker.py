@@ -102,11 +102,16 @@ class _LeaseHeartbeat:
         return False
 
     def release(self) -> None:
-        """Stop renewing because the section is settling the lease intentionally."""
+        """Mark the lease as being settled intentionally.
 
+        The heartbeat thread is intentionally *not* stopped here: the service
+        settle (complete_job, release_lease, request_stage_approval, etc.) may
+        itself wait on locks or I/O, and stopping the heartbeat would let the
+        lease expire in that window. The thread keeps renewing until ``__exit__``
+        joins it after the settle; ``_releasing`` suppresses the expected
+        post-release renewal failure.
+        """
         self._releasing = True
-        self._stop.set()
-        self._join()
 
     def _run(self) -> None:
         interval = self._worker.heartbeat_interval.total_seconds()
@@ -181,8 +186,8 @@ class JobWorker:
         # The heartbeat spans the entire owned section — project setup, input
         # download, credential issue, executor run, and final upload — so slow
         # external I/O cannot let a second Worker reclaim the lease mid-flight.
-        # Settle calls release the heartbeat intentionally before they release
-        # the lease; a lease lost during the section surfaces as JobLeaseError.
+        # Settle calls mark the heartbeat as releasing; the thread stays alive
+        # through the settle itself and is stopped only in __exit__.
         with self._heartbeat(lease, now=now) as heartbeat:
             try:
                 self._ensure_project(snapshot)
