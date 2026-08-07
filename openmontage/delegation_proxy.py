@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock, Thread
 from typing import Any
 from urllib.parse import urlparse
+from uuid import uuid4
 from weakref import WeakValueDictionary
 import requests
 
@@ -189,6 +190,16 @@ class DelegationSigningProxy:
         self._thread: Thread | None = None
         self._invocation_locks_guard = Lock()
         self._invocation_locks: WeakValueDictionary[str, Lock] = WeakValueDictionary()
+        # Content fingerprints this live proxy instance has already served a
+        # response for. A same-content call re-arriving SEQUENTIALLY within one
+        # live instance is a distinct call (forwarded again), not a replay — see
+        # KB-001. A call re-arriving in a NEW instance (worker restart) still
+        # replays from the durable ledger, because each instance starts empty.
+        # Concurrent in-flight retries also still dedup: _locally_served is only
+        # marked after a response has been served, by which point a concurrent
+        # sibling has already committed to the shared (content-keyed) seed.
+        self._locally_served: set[str] = set()
+        self._served_lock = Lock()
 
     def __enter__(self) -> "DelegationSigningProxy":
         proxy = self
@@ -231,6 +242,9 @@ class DelegationSigningProxy:
         invocation_lock: Lock | None = None
         lock_stack = ExitStack()
         upstream: requests.Response | None = None
+        content_keyed = False
+        served_content = False
+        fingerprint = ""
         try:
             length = int(handler.headers.get("Content-Length", "0"))
             if length < 0 or length > _MAX_REQUEST_BYTES:
@@ -251,10 +265,31 @@ class DelegationSigningProxy:
                 ),
                 "",
             )
-            seed = logical_call_id or fingerprint
-            replay_key_source = (
-                "logical_call_id" if logical_call_id else "content_fingerprint"
-            )
+            # Seed selection — see KB-001 and the logical-call identity policy
+            # above. With a caller-supplied logical call id, dedup strictly on
+            # it (the caller asserts the id is stable across retries of one call
+            # and unique across distinct calls). Without one, the content
+            # fingerprint is the durable key — BUT only for the FIRST serving of
+            # that content in this live instance. A second same-content arrival
+            # in the SAME instance is a distinct call: give it a unique seed so
+            # it forwards as its own invocation instead of collapsing onto the
+            # first (the wrong-merge). Cross-instance restart recovery still
+            # dedups (a new instance starts with an empty _locally_served), as
+            # do concurrent in-flight retries (the shared seed is committed
+            # before _locally_served is marked at serve completion).
+            if logical_call_id:
+                seed = logical_call_id
+                replay_key_source = "logical_call_id"
+            else:
+                with self._served_lock:
+                    already_served = fingerprint in self._locally_served
+                if already_served:
+                    seed = f"{fingerprint}::distinct::{uuid4().hex}"
+                    replay_key_source = "content_fingerprint"
+                else:
+                    seed = fingerprint
+                    content_keyed = True
+                    replay_key_source = "content_fingerprint"
             if self.invocation_store is None:
                 invocation_id = "om-" + hashlib.sha256(
                     f"{self.credential.external_job_id}\n{self.credential.pipeline_stage}\n{seed}".encode()
@@ -284,6 +319,10 @@ class DelegationSigningProxy:
                 cached = self.invocation_store.get_cached_response(invocation_id)
                 if cached is not None:
                     response_cached = True
+                    # A replay also resolves this content for the instance: a
+                    # later same-content arrival in the same instance is again a
+                    # distinct call, not another replay.
+                    served_content = content_keyed
                     self._log_replay(
                         invocation_id,
                         replay_key_source=replay_key_source,
@@ -330,6 +369,11 @@ class DelegationSigningProxy:
                 allow_redirects=False,
                 timeout=(10, 3600),
             )
+            # Upstream received this request, so the content has now been
+            # served by this instance: a later same-content arrival here is a
+            # distinct call. (content_keyed is False for logical/distinct seeds,
+            # so only the durable content-keyed path records the fingerprint.)
+            served_content = content_keyed
             response_headers = {
                 key: value
                 for key, value in upstream.headers.items()
@@ -431,6 +475,9 @@ class DelegationSigningProxy:
         finally:
             if upstream is not None:
                 upstream.close()
+            if content_keyed and served_content:
+                with self._served_lock:
+                    self._locally_served.add(fingerprint)
             lock_stack.close()
 
     def _get_invocation_lock(self, invocation_id: str) -> Lock:

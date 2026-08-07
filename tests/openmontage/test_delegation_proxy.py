@@ -914,20 +914,36 @@ def _replay_log_upstream(forwarded: list):
     return Handler
 
 
-def test_proxy_logs_replay_keyed_on_content_fingerprint(tmp_path, caplog) -> None:
-    """Two identical Responses calls with no logical-call header collapse to one
-    invocation; the replayed second response is logged as keyed on the content
-    fingerprint.
+def test_proxy_forwards_distinct_same_content_calls_separately_within_one_instance(
+    tmp_path, caplog
+) -> None:
+    """Two genuinely distinct same-content Responses calls within ONE live proxy
+    instance must both reach upstream — they are NOT collapsed onto one
+    invocation.
 
-    This documents a KNOWN EXTERNAL BLOCKER (see delegation_proxy.py), not a
-    desired or closed behavior: the second call's execution/billing/attribution
-    is lost. The test pins the current interim contract — the wrong-merge is
-    OBSERVABLE via the replay log — so the limitation cannot regress silently.
-    It must not be read as the feature working as intended; the unblock
-    condition is a Codex per-call identity capability that 0.146.0 lacks."""
-    forwarded: list = []
+    Previously the second was replayed from a content-fingerprint cache (the
+    KB-001 wrong-merge), silently losing the second call's execution, billing,
+    and attribution. The instance-level _locally_served guard now forwards it as
+    its own invocation: both calls reach upstream with distinct invocation ids,
+    and no fingerprint replay is served."""
+    forwarded: list[bytes] = []
+    invocation_ids: list[str] = []
 
-    upstream = ThreadingHTTPServer(("127.0.0.1", 0), _replay_log_upstream(forwarded))
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            forwarded.append(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+            invocation_ids.append(self.headers.get("X-Dofe-Model-Invocation-Id", ""))
+            body = b'{"id":"resp-1","output":[]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = Thread(target=upstream.serve_forever, daemon=True)
     thread.start()
     try:
@@ -936,7 +952,7 @@ def test_proxy_logs_replay_keyed_on_content_fingerprint(tmp_path, caplog) -> Non
             api_key="delegated-api-key",
             models_base_url=f"http://{host}:{port}/api",
             delegation_id="delegation-1",
-            external_job_id="job-fingerprint-replay",
+            external_job_id="job-distinct-same-content",
             pipeline_stage="idea",
             runtime_credential_id="runtime-credential-1",
             expires_at="2099-08-06T09:00:01Z",
@@ -959,14 +975,83 @@ def test_proxy_logs_replay_keyed_on_content_fingerprint(tmp_path, caplog) -> Non
         thread.join(timeout=2)
 
     assert first.status_code == second.status_code == 200
-    assert first.content == second.content
-    assert len(forwarded) == 1  # only the first call reached upstream
-    sources = [
+    assert len(forwarded) == 2  # both distinct calls reached upstream
+    assert len(set(invocation_ids)) == 2  # distinct attribution per call
+    assert [
         getattr(record, "replay_key_source", None)
         for record in caplog.records
         if getattr(record, "event", None) == "replay_served"
-    ]
-    assert sources == ["content_fingerprint"]
+    ] == []  # no fingerprint replay — neither call collapsed onto the other
+
+
+def test_proxy_replays_same_content_across_instances_but_not_within_one(tmp_path) -> None:
+    """The instance-level guard discriminates restart recovery (replay) from a
+    distinct same-content call (forward):
+
+    * within ONE live instance, two same-content calls both forward (distinct);
+    * a NEW instance re-sent the same content (worker restart) replays the
+      persisted response instead of re-billing.
+
+    This is the contract that closes the KB-001 wrong-merge without giving up
+    crash-restart recovery."""
+    forwarded = 0
+    invocation_ids: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            nonlocal forwarded
+            forwarded += 1
+            invocation_ids.append(self.headers.get("X-Dofe-Model-Invocation-Id", ""))
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = b'{"id":"resp-1","output":[]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = upstream.server_address
+        credential = DelegatedModelCredential(
+            api_key="delegated-api-key",
+            models_base_url=f"http://{host}:{port}/api",
+            delegation_id="delegation-1",
+            external_job_id="job-discrimination",
+            pipeline_stage="idea",
+            runtime_credential_id="runtime-credential-1",
+            expires_at="2099-08-06T09:00:01Z",
+        )
+        store = ModelInvocationStore(tmp_path / "jobs.sqlite3")
+        payload = {"model": "catalog-model", "input": "same assignment"}
+        # Two distinct same-content calls within ONE live instance → both forward.
+        with DelegationSigningProxy(
+            credential, invocation_store=store, stage_attempt=1
+        ) as proxy:
+            first = requests.post(f"{proxy.base_url}/v1/responses", json=payload, timeout=5)
+            second = requests.post(f"{proxy.base_url}/v1/responses", json=payload, timeout=5)
+        # A NEW instance re-sends the same content (worker restart) → replay.
+        with DelegationSigningProxy(
+            credential, invocation_store=store, stage_attempt=1
+        ) as proxy:
+            third = requests.post(f"{proxy.base_url}/v1/responses", json=payload, timeout=5)
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+    assert [first.status_code, second.status_code, third.status_code] == [200, 200, 200]
+    assert first.content == second.content == third.content
+    # The two distinct in-instance calls both reached upstream; the restarted
+    # instance replayed the persisted response (no third forward).
+    assert forwarded == 2
+    assert len(invocation_ids) == 2
+    assert len(set(invocation_ids)) == 2  # distinct attribution per distinct call
 
 
 def test_proxy_logs_replay_keyed_on_logical_call_id(tmp_path, caplog) -> None:

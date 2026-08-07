@@ -103,8 +103,13 @@ def test_fingerprint_replay_emits_to_stderr_under_default_config(
     tmp_path, capsys
 ) -> None:
     """A fingerprint-keyed replay emits a structured record to stderr under the
-    CLI's default INFO config — proving the wrong-merge risk is observable in
-    production without caplog temporarily forcing the level."""
+    CLI's default INFO config — proving replay/recovery is observable in
+    production without caplog temporarily forcing the level.
+
+    The replay is triggered across proxy instances (worker restart recovery):
+    within one live instance, same-content calls are now distinct (forwarded),
+    so a fingerprint replay only arises when a new instance recovers a persisted
+    response."""
     cli._configure_logging("INFO")
     forwarded: list = []
 
@@ -127,7 +132,12 @@ def test_fingerprint_replay_emits_to_stderr_under_default_config(
             credential, invocation_store=store, stage_attempt=1
         ) as proxy:
             requests.post(f"{proxy.base_url}/v1/responses", json=payload, timeout=5)
-            capsys.readouterr()  # drain the first (non-replay) call
+            capsys.readouterr()  # drain the first (forwarded) call
+        # A new proxy instance recovers the persisted response → a fingerprint
+        # replay is served (cross-instance restart recovery).
+        with DelegationSigningProxy(
+            credential, invocation_store=store, stage_attempt=1
+        ) as proxy:
             requests.post(f"{proxy.base_url}/v1/responses", json=payload, timeout=5)
         err = capsys.readouterr().err
     finally:
