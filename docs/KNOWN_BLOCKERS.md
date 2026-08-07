@@ -53,22 +53,27 @@ record emits under the default Worker/CLI config.
 
 Codex model-provider config or the model request carries a value that **varies
 per call**: per-call header interpolation, or a stable per-call `Idempotency-Key`
-on the Responses request — **and** a behavioral probe confirms it varies across
-two distinct same-stage calls.
+on the Responses request — confirmed by a behavioral probe that observes Codex's
+actual request surface.
 
-The capability probe is a **schema-integrity change detector**, not a behavioral
-proof. The shipped native codex binary emits `struct ModelProviderInfo with <N>
-elements` (a Rust Debug impl string) — the authoritative structural signature of
-what a model-provider config can carry. The audited baseline is `N = 18`
-(`docs/codex_capability_probe.json` → `model_provider_info_elements`); the manual
-audit established those fields include no per-call header (`http_headers` belongs
-to `RawMcpServerConfig` / MCP servers, resolved once executor-side, not to
-`ModelProviderInfo`). If a Codex bump changes `N`, the probe fails and forces a
-manual behavioral re-audit (run Codex through `DelegationSigningProxy` against a
-mock Responses upstream, diff the per-call headers) before this entry can be
-touched. A named-substring search is deliberately not used: field names live as
-contiguous string-table internings (partial, with false neighbors), so it both
-misses unnamed fields and false-positives on unrelated strings.
+The capability probe is **behavioral**, not a struct element-count. It runs the
+pinned codex binary non-interactively (`codex exec`) with a dummy credential
+against a loopback mock OpenAI Responses upstream that records every request,
+and observes the ACTUAL wire surface Codex sends on `/responses`: the sorted
+**set** of request header names and request body field names (excluding the
+per-request transport headers `host` and `content-length`). The audited baseline
+is in `docs/codex_capability_probe.json` → `behavioral_probe_baseline`. If a
+Codex bump adds or removes a name, the probe fails and forces a manual audit — a
+new header/field may carry per-call identity and unblock this entry; if it does
+not, update the baseline after auditing.
+
+Behavioral, not element-count: a request-level identity header would never
+change `ModelProviderInfo`'s element count, so element-count is blind to the
+exact unblock signal; it also trips on unrelated struct changes and misses
+add+delete pairs. Element-count is no longer used. Per-call *variation* (an
+existing field gaining per-call semantics without a name change) is not
+machine-detectable from a name set; it is covered by the manual audit every pin
+bump triggers, since the strict CI job re-runs this probe against the new binary.
 
 ### When unblocked
 

@@ -12,15 +12,18 @@ make the blocker non-drifting:
   next-review date cannot lapse into a stale green;
 * while the capability is absent, the content-fingerprint fallback MUST still be
   present in the proxy (we rely on it);
-* when the pinned Codex binary is discoverable, a live schema probe asserts the
-  ``ModelProviderInfo`` element count still matches the audited baseline — and
-  FAILS if it changes, because a new field may carry per-call identity, forcing a
-  manual behavioral re-audit before KB-001 can be touched.
+* when the pinned Codex binary is discoverable, a live BEHAVIORAL probe runs the
+  real codex binary against a mock Responses upstream and observes the actual
+  request surface (header names + body field names). It FAILS if that surface
+  differs from the audited baseline — a new identity-carrying header/field
+  demands a manual audit before KB-001 can be touched.
 
-The live schema probe is best-effort in generic CI (Codex may be absent). The
-dedicated CI job sets ``OPENMONTAGE_CODEX_PROBE_STRICT=1`` so the probe
-FAILS instead of skipping — a missing binary or a changed schema breaks the job,
-it does not slip past unnoticed. The manifest invariants run unconditionally.
+The behavioral probe is the real evidence: it sees request-layer headers a
+static struct-size check is blind to (a request-level Idempotency-Key would not
+change any struct's element count). It runs only under
+``OPENMONTAGE_CODEX_PROBE_STRICT=1`` (the dedicated CI job that installs the
+pinned Codex); generic CI without Codex skips it, while the manifest invariants
+run unconditionally.
 """
 
 from __future__ import annotations
@@ -29,9 +32,13 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
+import time
 from datetime import date, datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 from typing import NoReturn
 
 import pytest
@@ -41,11 +48,22 @@ _MANIFEST_PATH = PROJECT_ROOT / "docs" / "codex_capability_probe.json"
 _MANIFEST = json.loads(_MANIFEST_PATH.read_text())
 _DOCKERFILE = (PROJECT_ROOT / "Dockerfile").read_text()
 
+# A minimal valid Responses SSE stream: a created then completed response with a
+# single output_text message. Enough for codex exec to accept the reply and exit
+# cleanly after one model call, which is all the surface probe needs to observe.
+_MINIMAL_RESPONSES_SSE = (
+    b'event: response.created\n'
+    b'data: {"type":"response.created","response":{"id":"resp_probe","object":"response","status":"in_progress","model":"probe","output":[],"created_at":0}}\n\n'
+    b'event: response.completed\n'
+    b'data: {"type":"response.completed","response":{"id":"resp_probe","object":"response","status":"completed","model":"probe","output":[{"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"created_at":0}}\n\n'
+)
+
 
 def _strict() -> bool:
     """The dedicated CI job opts in with OPENMONTAGE_CODEX_PROBE_STRICT=1 so the
-    live probe fails (not skips) when the pinned Codex binary is missing or the
-    schema has changed. Generic CI leaves it unset and the probe skips."""
+    live behavioral probe fails (not skips) when the pinned Codex binary is
+    missing or the observed request surface has changed. Generic CI leaves it
+    unset and the probe skips."""
     return os.environ.get("OPENMONTAGE_CODEX_PROBE_STRICT", "").strip().lower() in {"1", "true"}
 
 
@@ -65,9 +83,10 @@ def _dockerfile_codex_version() -> str:
 
 
 def test_manifest_tracks_the_pinned_codex_version() -> None:
-    """The audited manifest must track exactly the current pin. A bump that does
-    not re-probe and update the manifest fails here, forcing a re-verified
-    blocker status rather than a silent stale record."""
+    """The audited manifest must track exactly the current pin and carry the
+    behavioral baseline the live probe checks against. A bump that does not
+    re-probe and update the manifest fails here, forcing a re-verified blocker
+    status rather than a silent stale record."""
     from openmontage.delegation_proxy import PINNED_CODEX_CLI_VERSION
 
     pin = _dockerfile_codex_version()
@@ -79,10 +98,12 @@ def test_manifest_tracks_the_pinned_codex_version() -> None:
         "manifest must match delegation_proxy.PINNED_CODEX_CLI_VERSION"
     )
     assert _MANIFEST["blocker_id"] == "KB-001"
-    baseline = _MANIFEST["model_provider_info_elements"]
-    assert isinstance(baseline, int) and baseline > 0, (
-        "manifest must record a positive model_provider_info_elements baseline "
-        "(the audited ModelProviderInfo struct size the live schema probe checks)"
+    baseline = _MANIFEST["behavioral_probe_baseline"]
+    assert isinstance(baseline.get("request_header_names"), list) and baseline["request_header_names"], (
+        "manifest must record a non-empty behavioral_probe_baseline.request_header_names"
+    )
+    assert isinstance(baseline.get("request_body_fields"), list) and baseline["request_body_fields"], (
+        "manifest must record a non-empty behavioral_probe_baseline.request_body_fields"
     )
     date.fromisoformat(_MANIFEST["next_review_by"])  # parseable ISO date
 
@@ -176,64 +197,169 @@ def _find_native_codex_binary(pkg_root: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
-def test_live_schema_probe_detects_model_provider_info_change() -> None:
-    """Live schema-integrity probe. When the pinned Codex binary is discoverable,
-    its ``struct ModelProviderInfo with <N> elements`` Debug signature must equal
-    the audited baseline. A change means Codex grew/removed a model-provider
-    config field — which could carry per-call identity — so the probe FAILS,
-    forcing a manual behavioral re-audit before KB-001 can be touched.
+def _start_recording_upstream(captured: list[dict]) -> ThreadingHTTPServer:
+    """Start a loopback mock OpenAI Responses upstream that records each
+    request's header names and body field names into ``captured``."""
 
-    This is a schema change-detector, not a behavioral proof: it cannot show a
-    new field varies per call. Per-call proof is the gated behavioral probe in
-    the manifest (drive two distinct Codex Responses calls through
-    DelegationSigningProxy, diff the per-call headers). The element count is
-    exact and zero-false-positive, unlike a named-substring search: field names
-    live as contiguous string-table internings (partial, with false neighbors),
-    so substring hunting both misses unnamed fields and false-positives on
-    unrelated strings.
+    class Handler(BaseHTTPRequestHandler):
+        def _handle(self) -> None:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            body = self.rfile.read(length) if length else b""
+            body_keys: list[str] = []
+            if body:
+                try:
+                    body_keys = list(json.loads(body).keys())
+                except (ValueError, UnicodeDecodeError):
+                    body_keys = []
+            captured.append(
+                {
+                    "path": self.path,
+                    "header_names": [k.lower() for k in self.headers.keys()],
+                    "body_fields": body_keys,
+                }
+            )
+            if self.path.rstrip("/").endswith("/responses"):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(_MINIMAL_RESPONSES_SSE)
+                self.wfile.flush()
+            else:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"data":[]}')
+                self.wfile.flush()
+
+        def do_POST(self) -> None:  # noqa: N802
+            self._handle()
+
+        def do_GET(self) -> None:  # noqa: N802
+            self._handle()
+
+        def log_message(self, *_args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def _wait_port_ready(port: int, deadline: float) -> None:
+    while time.monotonic() < deadline:
+        with socket.socket() as sock:
+            sock.settimeout(0.25)
+            try:
+                sock.connect(("127.0.0.1", port))
+                return
+            except OSError:
+                time.sleep(0.05)
+    raise RuntimeError("mock upstream did not become ready")
+
+
+def test_live_behavioral_probe_observes_request_surface() -> None:
+    """Live behavioral probe. Runs the pinned codex binary non-interactively
+    against a mock Responses upstream and observes the ACTUAL request surface
+    (header names + body field names) Codex sends on /responses. It must equal
+    the audited baseline. A new or removed name fails the probe — a new
+    identity-carrying header (e.g. Idempotency-Key) or request field demands a
+    manual audit before KB-001 can be touched.
+
+    Why behavioral, not struct element-count: a request-level identity header
+    never changes ModelProviderInfo's element count, so element-count is blind to
+    the exact unblock signal; element-count also trips on unrelated struct
+    changes and misses add+delete pairs. Observing the real wire surface has none
+    of those failure modes.
 
     Under the strict gate (OPENMONTAGE_CODEX_PROBE_STRICT=1, the dedicated CI
-    job) every 'cannot run' condition FAILS the job instead of skipping.
+    job) every 'cannot run' condition FAILS the job instead of skipping. stdin is
+    closed (DEVNULL) so codex exec does not block waiting for piped input.
     """
-    if shutil.which("strings") is None:
-        _bail("`strings` unavailable; schema probe cannot run")
-
     pkg_root = _resolve_codex_package_root()
     if pkg_root is None:
-        _bail("codex CLI not installed; schema probe cannot run")
-
+        _bail("codex CLI not installed; behavioral probe cannot run")
     installed_version = json.loads((pkg_root / "package.json").read_text()).get("version")
     if installed_version != _MANIFEST["pinned_codex_version"]:
         _bail(
             f"installed codex {installed_version} != pinned "
             f"{_MANIFEST['pinned_codex_version']}; probe applies only to the pin"
         )
-
     binary = _find_native_codex_binary(pkg_root)
     if binary is None:
-        _bail("native codex binary not found under the package; schema probe cannot run")
+        _bail("native codex binary not found under the package; behavioral probe cannot run")
 
-    result = subprocess.run(
-        ["strings", str(binary)], capture_output=True, text=True, check=False
-    )
-    if result.returncode != 0:
-        _bail(f"`strings` failed on {binary}; schema probe cannot run")
+    captured: list[dict] = []
+    server = _start_recording_upstream(captured)
+    port = server.server_address[1]
+    try:
+        _wait_port_ready(port, time.monotonic() + 5.0)
+        env = {**os.environ, "PROBE_KEY": "dummy"}
+        proc = subprocess.Popen(
+            [
+                str(binary),
+                "exec",
+                "--skip-git-repo-check",
+                "--ignore-user-config",
+                "--ephemeral",
+                "-c", 'model_providers.probe.name="probe"',
+                "-c", f"model_providers.probe.base_url=\"http://127.0.0.1:{port}\"",
+                "-c", 'model_providers.probe.wire_api="responses"',
+                "-c", 'model_providers.probe.env_key="PROBE_KEY"',
+                "-c", "model_providers.probe.requires_openai_auth=false",
+                "-c", 'model_provider="probe"',
+                "-m",
+                "probe-model",
+                "say ok",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        try:
+            proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            _bail("codex exec did not finish within 60s; behavioral probe cannot run")
+    finally:
+        server.shutdown()
+        server.server_close()
 
-    counts = [
-        int(n)
-        for n in re.findall(r"ModelProviderInfo with (\d+) elements", result.stdout)
-    ]
-    baseline = _MANIFEST["model_provider_info_elements"]
-    assert counts, (
-        "ModelProviderInfo element-count signature is missing from the binary; "
-        "the probe can no longer detect a schema change. Re-audit manually."
+    requests = [r for r in captured if "/responses" in r["path"]]
+    if not requests:
+        stderr = proc.stderr.read().decode("utf-8", "replace") if proc.stderr else ""
+        _bail(
+            "behavioral probe captured no /responses request "
+            f"(codex exit {proc.returncode}; stderr: {stderr[:400]!r})"
+        )
+
+    transport = {"host", "content-length"}
+    observed_headers = sorted(
+        {name for req in requests for name in req["header_names"] if name not in transport}
     )
-    assert all(c == baseline for c in counts), (
-        f"ModelProviderInfo element count changed: binary reports {sorted(set(counts))}, "
-        f"audited baseline is {baseline}. A model-provider config field was added or "
-        "removed — it may carry per-call identity. Run the gated behavioral probe "
-        "(manifest behavioral_probe): drive two distinct Codex Responses calls through "
-        "DelegationSigningProxy and diff the per-call headers. Only if no per-call "
-        "identity appears, update model_provider_info_elements and re-record; if one "
-        "does, remove the content_fingerprint fallback and close KB-001."
+    observed_fields = sorted({f for req in requests for f in req["body_fields"]})
+    baseline = _MANIFEST["behavioral_probe_baseline"]
+    expected_headers = sorted(baseline["request_header_names"])
+    expected_fields = sorted(baseline["request_body_fields"])
+
+    assert observed_headers == expected_headers, (
+        "Codex /responses request header-name set changed.\n"
+        f"  expected: {expected_headers}\n"
+        f"  observed: {observed_headers}\n"
+        f"  added:   {sorted(set(observed_headers) - set(expected_headers))}\n"
+        f"  removed: {sorted(set(expected_headers) - set(observed_headers))}\n"
+        "A new header may carry per-call identity. Run the manual per-call-variation "
+        "audit; if it does (e.g. Idempotency-Key), remove the content_fingerprint "
+        "fallback in openmontage/delegation_proxy.py and close KB-001; if it does not, "
+        "update behavioral_probe_baseline.request_header_names after auditing."
+    )
+    assert observed_fields == expected_fields, (
+        "Codex /responses request body field-name set changed.\n"
+        f"  expected: {expected_fields}\n"
+        f"  observed: {observed_fields}\n"
+        f"  added:   {sorted(set(observed_fields) - set(expected_fields))}\n"
+        f"  removed: {sorted(set(expected_fields) - set(observed_fields))}\n"
+        "A new field may carry per-call identity. Audit as above; update "
+        "behavioral_probe_baseline.request_body_fields only after confirming it is not."
     )
