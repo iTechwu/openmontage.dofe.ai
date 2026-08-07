@@ -100,15 +100,19 @@ export OPENMONTAGE_AGENT_TIMEOUT_SECONDS=3600
 # invisible, so Codex can never silently fall back to the host default model.
 export OPENMONTAGE_AGENT_MODEL_ID="<exact-id-from-catalog>"
 # Discover it with an authenticated request to the model catalog. The key lives
-# in .env (loaded into each service via the env_file directive); export it in a
-# host shell before any host-side curl:
+# in .env and is loaded into each service via the env_file directive.
+#
+# Host shell — load .env first, then the host-reachable endpoint (needs the
+# model.local.dofe.ai CA + name resolution):
 #   set -a; . ./.env; set +a
-#   # Host-reachable endpoint (needs the model.local.dofe.ai CA + name resolution):
 #   curl -H "Authorization: Bearer $DOFE_MODEL_API_KEY" "${DOFE_MODEL_BASE_URL:-https://model.local.dofe.ai/api}/v1/models"
-#   # Container-internal only: api:3101 is Compose DNS on the shared dofe-models
-#   # network, so it is NOT reachable from the host. Run it inside a service
-#   # (the key is already in the container env, no .env sourcing needed):
-#   docker compose exec openmontage-mcp curl -H "Authorization: Bearer $DOFE_MODEL_API_KEY" "${DOFE_DOCKER_MODEL_BASE_URL:-http://api:3101}/v1/models"
+#
+# Container-internal — api:3101 is Compose DNS on the shared dofe-models network,
+# so it is NOT reachable from the host. Run curl INSIDE a service. The whole curl
+# is single-quoted so the HOST shell does not expand $DOFE_MODEL_API_KEY (which
+# the host may not have loaded); the container's login shell expands it from the
+# already-injected container env:
+#   docker compose exec openmontage-mcp sh -lc 'curl -fsS -H "Authorization: Bearer $DOFE_MODEL_API_KEY" "${DOFE_DOCKER_MODEL_BASE_URL:-http://api:3101}/v1/models"'
 openmontage worker run --once --json
 openmontage worker run --interval 2 --json
 ```
