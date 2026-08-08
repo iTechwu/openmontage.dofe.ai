@@ -8,7 +8,7 @@ import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Event, Thread
+from threading import Event, Lock, Thread, get_ident
 
 import requests
 
@@ -657,6 +657,57 @@ def test_proxy_forwards_event_stream_before_upstream_completes(tmp_path) -> None
     assert body == b"data: first\n\ndata: done\n\ndata: [DONE]\n\n"
 
 
+def test_proxy_advances_same_content_sequence_for_event_stream_without_store() -> None:
+    invocation_ids: list[str] = []
+    body = b"data: done\n\ndata: [DONE]\n\n"
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            invocation_ids.append(self.headers.get("X-Dofe-Model-Invocation-Id", ""))
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = upstream.server_address
+        credential = DelegatedModelCredential(
+            api_key="delegated-api-key",
+            models_base_url=f"http://{host}:{port}/api",
+            delegation_id="delegation-1",
+            external_job_id="job-stream-without-store",
+            pipeline_stage="script",
+            runtime_credential_id="runtime-credential-1",
+            expires_at="2099-08-06T09:00:01Z",
+        )
+        payload = {"model": "gpt-test", "stream": True}
+        with DelegationSigningProxy(credential) as proxy:
+            responses = [
+                requests.post(
+                    f"{proxy.base_url}/v1/responses",
+                    json=payload,
+                    timeout=5,
+                )
+                for _ in range(2)
+            ]
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert [response.content for response in responses] == [body, body]
+    assert len(set(invocation_ids)) == 2
+
+
 def test_proxy_does_not_repeat_uncacheable_successful_event_stream(
     monkeypatch,
     tmp_path,
@@ -755,7 +806,9 @@ def test_proxy_serializes_concurrent_replays_of_the_same_logical_call(tmp_path) 
             def request() -> requests.Response:
                 return requests.post(
                     f"{proxy.base_url}/v1/responses",
-                    headers={"X-Request-Id": "concurrent-request"},
+                    headers={
+                        "X-OpenMontage-Logical-Call-Id": "concurrent-request"
+                    },
                     json={"model": "gpt-test", "input": "hello"},
                     timeout=5,
                 )
@@ -923,9 +976,8 @@ def test_proxy_forwards_distinct_same_content_calls_separately_within_one_instan
 
     Previously the second was replayed from a content-fingerprint cache (the
     KB-001 wrong-merge), silently losing the second call's execution, billing,
-    and attribution. The instance-level _locally_served guard now forwards it as
-    its own invocation: both calls reach upstream with distinct invocation ids,
-    and no fingerprint replay is served."""
+    and attribution. Stable occurrence keys now give both calls distinct
+    invocation ids, and no fingerprint replay is served."""
     forwarded: list[bytes] = []
     invocation_ids: list[str] = []
 
@@ -984,16 +1036,86 @@ def test_proxy_forwards_distinct_same_content_calls_separately_within_one_instan
     ] == []  # no fingerprint replay — neither call collapsed onto the other
 
 
+def test_proxy_forwards_concurrent_same_content_calls_as_distinct_invocations(
+    tmp_path,
+) -> None:
+    """Independent calls must not collapse merely because they overlap in time."""
+    forwarded = 0
+    invocation_ids: list[str] = []
+    both_proxy_requests_started = Event()
+
+    class CoordinatedStore(ModelInvocationStore):
+        def __init__(self, path) -> None:
+            super().__init__(path)
+            self._request_threads: set[int] = set()
+            self._request_threads_lock = Lock()
+
+        def get_or_create(self, **kwargs):
+            with self._request_threads_lock:
+                self._request_threads.add(get_ident())
+                if len(self._request_threads) == 2:
+                    both_proxy_requests_started.set()
+            return super().get_or_create(**kwargs)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            nonlocal forwarded
+            assert both_proxy_requests_started.wait(timeout=5)
+            forwarded += 1
+            invocation_ids.append(self.headers.get("X-Dofe-Model-Invocation-Id", ""))
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = f'{{"call":{forwarded}}}'.encode("ascii")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = upstream.server_address
+        credential = DelegatedModelCredential(
+            api_key="delegated-api-key",
+            models_base_url=f"http://{host}:{port}/api",
+            delegation_id="delegation-1",
+            external_job_id="job-concurrent-same-content",
+            pipeline_stage="idea",
+            runtime_credential_id="runtime-credential-1",
+            expires_at="2099-08-06T09:00:01Z",
+        )
+        store = CoordinatedStore(tmp_path / "jobs.sqlite3")
+        payload = {"model": "catalog-model", "input": "same assignment"}
+        with DelegationSigningProxy(
+            credential, invocation_store=store, stage_attempt=1
+        ) as proxy:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(
+                        requests.post,
+                        f"{proxy.base_url}/v1/responses",
+                        json=payload,
+                        timeout=5,
+                    )
+                    for _ in range(2)
+                ]
+                responses = [future.result(timeout=5) for future in futures]
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert forwarded == 2
+    assert len(set(invocation_ids)) == 2
+
+
 def test_proxy_replays_same_content_across_instances_but_not_within_one(tmp_path) -> None:
-    """The instance-level guard discriminates restart recovery (replay) from a
-    distinct same-content call (forward):
-
-    * within ONE live instance, two same-content calls both forward (distinct);
-    * a NEW instance re-sent the same content (worker restart) replays the
-      persisted response instead of re-billing.
-
-    This is the contract that closes the KB-001 wrong-merge without giving up
-    crash-restart recovery."""
+    """A restarted stage replays every same-content occurrence in order."""
     forwarded = 0
     invocation_ids: list[str] = []
 
@@ -1003,7 +1125,7 @@ def test_proxy_replays_same_content_across_instances_but_not_within_one(tmp_path
             forwarded += 1
             invocation_ids.append(self.headers.get("X-Dofe-Model-Invocation-Id", ""))
             self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            body = b'{"id":"resp-1","output":[]}'
+            body = f'{{"call":{forwarded}}}'.encode("ascii")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -1035,20 +1157,32 @@ def test_proxy_replays_same_content_across_instances_but_not_within_one(tmp_path
         ) as proxy:
             first = requests.post(f"{proxy.base_url}/v1/responses", json=payload, timeout=5)
             second = requests.post(f"{proxy.base_url}/v1/responses", json=payload, timeout=5)
-        # A NEW instance re-sends the same content (worker restart) → replay.
+        # A NEW instance repeats the same deterministic call sequence.
         with DelegationSigningProxy(
             credential, invocation_store=store, stage_attempt=1
         ) as proxy:
             third = requests.post(f"{proxy.base_url}/v1/responses", json=payload, timeout=5)
+            fourth = requests.post(f"{proxy.base_url}/v1/responses", json=payload, timeout=5)
     finally:
         upstream.shutdown()
         upstream.server_close()
         thread.join(timeout=2)
 
-    assert [first.status_code, second.status_code, third.status_code] == [200, 200, 200]
-    assert first.content == second.content == third.content
-    # The two distinct in-instance calls both reached upstream; the restarted
-    # instance replayed the persisted response (no third forward).
+    assert [
+        first.status_code,
+        second.status_code,
+        third.status_code,
+        fourth.status_code,
+    ] == [200, 200, 200, 200]
+    assert [response.json() for response in (first, second)] == [
+        {"call": 1},
+        {"call": 2},
+    ]
+    assert [response.json() for response in (third, fourth)] == [
+        {"call": 1},
+        {"call": 2},
+    ]
+    # Restart recovery replays both persisted occurrences without re-billing.
     assert forwarded == 2
     assert len(invocation_ids) == 2
     assert len(set(invocation_ids)) == 2  # distinct attribution per distinct call
@@ -1187,6 +1321,69 @@ def test_proxy_does_not_cache_truncated_event_stream_and_recovers_on_restart(
     assert b"response.completed" in responses[1].content
 
 
+def test_proxy_does_not_treat_model_text_as_event_stream_completion(tmp_path) -> None:
+    forwarded = 0
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            nonlocal forwarded
+            forwarded += 1
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(
+                b"event: response.output_text.delta\n"
+                b'data: {"type":"response.output_text.delta",'
+                b'"delta":"response.completed"}\n\n'
+            )
+            if forwarded > 1:
+                self.wfile.write(
+                    b"event: response.completed\n"
+                    b'data: {"type":"response.completed",'
+                    b'"response":{"status":"completed"}}\n\n'
+                )
+            self.wfile.flush()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = upstream.server_address
+        credential = DelegatedModelCredential(
+            api_key="delegated-api-key",
+            models_base_url=f"http://{host}:{port}/api",
+            delegation_id="delegation-1",
+            external_job_id="job-terminal-text",
+            pipeline_stage="script",
+            runtime_credential_id="runtime-credential-1",
+            expires_at="2099-08-06T09:00:01Z",
+        )
+        store = ModelInvocationStore(tmp_path / "jobs.sqlite3")
+        payload = {"model": "gpt-test", "stream": True}
+        responses = []
+        for _ in range(2):
+            with DelegationSigningProxy(credential, invocation_store=store) as proxy:
+                responses.append(
+                    requests.post(
+                        f"{proxy.base_url}/v1/responses",
+                        json=payload,
+                        timeout=5,
+                    )
+                )
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+    assert forwarded == 2
+    assert b'"type":"response.completed"' not in responses[0].content
+    assert b'"type":"response.completed"' in responses[1].content
+
+
 def test_proxy_retries_failed_forward_with_same_invocation_id_within_one_instance(
     tmp_path,
 ) -> None:
@@ -1194,10 +1391,9 @@ def test_proxy_retries_failed_forward_with_same_invocation_id_within_one_instanc
     served, so an in-instance retry reuses the same content-keyed seed — the
     same invocation id — instead of minting a distinct one.
 
-    Previously any upstream response (even a 504) marked _locally_served, so the
-    retry picked a fresh ::distinct:: seed and the 504 and the 200 landed on two
-    different invocation ids: double-billing and broken attribution for what is
-    one logical call."""
+    A failed tail occurrence rolls its stable ordinal back, so the 504 and the
+    retry land on one invocation id instead of splitting billing and
+    attribution."""
     forwarded = 0
     invocation_ids: list[str] = []
 

@@ -12,13 +12,13 @@ drift into silence.
 
 | field | value |
 | --- | --- |
-| **Status** | MITIGATED — the same-instance wrong-merge is closed in OpenMontage by the per-instance distinct-call guard (`_locally_served` in `delegation_proxy.py`). The content-fingerprint fallback remains the durable cross-instance replay key; a native Codex per-call identity would remove the need for the guard (residual tracked enhancement). |
+| **Status** | MITIGATED — the proxy combines the durable content fingerprint with a stable occurrence ordinal. Concurrent and sequential distinct calls receive different invocation IDs, while a deterministic stage restart replays each occurrence in order. A native Codex per-call identity would remove the remaining order-dependence. |
 | **Owner** | OpenMontage backend maintainer (delegation proxy / worker executor) |
 | **External tracker** | **PENDING** — no upstream `openai/codex` issue is known to track this (issue [#1194](https://github.com/openai/codex/issues/1194) is alt-provider auth, not per-call identity). Upstream issues search: <https://github.com/openai/codex/issues?q=is%3Aissue+idempotency>. Owner must **file** `external_tracker.issue_draft` (verbatim or adapted) before **Next review**, then set the tracker to FILED with the issue URL here and in `docs/codex_capability_probe.json`. The structured/test-enforced tracker state lives in `docs/codex_capability_probe.json` → `external_tracker`; `test_external_tracker_is_concrete_not_a_placeholder` fails if PENDING lacks a ready-to-file `issue_draft` (title + body) or if the review date lapses, and `test_review_deadline_window_bounds_probe_recency` fails if the deadline is pushed more than a quarter past the last probe. |
 | **First verified** | codex-cli 0.146.0 (the `CODEX_CLI_VERSION` Dockerfile pin) |
 | **Next review** | On every `CODEX_CLI_VERSION` bump (enforced by `test_codex_capability_probe.py`) **and** no later than 2026-11-07, whichever comes first |
 | **Probe** | `tests/openmontage/test_codex_capability_probe.py` + audited manifest `docs/codex_capability_probe.json` |
-| **Code reference** | `openmontage/delegation_proxy.py` — `KB-001` comment, the content-fingerprint replay fallback, and the per-instance distinct-call guard |
+| **Code reference** | `openmontage/delegation_proxy.py` — `KB-001` comment and the content-fingerprint occurrence sequence |
 
 ### Symptom (before mitigation)
 
@@ -30,42 +30,29 @@ stage/attempt.
 
 ### How it is mitigated
 
-`DelegationSigningProxy` tracks, per live instance, the content fingerprints it
-has already served (`_locally_served`). When no logical-call header is present:
+When no logical-call header is present, `DelegationSigningProxy` atomically
+assigns each occurrence of a content fingerprint an ordinal. Occurrence 1 keeps
+the legacy fingerprint request ID; later calls use
+`<fingerprint>::occurrence::<n>`:
 
-- a same-content call re-arriving **sequentially within ONE live instance** is
-  treated as a distinct call — forwarded again with its own invocation id, never
-  collapsed onto the first (this is the case the guard closes);
-- a same-content call re-arriving in a **NEW instance** (worker restart) still
-  replays the persisted response from the durable ledger — recovery, no re-bill —
-  because each instance starts with an empty `_locally_served`;
-- **concurrent in-flight** retries still dedup on the content fingerprint — the
-  sibling has already committed to the shared seed before `_locally_served` is
-  marked at serve completion.
+- sequential and concurrent independent same-content calls receive different,
+  deterministic invocation IDs;
+- a restarted deterministic stage starts again at occurrence 1 and replays each
+  persisted occurrence in order, including the second and later calls;
+- a failed tail occurrence rolls back the ordinal, so a sequential retry reuses
+  the same invocation ID instead of splitting billing and attribution.
 
-`_locally_served` is marked **only on a committed success** — a cached
-successful response (or a replay of one). A **failed** forward (upstream error,
-exception, or a **truncated SSE stream** that closed without its
-`response.completed` / `[DONE]` terminal marker) marks nothing, so an
-in-instance retry of that same logical call reuses the same content-keyed seed
-and the same invocation id (no double-billing, no split attribution). A
-truncated stream is also marked `failed` (not cached), so a restart recovers by
-re-forwarding instead of replaying a broken response forever.
+Responses SSE completion is parsed structurally. Only an
+`event: response.completed`, a JSON data object whose `type` is
+`response.completed`, or the exact `data: [DONE]` sentinel is terminal. EOF
+without one is failed and not cached; model text containing the words
+`response.completed` cannot falsely commit a truncated stream.
 
 Callers that can supply a stable identity (native tool paths) set
-`X-OpenMontage-Logical-Call-Id`, used strictly with no fallback. Residual edges:
-
-- **concurrent**: two **concurrent** same-content arrivals AFTER the instance
-  already served that content both forward (each gets a distinct seed) — the
-  conservative choice (prefer a possible double-bill over any wrong-merge), far
-  rarer than the sequential distinct calls the guard now handles;
-- **restart**: within one instance the 2nd..Nth distinct same-content call gets
-  a random `::distinct::` uuid seed that cannot be re-derived after a restart,
-  so crash-restart replays the 1st such call from the ledger but **re-forwards**
-  the 2nd..Nth (a re-bill for those). No caller re-supplies that random seed.
-
-Both residuals are inherent to having no native per-call identity; a native
-Codex per-call identity removes the guard (and both residuals) entirely.
+`X-OpenMontage-Logical-Call-Id`, used strictly with no fallback. Without that
+identity, recovery assumes same-content calls occur in the same order when a
+stage restarts. Identical bytes cannot reveal whether reordered or hedged calls
+are retries or distinct calls; native per-call identity removes that residual.
 
 Every fingerprint-keyed replay is also logged at INFO with
 `replay_key_source="content_fingerprint"` (vs `"logical_call_id"`), and the CLI
@@ -79,11 +66,11 @@ re-verified behaviorally — see the probe in `docs/codex_capability_probe.json`
 belongs to `RawMcpServerConfig` / MCP servers and is resolved once executor-side
 (static-per-process), so any identity derived from it would collapse every call
 in a stage onto one id. There is no model-request-level per-call header or
-`Idempotency-Key`. The per-instance guard closes the same-instance wrong-merge
-without that capability, but it is a heuristic; a native Codex per-call identity
-would let replay key strictly on per-call identity and remove the guard (and its
-concurrent-after-complete residual edge) entirely. The capability probe tracks
-when that arrives.
+`Idempotency-Key`. The occurrence sequence closes deterministic sequential,
+concurrent, and restart recovery paths without that capability. A native Codex
+per-call identity would let replay key strictly on the call itself and remove
+the remaining call-order assumption. The capability probe tracks when that
+arrives.
 
 ### Capability probe
 
@@ -109,8 +96,8 @@ strict CI job re-runs this probe against the new binary.
 
 ### When a native per-call identity arrives
 
-Remove the `_locally_served` guard AND the content-fingerprint replay fallback in
-`delegation_proxy.py`, key all replay on per-call identity, set
+Remove the content-fingerprint occurrence fallback in `delegation_proxy.py`,
+key all replay on per-call identity, set
 `capability_present=true`, close this entry (status → CLOSED), and update the
 manifest. The probe test `test_fingerprint_fallback_presence_matches_recorded_capability`
 fails until that cleanup lands.
