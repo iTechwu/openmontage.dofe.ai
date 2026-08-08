@@ -39,14 +39,19 @@ the legacy fingerprint request ID; later calls use
   deterministic invocation IDs;
 - a restarted deterministic stage starts again at occurrence 1 and replays each
   persisted occurrence in order, including the second and later calls;
-- a failed tail occurrence rolls back the ordinal, so a sequential retry reuses
-  the same invocation ID instead of splitting billing and attribution.
+- every failed occurrence remains retryable until one retry claims its ordinal,
+  so a retry reuses the same invocation ID even when a later concurrent
+  occurrence completed first.
 
-Responses SSE completion is parsed structurally. Only an
-`event: response.completed`, a JSON data object whose `type` is
-`response.completed`, or the exact `data: [DONE]` sentinel is terminal. EOF
-without one is failed and not cached; model text containing the words
-`response.completed` cannot falsely commit a truncated stream.
+Responses SSE completion is parsed structurally. Only a fully framed JSON data
+object whose `type` is `response.completed`, or the exact `data: [DONE]`
+sentinel, is terminal; the `event: response.completed` field alone is
+insufficient. CR, LF, and CRLF line endings are all accepted. EOF without a
+terminal frame is failed and not cached, so model text or malformed data
+containing the words `response.completed` cannot falsely commit a truncated
+stream. The proxy requests identity encoding upstream and rejects a successful
+SSE response using an encoding unavailable to its HTTP decoder before forwarding
+undecodable bytes.
 
 Callers that can supply a stable identity (native tool paths) set
 `X-OpenMontage-Logical-Call-Id`, used strictly with no fallback. Without that

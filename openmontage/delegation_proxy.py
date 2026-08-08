@@ -34,6 +34,12 @@ _HOP_HEADERS = {
 _MAX_REQUEST_BYTES = 32 * 1024 * 1024
 _MAX_CACHED_RESPONSE_BYTES = 8 * 1024 * 1024
 _LOGGER = logging.getLogger("openmontage.delegation_proxy")
+_UPSTREAM_ACCEPT_ENCODING = "identity"
+_SUPPORTED_UPSTREAM_CONTENT_ENCODINGS = frozenset(
+    encoding.strip().lower()
+    for encoding in requests.utils.DEFAULT_ACCEPT_ENCODING.split(",")
+    if encoding.strip()
+) | {"identity"}
 # The Codex CLI revision the KB-001 analysis below was verified against. This is
 # the single code-side source of that version: it is kept in sync with
 # Dockerfile's CODEX_CLI_VERSION (the canonical build-time pin) and with
@@ -61,7 +67,10 @@ PINNED_CODEX_CLI_VERSION = "0.146.0"
 # Responses SSE is complete only when a fully framed event has a JSON `type` of
 # `response.completed`, or an exact `data: [DONE]` sentinel. EOF before that is
 # failed and never cached; generated text or a malformed event merely containing
-# "response.completed" is not a terminal event.
+# "response.completed" is not a terminal event. CR, LF, and CRLF event framing
+# are accepted. Upstream requests use identity encoding; a server that ignores
+# that negotiation is accepted only when the local HTTP decoder supports its
+# declared Content-Encoding.
 #
 # Callers that CAN supply a stable identity (native tool paths) set
 # X-OpenMontage-Logical-Call-Id, which is used strictly and never falls back.
@@ -92,30 +101,61 @@ class _ContentCallSequence:
 class _SSECompletionDetector:
     def __init__(self) -> None:
         self._buffer = bytearray()
+        self._scan_offset = 0
         self.completed = False
 
     def feed(self, chunk: bytes) -> None:
         if self.completed:
             return
         self._buffer.extend(chunk)
-        while delimiter := self._next_delimiter():
+        self._drain_complete_events(final=False)
+
+    def finish(self) -> bool:
+        self._drain_complete_events(final=True)
+        return self.completed
+
+    def _drain_complete_events(self, *, final: bool) -> None:
+        while delimiter := self._next_delimiter(final=final):
             offset, size = delimiter
             event = bytes(self._buffer[:offset])
             del self._buffer[: offset + size]
+            self._scan_offset = 0
             if _sse_event_is_terminal(event):
                 self.completed = True
                 return
 
-    def finish(self) -> bool:
-        return self.completed
+    def _next_delimiter(self, *, final: bool) -> tuple[int, int] | None:
+        offset = self._scan_offset
+        while offset < len(self._buffer):
+            first_size = self._line_ending_size(offset, final=final)
+            if first_size is None:
+                self._scan_offset = offset
+                return None
+            if first_size == 0:
+                offset += 1
+                continue
+            second_offset = offset + first_size
+            second_size = self._line_ending_size(second_offset, final=final)
+            if second_size is None:
+                self._scan_offset = offset
+                return None
+            if second_size:
+                return offset, first_size + second_size
+            offset = second_offset + 1
+        self._scan_offset = offset
+        return None
 
-    def _next_delimiter(self) -> tuple[int, int] | None:
-        candidates = [
-            (offset, len(delimiter))
-            for delimiter in (b"\n\n", b"\r\n\r\n")
-            if (offset := self._buffer.find(delimiter)) >= 0
-        ]
-        return min(candidates) if candidates else None
+    def _line_ending_size(self, offset: int, *, final: bool) -> int | None:
+        if offset >= len(self._buffer):
+            return None
+        if self._buffer[offset] == ord("\n"):
+            return 1
+        if self._buffer[offset] != ord("\r"):
+            return 0
+        next_offset = offset + 1
+        if next_offset < len(self._buffer):
+            return 2 if self._buffer[next_offset] == ord("\n") else 1
+        return 1 if final else None
 
 
 def _sse_event_is_terminal(event: bytes) -> bool:
@@ -181,11 +221,19 @@ def _is_responses_path(path: str) -> bool:
     return urlparse(path).path.rstrip("/").endswith("/responses")
 
 
-def _send_response(
+def _content_encoding_is_supported(value: str) -> bool:
+    encodings = {
+        encoding.strip().lower()
+        for encoding in value.split(",")
+        if encoding.strip()
+    }
+    return encodings <= _SUPPORTED_UPSTREAM_CONTENT_ENCODINGS
+
+
+def _start_response(
     handler: BaseHTTPRequestHandler,
     status_code: int,
     headers: dict[str, str],
-    body: bytes,
 ) -> None:
     handler.send_response(status_code)
     for key, value in headers.items():
@@ -193,6 +241,15 @@ def _send_response(
             handler.send_header(key, value)
     handler.send_header("Connection", "close")
     handler.end_headers()
+
+
+def _send_response(
+    handler: BaseHTTPRequestHandler,
+    status_code: int,
+    headers: dict[str, str],
+    body: bytes,
+) -> None:
+    _start_response(handler, status_code, headers)
     handler.wfile.write(body)
 
 
@@ -284,6 +341,21 @@ class DelegationSigningProxy:
             sequence.pending.discard(ordinal)
             if not succeeded:
                 sequence.failed.add(ordinal)
+
+    def _settle_failed_forward(
+        self,
+        fingerprint: str,
+        content_ordinal: int | None,
+        invocation_id: str,
+    ) -> None:
+        if self.invocation_store is not None:
+            self.invocation_store.mark(invocation_id, "failed")
+        if content_ordinal is not None:
+            self._finish_content_call(
+                fingerprint,
+                content_ordinal,
+                succeeded=False,
+            )
 
     def _forward(self, handler: BaseHTTPRequestHandler) -> None:
         response_cached = False
@@ -391,6 +463,7 @@ class DelegationSigningProxy:
                 if key.lower() not in _HOP_HEADERS
             }
             headers["Authorization"] = f"Bearer {self.credential.api_key}"
+            headers["Accept-Encoding"] = _UPSTREAM_ACCEPT_ENCODING
             headers.update(self.credential.signed_headers(model_invocation_id=invocation_id))
             upstream = requests.request(
                 handler.command,
@@ -409,10 +482,11 @@ class DelegationSigningProxy:
             if upstream.headers.get("Content-Type", "").lower().split(";", 1)[0].strip() == (
                 "text/event-stream"
             ):
+                content_encoding = upstream.headers.get("Content-Encoding", "")
                 # Completion markers live in the decoded SSE representation.
                 # Forward and cache those decoded bytes, and remove the stale
                 # transfer representation metadata from the upstream response.
-                response_headers = {
+                decoded_response_headers = {
                     key: value
                     for key, value in response_headers.items()
                     if key.lower() != "content-encoding"
@@ -421,27 +495,48 @@ class DelegationSigningProxy:
                     # The status already makes this stream terminal. Close it
                     # without waiting for an unbounded error body, and publish
                     # the retryable occurrence before the client sees failure.
-                    if self.invocation_store is not None:
-                        self.invocation_store.mark(invocation_id, "failed")
-                    if content_ordinal is not None:
-                        self._finish_content_call(
-                            fingerprint,
-                            content_ordinal,
-                            succeeded=False,
-                        )
-                        content_ordinal = None
-                    handler.send_response(upstream.status_code)
-                    for key, value in response_headers.items():
-                        handler.send_header(key, value)
-                    handler.send_header("Connection", "close")
-                    handler.end_headers()
+                    self._settle_failed_forward(
+                        fingerprint,
+                        content_ordinal,
+                        invocation_id,
+                    )
+                    content_ordinal = None
+                    _start_response(
+                        handler,
+                        upstream.status_code,
+                        decoded_response_headers,
+                    )
                     response_started = True
                     return
-                handler.send_response(upstream.status_code)
-                for key, value in response_headers.items():
-                    handler.send_header(key, value)
-                handler.send_header("Connection", "close")
-                handler.end_headers()
+                if not _content_encoding_is_supported(content_encoding):
+                    self._settle_failed_forward(
+                        fingerprint,
+                        content_ordinal,
+                        invocation_id,
+                    )
+                    content_ordinal = None
+                    error_body = json.dumps(
+                        {
+                            "error": {
+                                "code": "OPENMONTAGE_UNSUPPORTED_CONTENT_ENCODING",
+                                "message": (
+                                    "Upstream SSE response used unsupported "
+                                    f"Content-Encoding: {content_encoding}"
+                                ),
+                            }
+                        },
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    _send_response(
+                        handler,
+                        502,
+                        {"Content-Type": "application/json"},
+                        error_body,
+                    )
+                    response_started = True
+                    return
+                response_headers = decoded_response_headers
+                _start_response(handler, upstream.status_code, response_headers)
                 response_started = True
                 response_body = bytearray()
                 can_buffer = True

@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Event, Lock, Thread, get_ident
 
+import pytest
 import requests
 
 import openmontage.delegation_proxy as delegation_proxy
@@ -48,6 +49,7 @@ def test_loopback_proxy_overwrites_auth_and_signs_each_agent_request() -> None:
             captured["path"] = self.path
             for name in (
                 "Authorization",
+                "Accept-Encoding",
                 "X-Dofe-Pipeline-Stage",
                 "X-Dofe-Model-Invocation-Id",
                 "X-Dofe-Attribution-Timestamp",
@@ -83,7 +85,11 @@ def test_loopback_proxy_overwrites_auth_and_signs_each_agent_request() -> None:
         with DelegationSigningProxy(credential) as proxy:
             response = requests.post(
                 f"{proxy.base_url}/v1/responses",
-                headers={"Authorization": "Bearer untrusted", "X-Request-Id": "codex-request-1"},
+                headers={
+                    "Accept-Encoding": "br",
+                    "Authorization": "Bearer untrusted",
+                    "X-Request-Id": "codex-request-1",
+                },
                 json={"model": "gpt-test", "input": "hello"},
                 timeout=5,
             )
@@ -94,6 +100,7 @@ def test_loopback_proxy_overwrites_auth_and_signs_each_agent_request() -> None:
         thread.join(timeout=2)
 
     assert captured["path"] == "/api/v1/responses"
+    assert captured["Accept-Encoding"] == "identity"
     assert captured["Authorization"] == "Bearer delegated-api-key"
     assert captured["X-Dofe-Pipeline-Stage"] == "research"
     invocation_id = captured["X-Dofe-Model-Invocation-Id"]
@@ -540,15 +547,36 @@ def test_proxy_rejects_reused_logical_call_id_with_different_request(tmp_path) -
     assert len(forwarded) == 1
 
 
-def test_proxy_replays_persisted_event_stream_after_restart(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "event_separator",
+    (
+        b"\n\n",
+        b"\r\n\r\n",
+        b"\r\r",
+        b"\r\n\n",
+        b"\n\r\n",
+        b"\n\r",
+        b"\r\n\r",
+    ),
+    ids=("lf", "crlf", "cr", "crlf-lf", "lf-crlf", "lf-cr", "crlf-cr"),
+)
+def test_proxy_replays_persisted_event_stream_after_restart(
+    tmp_path,
+    event_separator: bytes,
+) -> None:
     forwarded = 0
+    body = (
+        b"event: response.completed\r\n"
+        b'data: {"type":"response.completed",\r\n'
+        b'data: "response":{"status":"completed"}}'
+        + event_separator
+    )
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802
             nonlocal forwarded
             forwarded += 1
             self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            body = b"data: done\n\ndata: [DONE]\n\n"
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Content-Length", str(len(body)))
@@ -581,13 +609,105 @@ def test_proxy_replays_persisted_event_stream_after_restart(tmp_path) -> None:
                     json={"model": "gpt-test", "stream": True},
                     timeout=5,
                 )
-                assert response.content == b"data: done\n\ndata: [DONE]\n\n"
+                assert response.content == body
     finally:
         upstream.shutdown()
         upstream.server_close()
         thread.join(timeout=2)
 
     assert forwarded == 1
+
+
+@pytest.mark.parametrize(
+    "event_separator",
+    (b"\n\n", b"\r\n\r\n", b"\r\r", b"\r\n\n", b"\n\r\n", b"\n\r", b"\r\n\r"),
+)
+def test_sse_detector_preserves_crlf_at_every_chunk_boundary(
+    event_separator: bytes,
+) -> None:
+    body = (
+        b"event: response.completed\r\n"
+        b'data: {"type":"response.completed",\r\n'
+        b'data: "response":{"status":"completed"}}'
+        + event_separator
+    )
+
+    for split_at in range(len(body) + 1):
+        detector = delegation_proxy._SSECompletionDetector()
+        detector.feed(body[:split_at])
+        detector.feed(body[split_at:])
+        assert detector.finish(), f"completion missed at byte split {split_at}"
+
+
+def test_sse_detector_scans_large_events_incrementally() -> None:
+    class CountingDetector(delegation_proxy._SSECompletionDetector):
+        checks = 0
+
+        def _line_ending_size(self, offset: int, *, final: bool) -> int | None:
+            self.checks += 1
+            return super()._line_ending_size(offset, final=final)
+
+    body = b":" + (b"x" * (256 * 1024)) + b"\r\ndata: [DONE]\r\n\r\n"
+    detector = CountingDetector()
+    for offset in range(0, len(body), 1024):
+        detector.feed(body[offset : offset + 1024])
+
+    assert detector.finish()
+    assert detector.checks <= len(body) + 1024
+
+
+def test_proxy_rejects_unsupported_upstream_event_stream_encoding(tmp_path) -> None:
+    captured_accept_encoding = ""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            nonlocal captured_accept_encoding
+            captured_accept_encoding = self.headers.get("Accept-Encoding", "")
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = b"unsupported-compressed-bytes"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Encoding", "br")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = upstream.server_address
+        credential = DelegatedModelCredential(
+            api_key="delegated-api-key",
+            models_base_url=f"http://{host}:{port}/api",
+            delegation_id="delegation-1",
+            external_job_id="job-unsupported-encoding",
+            pipeline_stage="script",
+            runtime_credential_id="runtime-credential-1",
+            expires_at="2099-08-06T09:00:01Z",
+        )
+        store = ModelInvocationStore(tmp_path / "jobs.sqlite3")
+        with DelegationSigningProxy(credential, invocation_store=store) as proxy:
+            response = requests.post(
+                f"{proxy.base_url}/v1/responses",
+                headers={"Accept-Encoding": "br"},
+                json={"model": "gpt-test", "stream": True},
+                timeout=5,
+            )
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+    assert captured_accept_encoding == "identity"
+    assert response.status_code == 502
+    assert response.headers.get("Content-Encoding") is None
+    assert response.json()["error"]["code"] == (
+        "OPENMONTAGE_UNSUPPORTED_CONTENT_ENCODING"
+    )
 
 
 def test_proxy_forwards_event_stream_before_upstream_completes(tmp_path) -> None:
@@ -1524,9 +1644,8 @@ def test_proxy_retries_failed_forward_with_same_invocation_id_within_one_instanc
     served, so an in-instance retry reuses the same content-keyed seed — the
     same invocation id — instead of minting a distinct one.
 
-    A failed tail occurrence rolls its stable ordinal back, so the 504 and the
-    retry land on one invocation id instead of splitting billing and
-    attribution."""
+    A failed occurrence stays retryable until claimed, so the 504 and its retry
+    land on one invocation id instead of splitting billing and attribution."""
     forwarded = 0
     invocation_ids: list[str] = []
 
