@@ -58,6 +58,11 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, BaseTool] = {}
         self._discovered_packages: set[str] = set()
+        # Packages whose discovery walk is currently in flight. A module
+        # imported during discover() may itself call registry.get(); without
+        # this guard that lookup would re-enter discover() and recurse before
+        # _discovered_packages is populated at the end of the walk.
+        self._discovering: set[str] = set()
 
     def register(self, tool: BaseTool) -> None:
         """Register a tool instance."""
@@ -69,6 +74,7 @@ class ToolRegistry:
         """Clear registered tools and discovery state."""
         self._tools.clear()
         self._discovered_packages.clear()
+        self._discovering.clear()
 
     def register_module(self, module: ModuleType) -> list[str]:
         """Register all concrete BaseTool subclasses defined in a module."""
@@ -135,11 +141,30 @@ class ToolRegistry:
 
     def ensure_discovered(self, package_name: str = "tools") -> None:
         """Load tool modules once before reporting capabilities."""
-        if package_name not in self._discovered_packages:
+        if package_name in self._discovered_packages:
+            return
+        if package_name in self._discovering:
+            # Re-entrant call during discovery: a tool module's import is
+            # itself querying the registry. Return without re-walking so the
+            # caller sees whatever has been registered so far this pass.
+            return
+        self._discovering.add(package_name)
+        try:
             self.discover(package_name)
+        finally:
+            self._discovering.discard(package_name)
 
     def get(self, name: str) -> Optional[BaseTool]:
-        """Get a tool by name."""
+        """Get a tool by name.
+
+        Lazily discovers the default ``tools`` package on first lookup, so a
+        caller that forgets ``registry.discover()`` still resolves a registered
+        tool instead of silently getting ``None`` and crashing later with a
+        misleading ``AttributeError``. Discovery is memoized, so repeated
+        ``get()`` calls pay the import cost exactly once per process.
+        """
+        if name not in self._tools:
+            self.ensure_discovered()
         return self._tools.get(name)
 
     def list_all(self) -> list[str]:
