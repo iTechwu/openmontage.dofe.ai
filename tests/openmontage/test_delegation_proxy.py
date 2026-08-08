@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import gzip
 import hashlib
 import hmac
 import logging
@@ -1384,6 +1385,138 @@ def test_proxy_does_not_treat_model_text_as_event_stream_completion(tmp_path) ->
     assert b'"type":"response.completed"' in responses[1].content
 
 
+def test_proxy_does_not_cache_unframed_truncated_completion_event(tmp_path) -> None:
+    forwarded = 0
+    truncated = (
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":'
+    )
+    completed = (
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed",'
+        b'"response":{"status":"completed"}}\n\n'
+    )
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            nonlocal forwarded
+            forwarded += 1
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = truncated if forwarded == 1 else completed
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = upstream.server_address
+        credential = DelegatedModelCredential(
+            api_key="delegated-api-key",
+            models_base_url=f"http://{host}:{port}/api",
+            delegation_id="delegation-1",
+            external_job_id="job-unframed-completion",
+            pipeline_stage="script",
+            runtime_credential_id="runtime-credential-1",
+            expires_at="2099-08-06T09:00:01Z",
+        )
+        store = ModelInvocationStore(tmp_path / "jobs.sqlite3")
+        responses = []
+        for _ in range(2):
+            with DelegationSigningProxy(credential, invocation_store=store) as proxy:
+                responses.append(
+                    requests.post(
+                        f"{proxy.base_url}/v1/responses",
+                        json={"model": "gpt-test", "stream": True},
+                        timeout=5,
+                    )
+                )
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+    assert forwarded == 2
+    assert responses[0].content == truncated
+    assert responses[1].content == completed
+
+
+def test_sse_completion_requires_valid_completed_event_data() -> None:
+    completion = delegation_proxy._SSECompletionDetector()
+
+    completion.feed(
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":\n\n'
+    )
+
+    assert completion.finish() is False
+
+
+def test_proxy_decodes_compressed_event_stream_before_completion_detection(tmp_path) -> None:
+    forwarded = 0
+    completed = (
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed",'
+        b'"response":{"status":"completed"}}\n\n'
+    )
+    compressed = gzip.compress(completed)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            nonlocal forwarded
+            forwarded += 1
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(compressed)))
+            self.end_headers()
+            self.wfile.write(compressed)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = upstream.server_address
+        credential = DelegatedModelCredential(
+            api_key="delegated-api-key",
+            models_base_url=f"http://{host}:{port}/api",
+            delegation_id="delegation-1",
+            external_job_id="job-compressed-stream",
+            pipeline_stage="script",
+            runtime_credential_id="runtime-credential-1",
+            expires_at="2099-08-06T09:00:01Z",
+        )
+        store = ModelInvocationStore(tmp_path / "jobs.sqlite3")
+        responses = []
+        for _ in range(2):
+            with DelegationSigningProxy(credential, invocation_store=store) as proxy:
+                responses.append(
+                    requests.post(
+                        f"{proxy.base_url}/v1/responses",
+                        json={"model": "gpt-test", "stream": True},
+                        timeout=5,
+                    )
+                )
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+    assert forwarded == 1
+    assert [response.content for response in responses] == [completed, completed]
+    assert all("Content-Encoding" not in response.headers for response in responses)
+
+
 def test_proxy_retries_failed_forward_with_same_invocation_id_within_one_instance(
     tmp_path,
 ) -> None:
@@ -1452,4 +1585,189 @@ def test_proxy_retries_failed_forward_with_same_invocation_id_within_one_instanc
     assert [first.status_code, second.status_code] == [504, 200]
     assert forwarded == 2
     # Same logical call retried within one instance → one invocation id (no split).
+    assert len(set(invocation_ids)) == 1
+
+
+def test_proxy_retries_earlier_concurrent_failure_with_same_invocation_id(
+    tmp_path,
+) -> None:
+    second_call_finished = Event()
+    request_ids_by_invocation: dict[str, str] = {}
+    upstream_invocations: dict[str, list[str]] = {"first": [], "second": []}
+    first_attempts = 0
+
+    class TrackingStore(ModelInvocationStore):
+        def get_or_create(self, **kwargs):
+            record = super().get_or_create(**kwargs)
+            request_ids_by_invocation[record.model_invocation_id] = kwargs["request_id"]
+            return record
+
+    class CoordinatedProxy(DelegationSigningProxy):
+        def _finish_content_call(self, fingerprint, ordinal, *, succeeded):
+            super()._finish_content_call(
+                fingerprint,
+                ordinal,
+                succeeded=succeeded,
+            )
+            if ordinal == 2 and succeeded:
+                second_call_finished.set()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            nonlocal first_attempts
+            invocation_id = self.headers.get("X-Dofe-Model-Invocation-Id", "")
+            request_id = request_ids_by_invocation[invocation_id]
+            is_second = request_id.endswith("::occurrence::2")
+            key = "second" if is_second else "first"
+            upstream_invocations[key].append(invocation_id)
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            if is_second:
+                status = 200
+            else:
+                first_attempts += 1
+                if first_attempts == 1:
+                    assert second_call_finished.wait(timeout=5)
+                    status = 504
+                else:
+                    status = 200
+            body = b'{"ok":true}' if status == 200 else b'{"error":"timeout"}'
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = upstream.server_address
+        credential = DelegatedModelCredential(
+            api_key="delegated-api-key",
+            models_base_url=f"http://{host}:{port}/api",
+            delegation_id="delegation-1",
+            external_job_id="job-concurrent-retry",
+            pipeline_stage="script",
+            runtime_credential_id="runtime-credential-1",
+            expires_at="2099-08-06T09:00:01Z",
+        )
+        store = TrackingStore(tmp_path / "jobs.sqlite3")
+        payload = {"model": "gpt-test", "input": "same"}
+        with CoordinatedProxy(credential, invocation_store=store) as proxy:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(
+                        requests.post,
+                        f"{proxy.base_url}/v1/responses",
+                        json=payload,
+                        timeout=5,
+                    )
+                    for _ in range(2)
+                ]
+                concurrent = [future.result(timeout=5) for future in futures]
+            retry = requests.post(
+                f"{proxy.base_url}/v1/responses",
+                json=payload,
+                timeout=5,
+            )
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+    assert sorted(response.status_code for response in concurrent) == [200, 504]
+    assert retry.status_code == 200
+    assert len(upstream_invocations["first"]) == 2
+    assert len(set(upstream_invocations["first"])) == 1
+    assert len(upstream_invocations["second"]) == 1
+
+
+def test_proxy_reuses_pending_failed_stream_invocation_for_immediate_retry(
+    tmp_path,
+) -> None:
+    release_failed_stream = Event()
+    retry_entered_allocation = Event()
+    invocation_ids: list[str] = []
+    upstream_calls = 0
+    allocation_calls = 0
+    allocation_lock = Lock()
+
+    class CoordinatedProxy(DelegationSigningProxy):
+        def _allocate_content_call(self, fingerprint):
+            nonlocal allocation_calls
+            with allocation_lock:
+                allocation_calls += 1
+                if allocation_calls == 2:
+                    retry_entered_allocation.set()
+            return super()._allocate_content_call(fingerprint)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            nonlocal upstream_calls
+            upstream_calls += 1
+            invocation_ids.append(self.headers.get("X-Dofe-Model-Invocation-Id", ""))
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            if upstream_calls == 1:
+                self.send_response(504)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                self.wfile.flush()
+                assert release_failed_stream.wait(timeout=5)
+                return
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = upstream.server_address
+        credential = DelegatedModelCredential(
+            api_key="delegated-api-key",
+            models_base_url=f"http://{host}:{port}/api",
+            delegation_id="delegation-1",
+            external_job_id="job-pending-stream-retry",
+            pipeline_stage="script",
+            runtime_credential_id="runtime-credential-1",
+            expires_at="2099-08-06T09:00:01Z",
+        )
+        store = ModelInvocationStore(tmp_path / "jobs.sqlite3")
+        payload = {"model": "gpt-test", "stream": True}
+        with CoordinatedProxy(credential, invocation_store=store) as proxy:
+            first = requests.post(
+                f"{proxy.base_url}/v1/responses",
+                json=payload,
+                stream=True,
+                timeout=5,
+            )
+            assert first.status_code == 504
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                retry_future = executor.submit(
+                    requests.post,
+                    f"{proxy.base_url}/v1/responses",
+                    json=payload,
+                    timeout=5,
+                )
+                assert retry_entered_allocation.wait(timeout=1)
+                retry = retry_future.result(timeout=2)
+                release_failed_stream.set()
+            first.close()
+    finally:
+        release_failed_stream.set()
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+    assert retry.status_code == 200
+    assert upstream_calls == 2
     assert len(set(invocation_ids)) == 1

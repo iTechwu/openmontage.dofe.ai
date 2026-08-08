@@ -54,13 +54,14 @@ PINNED_CODEX_CLI_VERSION = "0.146.0"
 # `<fingerprint>::occurrence::<n>`. Allocation is atomic, so concurrent distinct
 # calls receive different invocation ids. A restarted deterministic stage begins
 # again at occurrence 1 and replays every persisted occurrence in the same order.
-# A failed tail occurrence rolls back its ordinal, so a sequential retry reuses
-# the same invocation id instead of splitting billing and attribution.
+# Failed occurrences remain retryable until one retry claims that ordinal, so a
+# sequential retry reuses the same invocation id even when a later concurrent
+# occurrence completed first.
 #
-# Responses SSE is complete only when a structurally parsed event has
-# `event: response.completed`, a JSON `type` of `response.completed`, or an exact
-# `data: [DONE]` sentinel. EOF before that is failed and never cached; generated
-# text merely containing "response.completed" is not a terminal event.
+# Responses SSE is complete only when a fully framed event has a JSON `type` of
+# `response.completed`, or an exact `data: [DONE]` sentinel. EOF before that is
+# failed and never cached; generated text or a malformed event merely containing
+# "response.completed" is not a terminal event.
 #
 # Callers that CAN supply a stable identity (native tool paths) set
 # X-OpenMontage-Logical-Call-Id, which is used strictly and never falls back.
@@ -106,8 +107,6 @@ class _SSECompletionDetector:
                 return
 
     def finish(self) -> bool:
-        if not self.completed and self._buffer:
-            self.completed = _sse_event_is_terminal(bytes(self._buffer))
         return self.completed
 
     def _next_delimiter(self) -> tuple[int, int] | None:
@@ -120,7 +119,6 @@ class _SSECompletionDetector:
 
 
 def _sse_event_is_terminal(event: bytes) -> bool:
-    event_name = b""
     data_lines: list[bytes] = []
     normalized = event.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
     for line in normalized.split(b"\n"):
@@ -129,12 +127,8 @@ def _sse_event_is_terminal(event: bytes) -> bool:
         field_name, separator, value = line.partition(b":")
         if separator and value.startswith(b" "):
             value = value[1:]
-        if field_name == b"event":
-            event_name = value.strip()
-        elif field_name == b"data":
+        if field_name == b"data":
             data_lines.append(value)
-    if event_name == b"response.completed":
-        return True
     data = b"\n".join(data_lines).strip()
     if data == b"[DONE]":
         return True
@@ -269,8 +263,12 @@ class DelegationSigningProxy:
             sequence = self._content_call_sequences.setdefault(
                 fingerprint, _ContentCallSequence()
             )
-            ordinal = sequence.next_ordinal
-            sequence.next_ordinal += 1
+            if sequence.failed:
+                ordinal = min(sequence.failed)
+                sequence.failed.remove(ordinal)
+            else:
+                ordinal = sequence.next_ordinal
+                sequence.next_ordinal += 1
             sequence.pending.add(ordinal)
             return ordinal
 
@@ -284,18 +282,8 @@ class DelegationSigningProxy:
         with self._content_call_sequences_lock:
             sequence = self._content_call_sequences[fingerprint]
             sequence.pending.discard(ordinal)
-            if succeeded:
-                sequence.failed = {
-                    failed for failed in sequence.failed if failed > ordinal
-                }
-                return
-            sequence.failed.add(ordinal)
-            while sequence.next_ordinal > 1:
-                tail = sequence.next_ordinal - 1
-                if tail not in sequence.failed:
-                    break
-                sequence.failed.remove(tail)
-                sequence.next_ordinal = tail
+            if not succeeded:
+                sequence.failed.add(ordinal)
 
     def _forward(self, handler: BaseHTTPRequestHandler) -> None:
         response_cached = False
@@ -421,6 +409,34 @@ class DelegationSigningProxy:
             if upstream.headers.get("Content-Type", "").lower().split(";", 1)[0].strip() == (
                 "text/event-stream"
             ):
+                # Completion markers live in the decoded SSE representation.
+                # Forward and cache those decoded bytes, and remove the stale
+                # transfer representation metadata from the upstream response.
+                response_headers = {
+                    key: value
+                    for key, value in response_headers.items()
+                    if key.lower() != "content-encoding"
+                }
+                if upstream.status_code >= 400:
+                    # The status already makes this stream terminal. Close it
+                    # without waiting for an unbounded error body, and publish
+                    # the retryable occurrence before the client sees failure.
+                    if self.invocation_store is not None:
+                        self.invocation_store.mark(invocation_id, "failed")
+                    if content_ordinal is not None:
+                        self._finish_content_call(
+                            fingerprint,
+                            content_ordinal,
+                            succeeded=False,
+                        )
+                        content_ordinal = None
+                    handler.send_response(upstream.status_code)
+                    for key, value in response_headers.items():
+                        handler.send_header(key, value)
+                    handler.send_header("Connection", "close")
+                    handler.end_headers()
+                    response_started = True
+                    return
                 handler.send_response(upstream.status_code)
                 for key, value in response_headers.items():
                     handler.send_header(key, value)
@@ -432,7 +448,7 @@ class DelegationSigningProxy:
                 downstream_open = True
                 completion = _SSECompletionDetector()
                 while True:
-                    chunk = upstream.raw.read1(64 * 1024, decode_content=False)
+                    chunk = upstream.raw.read1(64 * 1024, decode_content=True)
                     if not chunk:
                         break
                     completion.feed(chunk)
