@@ -778,6 +778,87 @@ def test_proxy_forwards_event_stream_before_upstream_completes(tmp_path) -> None
     assert body == b"data: first\n\ndata: done\n\ndata: [DONE]\n\n"
 
 
+def test_proxy_ends_stream_promptly_when_upstream_holds_connection_open(tmp_path) -> None:
+    """Once the terminal frame is forwarded and cached, the proxy must stop
+    reading, close upstream, and release the invocation lock — not block on
+    HTTP EOF (bounded only by the 3600s read timeout) when an upstream keeps
+    the connection open after response.completed / [DONE].
+
+    Upstream writes the complete terminal stream, then deliberately holds the
+    socket open until the test releases it. The client request must return the
+    full body promptly; under the bug it would block on upstream EOF until the
+    client's read timeout fires."""
+    terminal_written = Event()
+    release_upstream = Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(
+                b"event: response.completed\n"
+                b'data: {"type":"response.completed",'
+                b'"response":{"status":"completed"}}\n\n'
+                b"data: [DONE]\n\n"
+            )
+            self.wfile.flush()
+            terminal_written.set()
+            # Hold the connection open well past the client's read timeout.
+            release_upstream.wait(timeout=30)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = upstream.server_address
+        credential = DelegatedModelCredential(
+            api_key="delegated-api-key",
+            models_base_url=f"http://{host}:{port}/api",
+            delegation_id="delegation-1",
+            external_job_id="job-held-open-stream",
+            pipeline_stage="script",
+            runtime_credential_id="runtime-credential-1",
+            expires_at="2099-08-06T09:00:01Z",
+        )
+        store = ModelInvocationStore(tmp_path / "jobs.sqlite3")
+        with DelegationSigningProxy(credential, invocation_store=store) as proxy:
+            start = time.monotonic()
+            response = requests.post(
+                f"{proxy.base_url}/v1/responses",
+                headers={"X-Request-Id": "held-open-stream-request"},
+                json={"model": "gpt-test", "stream": True},
+                timeout=10,
+            )
+            elapsed = time.monotonic() - start
+            # Upstream sent the terminal marker and is still holding its socket
+            # open — the proxy returned without waiting for that EOF.
+            assert terminal_written.is_set()
+            assert not release_upstream.is_set()
+    finally:
+        release_upstream.set()
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=5)
+
+    expected = (
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed",'
+        b'"response":{"status":"completed"}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    assert response.status_code == 200
+    assert response.content == expected
+    # Milliseconds with the fix; ~10s ReadTimeout under the bug.
+    assert elapsed < 5.0
+    # The completed stream was cached as success and the ledger settled.
+    assert store.list_recoverable(job_id="job-held-open-stream") == []
+
+
 def test_proxy_advances_same_content_sequence_for_event_stream_without_store() -> None:
     invocation_ids: list[str] = []
     body = b"data: done\n\ndata: [DONE]\n\n"

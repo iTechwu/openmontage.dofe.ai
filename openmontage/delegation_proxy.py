@@ -559,6 +559,16 @@ class DelegationSigningProxy:
                             handler.wfile.flush()
                         except OSError:
                             downstream_open = False
+                    # A terminal frame (response.completed / [DONE]) ends the
+                    # SSE stream. The chunk holding it has already been
+                    # forwarded and buffered above, so stop reading now and let
+                    # the finally block close upstream and release the
+                    # invocation lock. Continuing to read would block on HTTP
+                    # EOF — bounded only by the 3600s read timeout — when an
+                    # upstream holds the connection open after the terminal
+                    # marker, pinning the ledger in_flight for up to an hour.
+                    if completion.completed:
+                        break
                 # Only a stream that reached its terminal marker is a success.
                 # A stream that ended without one is truncated.
                 stream_succeeded = completion.finish() and upstream.status_code < 400
