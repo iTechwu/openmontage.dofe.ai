@@ -71,7 +71,9 @@ def test_fallback_tools_declared():
 def test_schema_exposes_image_edit_support():
     tool = DofeImage()
     assert tool.supports["image_edit"] is True
+    assert tool.supports["multi_reference_edit"] is True
     assert "image_path" in tool.input_schema["properties"]
+    assert "image_paths" in tool.input_schema["properties"]
 
 
 # ------------------------------------------------------- selector switch matrix

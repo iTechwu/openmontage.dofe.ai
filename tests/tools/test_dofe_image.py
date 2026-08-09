@@ -67,6 +67,30 @@ def test_reference_image_https_url_passthrough():
     assert payload["content"][1]["part"]["image_url"]["url"] == "https://cdn.test/r.png"
 
 
+def test_multiple_reference_images_preserve_declared_order(tmp_path):
+    local_a = tmp_path / "environment.png"
+    local_b = tmp_path / "vehicle.png"
+    local_a.write_bytes(b"\x89PNG\r\n\x1a\n" + b"environment")
+    local_b.write_bytes(b"\x89PNG\r\n\x1a\n" + b"vehicle")
+
+    payload = _payload(
+        {
+            "prompt": "combine the references",
+            "image_url": "https://cdn.test/primary.png",
+            "image_urls": ["https://cdn.test/secondary.png"],
+            "image_paths": [str(local_a), str(local_b)],
+        }
+    )
+
+    references = payload["content"][1:]
+    assert [block["order"] for block in references] == [1, 2, 3, 4]
+    assert all(block["role"] == "reference" for block in references)
+    assert references[0]["part"]["image_url"]["url"] == "https://cdn.test/primary.png"
+    assert references[1]["part"]["image_url"]["url"] == "https://cdn.test/secondary.png"
+    assert references[2]["part"]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert references[3]["part"]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
 @pytest.mark.parametrize("model", ["seedream-5.0", "seedream-5.0-lite", "seedream-5.0-pro"])
 def test_seedream_payload_never_sends_negative_prompt(model):
     payload = DofeImage()._build_payload(
@@ -128,6 +152,15 @@ def test_negative_prompt_changes_dofe_idempotency_key():
 
     assert tool.idempotency_key(base) != tool.idempotency_key(
         {**base, "negative_prompt": "blurry"}
+    )
+
+
+def test_reference_order_changes_dofe_idempotency_key():
+    tool = DofeImage()
+    base = {"prompt": "x", "model_name": "seedream-5.0"}
+
+    assert tool.idempotency_key({**base, "image_paths": ["a.png", "b.png"]}) != tool.idempotency_key(
+        {**base, "image_paths": ["b.png", "a.png"]}
     )
 
 

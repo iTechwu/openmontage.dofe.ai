@@ -56,10 +56,11 @@ class DofeImage(BaseTool):
         probe=probe_image,
     )
 
-    capabilities = ["generate_image", "text_to_image", "image_edit"]
+    capabilities = ["generate_image", "text_to_image", "image_edit", "multi_reference_edit"]
     supports = {
         "text_to_image": True,
         "image_edit": True,
+        "multi_reference_edit": True,
         "negative_prompt": "model_scoped",
         "seed": True,
         "custom_size": True,
@@ -101,6 +102,16 @@ class DofeImage(BaseTool):
             "seed": {"type": "integer"},
             "image_url": {"type": "string", "description": "https reference image for edit/inpaint."},
             "image_path": {"type": "string", "description": "Local reference image (inlined as a data URI)."},
+            "image_urls": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Ordered https reference images for multi-reference edits.",
+            },
+            "image_paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Ordered local reference images for multi-reference edits.",
+            },
             "model_name": {
                 "type": "string",
                 "description": "Exact ID from GET /v1/models. Overrides DOFE_IMAGE_MODEL.",
@@ -120,6 +131,10 @@ class DofeImage(BaseTool):
     idempotency_key_fields = [
         "prompt",
         "negative_prompt",
+        "image_url",
+        "image_path",
+        "image_urls",
+        "image_paths",
         "width",
         "height",
         "size",
@@ -180,8 +195,14 @@ class DofeImage(BaseTool):
         # CRITICAL (dev-guide §2.3): the text block must NOT carry a role.
         content: list[dict[str, Any]] = [{"part": {"type": "text", "text": prompt}, "order": 0}]
 
+        references: list[tuple[str | None, str | None]] = []
         if inputs.get("image_url") or inputs.get("image_path"):
-            url = resolve_image_source(url=inputs.get("image_url"), path=inputs.get("image_path"))
+            references.append((inputs.get("image_url"), inputs.get("image_path")))
+        references.extend((url, None) for url in inputs.get("image_urls") or [])
+        references.extend((None, path) for path in inputs.get("image_paths") or [])
+
+        for reference_url, reference_path in references:
+            url = resolve_image_source(url=reference_url, path=reference_path)
             content.append(
                 {
                     "part": {"type": "image_url", "image_url": {"url": url}},
