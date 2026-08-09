@@ -31,6 +31,7 @@
               "render_runtime_selection",
               "composition_mode",
               "playbook_selection",
+              "visual_style_selection",
               "fallback_decision",
               "budget_tradeoff",
               "downgrade_approval",
