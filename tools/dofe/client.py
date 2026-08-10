@@ -8,6 +8,8 @@ errors, injectable session) but targets the dofe ``{code,msg,data}`` envelope.
 
 from __future__ import annotations
 
+import base64
+import binascii
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Any
@@ -479,12 +481,22 @@ class DofeClient:
     # ----------------------------------------------------------------- download
 
     def download(self, url: str, output_path: str | Path, *, timeout: int | None = None) -> Path:
-        """Download a presigned artifact URL to ``output_path`` (https only)."""
+        """Download a gateway artifact URL, or decode a bounded data URI."""
 
-        if not is_https_url(url):
-            raise DofeError(f"dofe artifact URL must be https: {sanitize_for_log(url)}")
         destination = Path(output_path)
         destination.parent.mkdir(parents=True, exist_ok=True)
+        if url.startswith("data:"):
+            header, separator, encoded = url.partition(",")
+            if separator == "" or ";base64" not in header.lower():
+                raise DofeError("dofe data artifact must be a base64 data URI")
+            try:
+                content = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise DofeError("dofe data artifact is not valid base64") from exc
+            destination.write_bytes(content)
+            return destination
+        if not is_https_url(url):
+            raise DofeError(f"dofe artifact URL must be https: {sanitize_for_log(url)}")
         try:
             response = self.session.get(url, timeout=timeout or self._read_timeout)
         except requests.RequestException as exc:

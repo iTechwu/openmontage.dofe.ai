@@ -436,6 +436,16 @@ def test_download_rejects_non_https(tmp_path):
         _client().download("http://evil.test/x.png", tmp_path / "img.png")
 
 
+def test_download_decodes_base64_data_artifact(tmp_path):
+    out = _client().download("data:audio/mpeg;base64,QUJDRA==", tmp_path / "speech.mp3")
+    assert out.read_bytes() == b"ABCD"
+
+
+def test_download_rejects_non_base64_data_artifact(tmp_path):
+    with pytest.raises(DofeError, match="base64 data URI"):
+        _client().download("data:audio/mpeg,not-base64", tmp_path / "speech.mp3")
+
+
 def test_download_failure_raises(tmp_path):
     with _rm.Mocker() as m:
         m.get(ARTIFACT_URL, status_code=503)
