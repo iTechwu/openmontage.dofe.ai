@@ -153,6 +153,9 @@ def _credential_free_url(value: Any) -> str | None:
 
     if not isinstance(value, str) or not value:
         return None
+    if value.startswith("data:"):
+        header, _, _ = value.partition(",")
+        return f"{header},<redacted>" if header else "data:<redacted>"
     parts = urlsplit(value)
     return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 

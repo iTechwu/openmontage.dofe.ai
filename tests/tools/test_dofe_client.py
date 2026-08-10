@@ -454,3 +454,10 @@ def test_download_failure_raises(tmp_path):
 def test_presigned_artifact_url_is_redacted_for_tool_results():
     url = "https://assets.example/video.mp4?X-Tos-Credential=temporary&X-Tos-Signature=secret"
     assert _credential_free_url(url) == "https://assets.example/video.mp4"
+
+
+def test_data_artifact_url_is_redacted_without_base64_payload():
+    url = "data:audio/mp3;base64," + ("A" * 10000)
+    redacted = _credential_free_url(url)
+    assert redacted == "data:audio/mp3;base64,<redacted>"
+    assert len(redacted) < 64
