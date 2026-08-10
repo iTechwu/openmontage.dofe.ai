@@ -276,8 +276,8 @@ class DofeVideo(BaseTool):
         if capability.get("endpointKind") != "video_async":
             errors.append("DoFe capability endpointKind is not video_async")
         output = capability.get("output")
-        if not isinstance(output, dict) or output.get("mode") != "task":
-            errors.append("DoFe capability output mode is not task")
+        if not isinstance(output, dict) or output.get("mode") not in {"task", "asset"}:
+            errors.append("DoFe capability output mode is not task/asset")
 
         operation_contract = next(
             (

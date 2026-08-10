@@ -328,7 +328,7 @@ def test_live_preflight_verifies_dofe_reference_contract(monkeypatch):
                     {"key": "generateAudio", "type": "switch", "labelKey": "audio"},
                 ]
             },
-            "output": {"mode": "task"},
+            "output": {"mode": "asset"},
             "readiness": [],
         },
         raising=False,
