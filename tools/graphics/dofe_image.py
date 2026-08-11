@@ -144,7 +144,7 @@ class DofeImage(BaseTool):
             "generation_mode": {
                 "type": "string",
                 "enum": ["generate", "edit"],
-                "description": "Force the operation lane: generate=text/image-to-image, edit=image_edit.",
+                "description": "Generation intent hint. A mask selects image_edit; references without a mask use image_to_image.",
             },
             "background": {
                 "type": "string",
@@ -244,6 +244,22 @@ class DofeImage(BaseTool):
             inputs.get("image_urls") or []
         ) + len(inputs.get("image_paths") or [])
 
+    @classmethod
+    def _resolve_operation(cls, inputs: dict[str, Any]) -> str:
+        """Resolve the DoFe operation from actual asset semantics.
+
+        ``generation_mode=edit`` is an authoring intent, not proof that the
+        request uses the multipart mask-edit contract. Reference-only edits,
+        including Seedream multi-reference composition, belong to the
+        ``image_to_image`` lane.
+        """
+
+        if inputs.get("mask_url") or inputs.get("mask_path"):
+            return "image_edit"
+        if cls._reference_count(inputs) > 0 or inputs.get("generation_mode") == "edit":
+            return "image_to_image"
+        return "text_to_image"
+
     def probe_provider_contract(self, inputs: dict[str, Any]) -> dict[str, Any]:
         """Validate the selected image operation against DoFe's live capability."""
 
@@ -258,13 +274,7 @@ class DofeImage(BaseTool):
 
         reference_count = self._reference_count(inputs)
         has_mask = bool(inputs.get("mask_url") or inputs.get("mask_path"))
-        generation_mode = inputs.get("generation_mode")
-        if generation_mode == "edit" or has_mask:
-            operation = "image_edit"
-        elif reference_count > 0:
-            operation = "image_to_image"
-        else:
-            operation = "text_to_image"
+        operation = self._resolve_operation(inputs)
         try:
             client = DofeClient()
             catalog, ok = resolve_catalog()

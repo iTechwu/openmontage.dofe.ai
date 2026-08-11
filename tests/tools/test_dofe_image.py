@@ -279,7 +279,7 @@ def test_image_edit_with_mask_url_appends_mask_block():
     assert mask_block["part"]["image_url"]["url"] == "https://cdn.test/mask.png"
 
 
-def test_generation_mode_edit_triggers_image_edit_without_mask():
+def test_generation_mode_edit_without_mask_uses_image_to_image_lane():
     payload = DofeImage()._build_payload(
         {
             "prompt": "make it red",
@@ -291,6 +291,22 @@ def test_generation_mode_edit_triggers_image_edit_without_mask():
 
     assert len(payload["content"]) == 2
     assert payload["content"][1]["role"] == "reference"
+    assert DofeImage._resolve_operation(
+        {
+            "generation_mode": "edit",
+            "image_url": "https://cdn.test/car.png",
+        }
+    ) == "image_to_image"
+
+
+def test_mask_is_the_only_input_that_selects_image_edit_lane():
+    assert DofeImage._resolve_operation(
+        {
+            "generation_mode": "edit",
+            "image_url": "https://cdn.test/car.png",
+            "mask_path": "/tmp/mask.png",
+        }
+    ) == "image_edit"
 
 
 def test_gpt_image_params_forwarded():
@@ -417,6 +433,8 @@ def test_live_preflight_validates_mask_outputcount_and_pixel_rule(monkeypatch):
             "prompt": "replace background",
             "model_name": "gpt-image-2-sp",
             "generation_mode": "edit",
+            "image_path": "/tmp/source.png",
+            "mask_path": "/tmp/mask.png",
             "n": 11,
             "size": "960x900",
         },
@@ -526,10 +544,10 @@ def test_live_preflight_blocks_image_edit_missing_input(monkeypatch):
             "input": {"text": True, "acceptedAssetTypes": ["image"]},
             "operations": [
                 {
-                    "id": "image_edit",
+                    "id": "image_to_image",
                     "constraints": {
                         "acceptedAssetTypes": ["image"],
-                        "roles": ["reference", "mask"],
+                        "roles": ["reference"],
                         "minInputAssets": 1,
                         "maxInputAssets": 1,
                     },
@@ -552,4 +570,4 @@ def test_live_preflight_blocks_image_edit_missing_input(monkeypatch):
 
     assert result["status"] == "blocked"
     messages = [error["message"] for error in result["errors"]]
-    assert any("image_edit requires at least one input image" in message for message in messages)
+    assert any("image_to_image requires at least one input image" in message for message in messages)
