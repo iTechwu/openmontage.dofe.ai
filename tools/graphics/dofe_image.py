@@ -127,13 +127,24 @@ class DofeImage(BaseTool):
             },
             "output_format": {
                 "type": "string",
+                "enum": ["png", "jpeg", "webp"],
                 "description": "Output image format (e.g. 'png', 'jpeg', 'webp').",
             },
             "output_compression": {
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 100,
-                "description": "Output compression level 0-100 (GPT Image).",
+                "description": "Output compression level 0-100 (GPT Image, jpeg/webp only).",
+            },
+            "response_format": {
+                "type": "string",
+                "enum": ["url", "b64_json"],
+                "description": "Output encoding from the gateway (url or b64_json).",
+            },
+            "generation_mode": {
+                "type": "string",
+                "enum": ["generate", "edit"],
+                "description": "Force the operation lane: generate=text/image-to-image, edit=image_edit.",
             },
             "background": {
                 "type": "string",
@@ -178,10 +189,15 @@ class DofeImage(BaseTool):
         "height",
         "size",
         "resolution",
+        "aspect_ratio",
         "n",
         "seed",
+        "quality",
+        "style",
+        "generation_mode",
         "output_format",
         "output_compression",
+        "response_format",
         "background",
         "moderation",
         "thinking",
@@ -362,6 +378,27 @@ class DofeImage(BaseTool):
                     errors.append(
                         f"DoFe model {model!r} requires edges to be multiples of {edge}; got {resolution}"
                     )
+        # operation 声明 allowedParams 时，校验显式传入的参数键在集合内（避免发给不支持参数的 lane）。
+        allowed_params = constraints.get("allowedParams")
+        if isinstance(allowed_params, list) and allowed_params:
+            requested_params = [
+                "output_format",
+                "output_compression",
+                "response_format",
+                "background",
+                "moderation",
+                "quality",
+                "style",
+                "thinking",
+            ]
+            unsupported = [
+                key for key in requested_params if inputs.get(key) is not None and key not in allowed_params
+            ]
+            if unsupported:
+                errors.append(
+                    f"DoFe model {model!r} operation {operation!r} does not accept params: "
+                    f"{', '.join(unsupported)}"
+                )
 
         return {
             "status": "blocked" if errors else "passed",
@@ -383,7 +420,8 @@ class DofeImage(BaseTool):
 
     @staticmethod
     def _resolution(inputs: dict[str, Any]) -> str:
-        explicit = inputs.get("resolution") or inputs.get("size")
+        # size 优先于 resolution（与网关路由口径一致）；二者缺省时回退 width/height。
+        explicit = inputs.get("size") or inputs.get("resolution")
         if explicit and "x" in str(explicit).lower():
             return str(explicit)
         width = inputs.get("width", 1024)
@@ -454,6 +492,8 @@ class DofeImage(BaseTool):
             params["output_format"] = inputs["output_format"]
         if inputs.get("output_compression") is not None:
             params["output_compression"] = inputs["output_compression"]
+        if inputs.get("response_format"):
+            params["response_format"] = inputs["response_format"]
         if inputs.get("background"):
             params["background"] = inputs["background"]
         if inputs.get("moderation"):

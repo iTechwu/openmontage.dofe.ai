@@ -476,6 +476,38 @@ def test_live_preflight_blocks_mask_when_operation_does_not_declare_mask(monkeyp
     assert any("does not declare mask support" in message for message in messages)
 
 
+def test_image_selector_pins_dofe_when_model_name_is_explicit_even_if_dofe_disabled(monkeypatch):
+    from tools.graphics.image_selector import ImageSelector
+
+    class FakeDofe:
+        name = "dofe_image"
+        provider = "dofe"
+
+        def get_status(self):
+            from tools.base_tool import ToolStatus
+
+            return ToolStatus.AVAILABLE
+
+    class FakeOther:
+        name = "flux_image"
+        provider = "bfl"
+
+        def get_status(self):
+            from tools.base_tool import ToolStatus
+
+            return ToolStatus.AVAILABLE
+
+    # DOFE_ENABLED off（默认）——显式 model_name 仍应 pin 到 dofe_image。
+    selector = ImageSelector()
+    selected, _ = selector._select_best_tool(
+        {"prompt": "a cat", "model_name": "gpt-image-2"},
+        [FakeOther(), FakeDofe()],  # type: ignore[list-item]
+        {},
+    )
+    assert selected is not None
+    assert selected.name == "dofe_image"
+
+
 def test_live_preflight_blocks_image_edit_missing_input(monkeypatch):
     monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
     monkeypatch.setenv("DOFE_IMAGE_MODEL", "gpt-image-2-sp")

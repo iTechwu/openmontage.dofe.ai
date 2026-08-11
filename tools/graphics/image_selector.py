@@ -334,6 +334,15 @@ class ImageSelector(BaseTool):
         if dofe is not None:
             return dofe, None
 
+        # 显式 model_name 是用户点名走 DoFe 网关的目录模型 ID：即使 DOFE_ENABLED 未启用，
+        # 也 pin 到 dofe_image（若可用），不落入通用 provider 排名（FOLLOW-UP-REVIEW P1）。
+        if inputs.get("model_name"):
+            explicit_dofe = next(
+                (tool for tool in candidates if tool.name == "dofe_image"), None
+            )
+            if explicit_dofe is not None and explicit_dofe.get_status().value == "available":
+                return explicit_dofe, None
+
         rankings = rank_providers(candidates, task_context)
 
         tool_by_provider: dict[str, BaseTool] = {}
