@@ -90,8 +90,8 @@ class DofeImage(BaseTool):
                 "type": "string",
                 "description": "What to avoid; omitted for Seedream aliases, which do not accept it.",
             },
-            "width": {"type": "integer", "default": 1024},
-            "height": {"type": "integer", "default": 1024},
+            "width": {"type": "integer"},
+            "height": {"type": "integer"},
             "size": {
                 "type": "string",
                 "description": "Explicit resolution like '1024x1024'. Overrides width/height.",
@@ -368,7 +368,7 @@ class DofeImage(BaseTool):
                 )
         size_rule = constraints.get("imageSizeRule")
         if isinstance(size_rule, dict):
-            resolution = self._resolution(inputs)
+            resolution = self._resolution(inputs, model)
             dims = self._parse_resolution(resolution)
             if dims is not None:
                 width, height = dims
@@ -434,12 +434,19 @@ class DofeImage(BaseTool):
         }
 
     @staticmethod
-    def _resolution(inputs: dict[str, Any]) -> str:
+    def _resolution(inputs: dict[str, Any], model: str | None = None) -> str:
         # size 优先于 resolution（与网关路由口径一致）。显式档位（如 1K/2K）与 WxH 都原样转发，
-        # 不把非 x 档位回退成 1024x1024（P1 复审：静默方图）。仅无显式尺寸时才回退 width/height。
+        # 不把非 x 档位回退成 1024x1024（P1 复审：静默方图）。Seedream 的默认 2K
+        # 同时满足其 capability 最低像素约束；其他模型保留历史 1024x1024 默认值。
         explicit = inputs.get("size") or inputs.get("resolution")
         if explicit:
             return str(explicit)
+        has_explicit_dimensions = (
+            inputs.get("width") is not None or inputs.get("height") is not None
+        )
+        model_family = (model or "").rsplit("/", 1)[-1].lower()
+        if not has_explicit_dimensions and model_family.startswith("seedream-"):
+            return "2K"
         width = inputs.get("width", 1024)
         height = inputs.get("height", 1024)
         return f"{int(width)}x{int(height)}"
@@ -505,7 +512,7 @@ class DofeImage(BaseTool):
             )
 
         params: dict[str, Any] = {
-            "resolution": self._resolution(inputs),
+            "resolution": self._resolution(inputs, model),
             "outputCount": max(1, int(inputs.get("n") or 1)),
         }
         if inputs.get("negative_prompt") and self._supports_negative_prompt(model):

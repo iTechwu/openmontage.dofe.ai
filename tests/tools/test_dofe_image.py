@@ -41,6 +41,16 @@ def test_resolution_from_width_height():
     assert payload["params"]["resolution"] == "768x1344"
 
 
+def test_seedream_uses_supported_2k_resolution_when_size_is_omitted():
+    payload = _payload({"prompt": "x"})
+    assert payload["params"]["resolution"] == "2K"
+
+
+def test_non_seedream_keeps_legacy_resolution_when_size_is_omitted():
+    payload = DofeImage()._build_payload({"prompt": "x"}, "gpt-image-2-sp")
+    assert payload["params"]["resolution"] == "1024x1024"
+
+
 def test_resolution_from_size_overrides_dimensions():
     payload = _payload({"prompt": "x", "width": 1, "height": 1, "size": "1024x1024"})
     assert payload["params"]["resolution"] == "1024x1024"
