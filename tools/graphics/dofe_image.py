@@ -379,8 +379,10 @@ class DofeImage(BaseTool):
                         f"DoFe model {model!r} requires edges to be multiples of {edge}; got {resolution}"
                     )
         # operation 声明 allowedParams 时，校验显式传入的参数键在集合内（避免发给不支持参数的 lane）。
+        # P1 复审：Playground 输出 camelCase（outputFormat/outputCompression/responseFormat），
+        # 本工具输入是 snake_case——比较前归一，否则已支持参数被误拦。
         allowed_params = constraints.get("allowedParams")
-        if isinstance(allowed_params, list) and allowed_params:
+        if isinstance(allowed_params, list):
             requested_params = [
                 "output_format",
                 "output_compression",
@@ -392,7 +394,10 @@ class DofeImage(BaseTool):
                 "thinking",
             ]
             unsupported = [
-                key for key in requested_params if inputs.get(key) is not None and key not in allowed_params
+                key
+                for key in requested_params
+                if inputs.get(key) is not None
+                and _playground_param_name(key) not in allowed_params
             ]
             if unsupported:
                 errors.append(
@@ -420,9 +425,10 @@ class DofeImage(BaseTool):
 
     @staticmethod
     def _resolution(inputs: dict[str, Any]) -> str:
-        # size 优先于 resolution（与网关路由口径一致）；二者缺省时回退 width/height。
+        # size 优先于 resolution（与网关路由口径一致）。显式档位（如 1K/2K）与 WxH 都原样转发，
+        # 不把非 x 档位回退成 1024x1024（P1 复审：静默方图）。仅无显式尺寸时才回退 width/height。
         explicit = inputs.get("size") or inputs.get("resolution")
-        if explicit and "x" in str(explicit).lower():
+        if explicit:
             return str(explicit)
         width = inputs.get("width", 1024)
         height = inputs.get("height", 1024)
@@ -434,6 +440,20 @@ class DofeImage(BaseTool):
         if not match:
             return None
         return int(match.group(1)), int(match.group(2))
+
+    @staticmethod
+    def _playground_param_name(key: str) -> str:
+        """OpenMontage snake_case 参数名 → Playground 投影的 camelCase 名（P1 复审：命名对齐）。"""
+        return {
+            "output_format": "outputFormat",
+            "output_compression": "outputCompression",
+            "response_format": "responseFormat",
+            "background": "background",
+            "moderation": "moderation",
+            "quality": "quality",
+            "style": "style",
+            "thinking": "thinking",
+        }.get(key, key)
 
     @staticmethod
     def _collect_references(inputs: dict[str, Any]) -> list[tuple[str | None, str | None]]:
