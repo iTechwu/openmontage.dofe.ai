@@ -170,6 +170,61 @@ def test_metadata_carries_idempotency_key():
     assert "openmontage_idempotency_key" in payload["metadata"]
 
 
+def test_live_preflight_blocks_incompatible_multi_reference_image_request(monkeypatch):
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_IMAGE_MODEL", "gpt-image-2-sp")
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.list_models",
+        lambda _self: [{"id": "gpt-image-2-sp"}],
+    )
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.get_playground_capability",
+        lambda _self, _model: {
+            "alias": "gpt-image-2-sp",
+            "modelType": "image",
+            "state": "ready",
+            "executor": "generation_task",
+            "endpointKind": "image_async",
+            "input": {"text": True, "acceptedAssetTypes": ["image"], "maxInputAssets": 1},
+            "operations": [
+                {
+                    "id": "image_to_image",
+                    "constraints": {
+                        "acceptedAssetTypes": ["image"],
+                        "roles": ["reference"],
+                        "minInputAssets": 1,
+                        "maxInputAssets": 1,
+                        "allowedValues": {"ratio": ["1:1"]},
+                    },
+                }
+            ],
+            "form": {"fields": []},
+            "output": {"mode": "asset"},
+            "readiness": [],
+        },
+    )
+
+    result = DofeImage().preflight(
+        {
+            "prompt": "compose the four references",
+            "model_name": "gpt-image-2-sp",
+            "aspect_ratio": "16:9",
+            "image_urls": [
+                "https://cdn.test/scene.png",
+                "https://cdn.test/ae86.png",
+                "https://cdn.test/001-fr.png",
+                "https://cdn.test/yard.png",
+            ],
+        },
+        live=True,
+    )
+
+    assert result["status"] == "blocked"
+    messages = [error["message"] for error in result["errors"]]
+    assert any("at most 1 input assets" in message for message in messages)
+    assert any("does not support ratio '16:9'" in message for message in messages)
+
+
 def test_downloaded_jpeg_is_normalized_to_requested_png(tmp_path):
     output = tmp_path / "generated.png"
     Image.new("RGB", (32, 24), "red").save(output, format="JPEG")
@@ -181,3 +236,186 @@ def test_downloaded_jpeg_is_normalized_to_requested_png(tmp_path):
     assert metadata["image_format"] == "png"
     assert metadata["width"] == 32
     assert metadata["height"] == 24
+
+
+# ------------------------------------------------------------------ image_edit
+
+
+def test_mask_triggers_image_edit_operation_and_mask_role(tmp_path):
+    ref = tmp_path / "subject.png"
+    ref.write_bytes(b"\x89PNG\r\n\x1a\n" + b"subject")
+    mask = tmp_path / "mask.png"
+    mask.write_bytes(b"\x89PNG\r\n\x1a\n" + b"mask")
+
+    payload = DofeImage()._build_payload(
+        {
+            "prompt": "replace background",
+            "image_path": str(ref),
+            "mask_path": str(mask),
+        },
+        "gpt-image-2-sp",
+    )
+
+    text, ref_block, mask_block = payload["content"]
+    assert text["part"]["type"] == "text"
+    assert ref_block["role"] == "reference"
+    assert mask_block["role"] == "mask"
+    assert mask_block["part"]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_image_edit_with_mask_url_appends_mask_block():
+    payload = DofeImage()._build_payload(
+        {
+            "prompt": "remove logo",
+            "image_url": "https://cdn.test/product.png",
+            "mask_url": "https://cdn.test/mask.png",
+        },
+        "gpt-image-2-sp",
+    )
+
+    ref_block, mask_block = payload["content"][1:]
+    assert ref_block["role"] == "reference"
+    assert mask_block["role"] == "mask"
+    assert mask_block["part"]["image_url"]["url"] == "https://cdn.test/mask.png"
+
+
+def test_generation_mode_edit_triggers_image_edit_without_mask():
+    payload = DofeImage()._build_payload(
+        {
+            "prompt": "make it red",
+            "generation_mode": "edit",
+            "image_url": "https://cdn.test/car.png",
+        },
+        "gpt-image-2-sp",
+    )
+
+    assert len(payload["content"]) == 2
+    assert payload["content"][1]["role"] == "reference"
+
+
+def test_gpt_image_params_forwarded():
+    payload = DofeImage()._build_payload(
+        {
+            "prompt": "x",
+            "output_format": "webp",
+            "output_compression": 75,
+            "background": "transparent",
+            "moderation": "low",
+            "thinking": "medium",
+        },
+        "gpt-image-2-sp",
+    )
+
+    p = payload["params"]
+    assert p["output_format"] == "webp"
+    assert p["output_compression"] == 75
+    assert p["background"] == "transparent"
+    assert p["moderation"] == "low"
+    assert p["thinking"] == "medium"
+
+
+def test_mask_and_gpt_params_change_idempotency_key():
+    tool = DofeImage()
+    base = {"prompt": "x", "model_name": "gpt-image-2-sp"}
+
+    assert tool.idempotency_key(base) != tool.idempotency_key({**base, "mask_path": "m.png"})
+    assert tool.idempotency_key(base) != tool.idempotency_key(
+        {**base, "output_format": "webp", "output_compression": 75}
+    )
+
+
+def test_live_preflight_blocks_https_for_data_uri_only_image_edit(monkeypatch):
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_IMAGE_MODEL", "gpt-image-2-sp")
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.list_models",
+        lambda _self: [{"id": "gpt-image-2-sp"}],
+    )
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.get_playground_capability",
+        lambda _self, _model: {
+            "alias": "gpt-image-2-sp",
+            "modelType": "image",
+            "state": "ready",
+            "executor": "generation_task",
+            "endpointKind": "image_async",
+            "input": {"text": True, "acceptedAssetTypes": ["image"], "maxInputAssets": 1},
+            "operations": [
+                {
+                    "id": "image_edit",
+                    "constraints": {
+                        "acceptedAssetTypes": ["image"],
+                        "roles": ["reference", "mask"],
+                        "minInputAssets": 1,
+                        "maxInputAssets": 1,
+                        "inputTransport": "data_uri_only",
+                    },
+                }
+            ],
+            "form": {"fields": []},
+            "output": {"mode": "asset"},
+            "readiness": [],
+        },
+    )
+
+    result = DofeImage().preflight(
+        {
+            "prompt": "remove text",
+            "model_name": "gpt-image-2-sp",
+            "image_url": "https://cdn.test/product.png",
+            "mask_url": "https://cdn.test/mask.png",
+        },
+        live=True,
+    )
+
+    assert result["status"] == "blocked"
+    messages = [error["message"] for error in result["errors"]]
+    assert any("image_url is not allowed" in message for message in messages)
+    assert any("mask_url is not allowed" in message for message in messages)
+
+
+def test_live_preflight_blocks_image_edit_missing_input(monkeypatch):
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_IMAGE_MODEL", "gpt-image-2-sp")
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.list_models",
+        lambda _self: [{"id": "gpt-image-2-sp"}],
+    )
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.get_playground_capability",
+        lambda _self, _model: {
+            "alias": "gpt-image-2-sp",
+            "modelType": "image",
+            "state": "ready",
+            "executor": "generation_task",
+            "endpointKind": "image_async",
+            "input": {"text": True, "acceptedAssetTypes": ["image"]},
+            "operations": [
+                {
+                    "id": "image_edit",
+                    "constraints": {
+                        "acceptedAssetTypes": ["image"],
+                        "roles": ["reference", "mask"],
+                        "minInputAssets": 1,
+                        "maxInputAssets": 1,
+                    },
+                }
+            ],
+            "form": {"fields": []},
+            "output": {"mode": "asset"},
+            "readiness": [],
+        },
+    )
+
+    result = DofeImage().preflight(
+        {
+            "prompt": "remove text",
+            "model_name": "gpt-image-2-sp",
+            "generation_mode": "edit",
+        },
+        live=True,
+    )
+
+    assert result["status"] == "blocked"
+    messages = [error["message"] for error in result["errors"]]
+    assert any("image_edit requires at least one input image" in message for message in messages)
