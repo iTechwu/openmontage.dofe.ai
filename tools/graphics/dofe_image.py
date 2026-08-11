@@ -8,6 +8,7 @@ data URI). See dev-guide §5.1.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from tools.base_tool import (
@@ -325,6 +326,42 @@ class DofeImage(BaseTool):
                         f"DoFe model {model!r} operation {operation!r} requires inline data URIs; "
                         f"{key} is not allowed"
                     )
+        # FOLLOW-UP-REVIEW P1：operation 投影已声明 mask / outputCount / imageSizeRule /
+        # allowedParams——preflight 据此校验 mask 支持、输出数量与像素/边长规则。
+        if has_mask and operation == "image_edit" and constraints.get("mask") is not True:
+            errors.append(
+                f"DoFe model {model!r} operation {operation!r} does not declare mask support"
+            )
+        output_count = constraints.get("outputCount")
+        requested_n = int(inputs.get("n") or 1)
+        if isinstance(output_count, dict) and output_count.get("max") is not None:
+            if requested_n > int(output_count["max"]):
+                errors.append(
+                    f"DoFe model {model!r} operation {operation!r} accepts at most "
+                    f"{output_count['max']} outputs; got {requested_n}"
+                )
+        size_rule = constraints.get("imageSizeRule")
+        if isinstance(size_rule, dict):
+            resolution = self._resolution(inputs)
+            dims = self._parse_resolution(resolution)
+            if dims is not None:
+                width, height = dims
+                pixels = width * height
+                min_pixels = size_rule.get("minPixels")
+                max_pixels = size_rule.get("maxPixels")
+                if min_pixels is not None and pixels < int(min_pixels):
+                    errors.append(
+                        f"DoFe model {model!r} requires at least {min_pixels} pixels; got {pixels}"
+                    )
+                if max_pixels is not None and pixels > int(max_pixels):
+                    errors.append(
+                        f"DoFe model {model!r} allows at most {max_pixels} pixels; got {pixels}"
+                    )
+                edge = size_rule.get("edgeMultiple")
+                if edge is not None and (width % int(edge) != 0 or height % int(edge) != 0):
+                    errors.append(
+                        f"DoFe model {model!r} requires edges to be multiples of {edge}; got {resolution}"
+                    )
 
         return {
             "status": "blocked" if errors else "passed",
@@ -352,6 +389,13 @@ class DofeImage(BaseTool):
         width = inputs.get("width", 1024)
         height = inputs.get("height", 1024)
         return f"{int(width)}x{int(height)}"
+
+    @staticmethod
+    def _parse_resolution(resolution: str) -> tuple[int, int] | None:
+        match = re.fullmatch(r"(\d+)\s*[xX]\s*(\d+)", resolution.strip())
+        if not match:
+            return None
+        return int(match.group(1)), int(match.group(2))
 
     @staticmethod
     def _collect_references(inputs: dict[str, Any]) -> list[tuple[str | None, str | None]]:

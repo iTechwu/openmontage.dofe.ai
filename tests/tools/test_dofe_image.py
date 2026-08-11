@@ -374,6 +374,108 @@ def test_live_preflight_blocks_https_for_data_uri_only_image_edit(monkeypatch):
     assert any("mask_url is not allowed" in message for message in messages)
 
 
+def test_live_preflight_validates_mask_outputcount_and_pixel_rule(monkeypatch):
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_IMAGE_MODEL", "gpt-image-2-sp")
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.list_models",
+        lambda _self: [{"id": "gpt-image-2-sp"}],
+    )
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.get_playground_capability",
+        lambda _self, _model: {
+            "alias": "gpt-image-2-sp",
+            "modelType": "image",
+            "state": "ready",
+            "executor": "generation_task",
+            "endpointKind": "image_async",
+            "input": {"text": True, "acceptedAssetTypes": ["image"], "maxInputAssets": 1},
+            "operations": [
+                {
+                    "id": "image_edit",
+                    "constraints": {
+                        "acceptedAssetTypes": ["image"],
+                        "roles": ["reference", "mask"],
+                        "minInputAssets": 1,
+                        "maxInputAssets": 1,
+                        "inputTransport": "data_uri_only",
+                        "mask": True,
+                        "outputCount": {"min": 1, "max": 10},
+                        "imageSizeRule": {"minPixels": 921600, "edgeMultiple": 64},
+                    },
+                }
+            ],
+            "form": {"fields": []},
+            "output": {"mode": "asset"},
+            "readiness": [],
+        },
+    )
+
+    # outputCount 超限 + 像素低于下限 → blocked
+    result = DofeImage().preflight(
+        {
+            "prompt": "replace background",
+            "model_name": "gpt-image-2-sp",
+            "generation_mode": "edit",
+            "n": 11,
+            "size": "960x900",
+        },
+        live=True,
+    )
+    assert result["status"] == "blocked"
+    messages = [error["message"] for error in result["errors"]]
+    assert any("at most 10 outputs" in message for message in messages)
+    assert any("at least 921600 pixels" in message for message in messages)
+
+
+def test_live_preflight_blocks_mask_when_operation_does_not_declare_mask(monkeypatch):
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_IMAGE_MODEL", "gpt-image-2-sp")
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.list_models",
+        lambda _self: [{"id": "gpt-image-2-sp"}],
+    )
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.get_playground_capability",
+        lambda _self, _model: {
+            "alias": "gpt-image-2-sp",
+            "modelType": "image",
+            "state": "ready",
+            "executor": "generation_task",
+            "endpointKind": "image_async",
+            "input": {"text": True, "acceptedAssetTypes": ["image"], "maxInputAssets": 1},
+            "operations": [
+                {
+                    "id": "image_edit",
+                    "constraints": {
+                        "acceptedAssetTypes": ["image"],
+                        "roles": ["reference"],
+                        "minInputAssets": 1,
+                        "maxInputAssets": 1,
+                        "inputTransport": "data_uri_only",
+                    },
+                }
+            ],
+            "form": {"fields": []},
+            "output": {"mode": "asset"},
+            "readiness": [],
+        },
+    )
+
+    result = DofeImage().preflight(
+        {
+            "prompt": "remove text",
+            "model_name": "gpt-image-2-sp",
+            "generation_mode": "edit",
+            "mask_url": "https://cdn.test/mask.png",
+        },
+        live=True,
+    )
+    assert result["status"] == "blocked"
+    messages = [error["message"] for error in result["errors"]]
+    assert any("does not declare mask support" in message for message in messages)
+
+
 def test_live_preflight_blocks_image_edit_missing_input(monkeypatch):
     monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
     monkeypatch.setenv("DOFE_IMAGE_MODEL", "gpt-image-2-sp")
