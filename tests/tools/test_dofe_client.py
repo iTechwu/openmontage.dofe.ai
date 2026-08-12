@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import requests
 import requests_mock as _rm
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -26,6 +27,7 @@ from tools.dofe.errors import (
     DofeAuthError,
     DofeError,
     DofeModelUnavailableError,
+    DofeNetworkError,
     DofeQuotaError,
     DofeRateLimitError,
     DofeTaskFailedError,
@@ -128,6 +130,49 @@ def test_create_rejects_conflicting_payload_and_metadata_idempotency_keys():
             )
 
     assert m.request_history == []
+
+
+def test_create_network_error_preserves_recovery_context():
+    logical_call_id = "scene-007-video-01"
+    with _rm.Mocker() as m:
+        m.post(TASKS, exc=requests.exceptions.ChunkedEncodingError("IncompleteRead"))
+        with pytest.raises(DofeNetworkError) as caught:
+            _client().create_task(
+                {
+                    "model": "seedance-2.0-fast",
+                    "idempotencyKey": logical_call_id,
+                }
+            )
+
+    assert caught.value.details == {
+        "method": "POST",
+        "path": "/v1/generation/tasks",
+        "request_outcome": "unknown",
+        "idempotency_key": logical_call_id,
+    }
+
+
+def test_submit_recovers_once_with_same_idempotency_key_after_transport_error():
+    logical_call_id = "scene-007-video-02"
+    with _rm.Mocker() as m:
+        m.post(
+            TASKS,
+            [
+                {"exc": requests.exceptions.ChunkedEncodingError("IncompleteRead")},
+                {"json": _ok(_succeeded_task("gen-recovered"))},
+            ],
+        )
+        result = _client().submit_and_collect(
+            {"model": "seedance-2.0-fast", "idempotencyKey": logical_call_id},
+            timeout_seconds=60,
+        )
+
+    assert result["task_id"] == "gen-recovered"
+    assert len(m.request_history) == 2
+    assert all(
+        request.headers["X-OpenMontage-Logical-Call-Id"] == logical_call_id
+        for request in m.request_history
+    )
 
 
 def test_list_models_returns_tenant_visible_aliases():

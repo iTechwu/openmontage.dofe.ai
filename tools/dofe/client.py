@@ -244,7 +244,19 @@ class DofeClient:
                     network_attempts += 1
                     sleep(_NETWORK_BACKOFF[min(network_attempts - 1, len(_NETWORK_BACKOFF) - 1)])
                     continue
-                raise DofeNetworkError(f"dofe {method} {path} failed: {exc}") from exc
+                details: dict[str, Any] = {
+                    "method": method.upper(),
+                    "path": path,
+                    # A transport failure after a write may have reached the
+                    # gateway. Callers must recover with the same idempotency key.
+                    "request_outcome": "unknown",
+                }
+                if logical_call_id:
+                    details["idempotency_key"] = logical_call_id
+                raise DofeNetworkError(
+                    f"dofe {method} {path} failed: {exc}",
+                    details=details,
+                ) from exc
 
             status = response.status_code
             body = self._safe_json(response)
@@ -420,7 +432,27 @@ class DofeClient:
             data = {"taskId": existing_task_id, "status": "running"}
             task_id = existing_task_id
         else:
-            data = self.create_task(payload)
+            try:
+                data = self.create_task(payload)
+            except DofeNetworkError as exc:
+                details = exc.details or {}
+                metadata = payload.get("metadata")
+                metadata_key = (
+                    str(metadata.get("openmontage_idempotency_key") or "").strip()
+                    if isinstance(metadata, dict)
+                    else ""
+                )
+                logical_call_id = str(payload.get("idempotencyKey") or "").strip() or metadata_key
+                if (
+                    details.get("request_outcome") != "unknown"
+                    or not logical_call_id
+                ):
+                    raise
+                # A lost create response leaves acceptance ambiguous. Replaying
+                # the exact request is safe because the gateway deduplicates the
+                # idempotency key; a second transport failure remains recoverable
+                # by the caller and is deliberately not hidden.
+                data = self.create_task(payload)
             task_id = str(data.get("taskId"))
 
         status = str(data.get("status") or "").lower()

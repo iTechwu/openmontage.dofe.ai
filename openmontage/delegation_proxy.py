@@ -234,11 +234,15 @@ def _start_response(
     handler: BaseHTTPRequestHandler,
     status_code: int,
     headers: dict[str, str],
+    *,
+    body_length: int | None = None,
 ) -> None:
     handler.send_response(status_code)
     for key, value in headers.items():
         if key.lower() not in _HOP_HEADERS:
             handler.send_header(key, value)
+    if body_length is not None:
+        handler.send_header("Content-Length", str(body_length))
     handler.send_header("Connection", "close")
     handler.end_headers()
 
@@ -249,7 +253,7 @@ def _send_response(
     headers: dict[str, str],
     body: bytes,
 ) -> None:
-    _start_response(handler, status_code, headers)
+    _start_response(handler, status_code, headers, body_length=len(body))
     handler.wfile.write(body)
 
 
@@ -366,6 +370,10 @@ class DelegationSigningProxy:
         content_ordinal: int | None = None
         call_succeeded = False
         fingerprint = ""
+        upstream_status: int | None = None
+        upstream_content_length: int | None = None
+        response_bytes_read = 0
+        response_attempted = False
         try:
             length = int(handler.headers.get("Content-Length", "0"))
             if length < 0 or length > _MAX_REQUEST_BYTES:
@@ -431,6 +439,7 @@ class DelegationSigningProxy:
                         replay_key_source=replay_key_source,
                         outcome="replayed_cached",
                     )
+                    response_attempted = True
                     _send_response(handler, cached.status_code, cached.headers, cached.body)
                     call_succeeded = True
                     return
@@ -441,6 +450,7 @@ class DelegationSigningProxy:
                         replay_key_source=replay_key_source,
                         outcome="not_replayable_409",
                     )
+                    response_attempted = True
                     _send_response(
                         handler,
                         409,
@@ -474,6 +484,10 @@ class DelegationSigningProxy:
                 allow_redirects=False,
                 timeout=(10, 3600),
             )
+            upstream_status = upstream.status_code
+            upstream_length_header = upstream.headers.get("Content-Length", "")
+            if upstream_length_header.isdigit():
+                upstream_content_length = int(upstream_length_header)
             response_headers = {
                 key: value
                 for key, value in upstream.headers.items()
@@ -501,6 +515,7 @@ class DelegationSigningProxy:
                         invocation_id,
                     )
                     content_ordinal = None
+                    response_attempted = True
                     _start_response(
                         handler,
                         upstream.status_code,
@@ -527,6 +542,7 @@ class DelegationSigningProxy:
                         },
                         separators=(",", ":"),
                     ).encode("utf-8")
+                    response_attempted = True
                     _send_response(
                         handler,
                         502,
@@ -536,6 +552,7 @@ class DelegationSigningProxy:
                     response_started = True
                     return
                 response_headers = decoded_response_headers
+                response_attempted = True
                 _start_response(handler, upstream.status_code, response_headers)
                 response_started = True
                 response_body = bytearray()
@@ -546,6 +563,7 @@ class DelegationSigningProxy:
                     chunk = upstream.raw.read1(64 * 1024, decode_content=True)
                     if not chunk:
                         break
+                    response_bytes_read += len(chunk)
                     completion.feed(chunk)
                     if can_buffer:
                         if len(response_body) + len(chunk) <= _MAX_CACHED_RESPONSE_BYTES:
@@ -600,6 +618,7 @@ class DelegationSigningProxy:
                     _MAX_CACHED_RESPONSE_BYTES + 1,
                     decode_content=False,
                 )
+                response_bytes_read = len(response_body)
                 can_buffer = len(response_body) <= _MAX_CACHED_RESPONSE_BYTES
             else:
                 response_body = b""
@@ -612,6 +631,7 @@ class DelegationSigningProxy:
                         body=response_body,
                     )
                     response_cached = True
+                response_attempted = True
                 _send_response(handler, upstream.status_code, response_headers, response_body)
                 call_succeeded = upstream.status_code < 400
             else:
@@ -621,8 +641,10 @@ class DelegationSigningProxy:
                 handler.send_header("Connection", "close")
                 handler.end_headers()
                 if response_body:
+                    response_bytes_read += len(response_body)
                     handler.wfile.write(response_body)
                 for chunk in upstream.raw.stream(64 * 1024, decode_content=False):
+                    response_bytes_read += len(chunk)
                     handler.wfile.write(chunk)
                 call_succeeded = upstream.status_code < 400
             if self.invocation_store is not None and not can_buffer:
@@ -632,14 +654,31 @@ class DelegationSigningProxy:
                 )
         except InvocationRequestConflictError as exc:
             handler.send_error(409, str(exc))
-        except Exception:
+        except Exception as exc:
             if (
                 self.invocation_store is not None
                 and "invocation_id" in locals()
                 and not response_cached
             ):
                 self.invocation_store.mark(invocation_id, "unknown")
-            if response_started:
+            _LOGGER.exception(
+                "openmontage delegation forward failed",
+                extra={
+                    "event": "forward_failed",
+                    "job_id": self.job_id,
+                    "stage": self.stage,
+                    "attempt": self.stage_attempt,
+                    "invocation_id": locals().get("invocation_id"),
+                    "upstream_status": upstream_status,
+                    "upstream_content_length": upstream_content_length,
+                    "response_bytes_read": response_bytes_read,
+                    "response_attempted": response_attempted,
+                    "response_started": response_started,
+                    "response_cached": response_cached,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            if response_started or response_attempted:
                 handler.close_connection = True
             else:
                 handler.send_error(502)

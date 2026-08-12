@@ -94,6 +94,7 @@ def test_loopback_proxy_overwrites_auth_and_signs_each_agent_request() -> None:
                 timeout=5,
             )
         assert response.json() == {"ok": True}
+        assert response.headers["Content-Length"] == "11"
     finally:
         upstream.shutdown()
         upstream.server_close()
@@ -417,7 +418,7 @@ def test_proxy_merges_same_content_responses_despite_volatile_client_metadata(tm
     assert len(forwarded) == 2
 
 
-def test_proxy_keeps_cached_success_when_downstream_disconnects(monkeypatch, tmp_path) -> None:
+def test_proxy_keeps_cached_success_when_downstream_disconnects(monkeypatch, tmp_path, caplog) -> None:
     forwarded = 0
 
     class Handler(BaseHTTPRequestHandler):
@@ -464,15 +465,16 @@ def test_proxy_keeps_cached_success_when_downstream_disconnects(monkeypatch, tmp
         with DelegationSigningProxy(credential, invocation_store=store) as proxy:
             headers = {"X-OpenMontage-Logical-Call-Id": "accepted-call"}
             with requests.Session() as session:
-                try:
-                    session.post(
-                        f"{proxy.base_url}/v1/generation/tasks",
-                        headers=headers,
-                        json={"model": "seedream-5.0", "prompt": "scene"},
-                        timeout=5,
-                    )
-                except requests.RequestException:
-                    pass
+                with caplog.at_level(logging.ERROR, logger="openmontage.delegation_proxy"):
+                    try:
+                        session.post(
+                            f"{proxy.base_url}/v1/generation/tasks",
+                            headers=headers,
+                            json={"model": "seedream-5.0", "prompt": "scene"},
+                            timeout=5,
+                        )
+                    except requests.RequestException:
+                        pass
                 replay = session.post(
                     f"{proxy.base_url}/v1/generation/tasks",
                     headers=headers,
@@ -488,6 +490,12 @@ def test_proxy_keeps_cached_success_when_downstream_disconnects(monkeypatch, tmp
     assert replay.json() == {"taskId": "task-accepted"}
     assert forwarded == 1
     assert store.list_recoverable(job_id="job-disconnect") == []
+    errors = [record for record in caplog.records if getattr(record, "event", None) == "forward_failed"]
+    assert len(errors) == 1
+    assert errors[0].invocation_id
+    assert errors[0].response_started is False
+    assert errors[0].response_attempted is True
+    assert errors[0].error_type == "BrokenPipeError"
 
 
 def test_proxy_rejects_reused_logical_call_id_with_different_request(tmp_path) -> None:

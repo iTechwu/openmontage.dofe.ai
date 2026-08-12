@@ -218,6 +218,12 @@ def _suggestion(exc: DofeError, capability: str) -> str:
     if isinstance(exc, DofeTaskFailedError):
         return "The task failed server-side; try a different model or parameters."
     if isinstance(exc, DofeNetworkError):
+        details = exc.details or {}
+        if details.get("request_outcome") == "unknown":
+            return (
+                "The request outcome is unknown because the response connection was interrupted. "
+                "Retry the exact same request so the gateway can recover it by idempotency key."
+            )
         return "Could not reach the dofe gateway; check DOFE_MODEL_BASE_URL and network connectivity."
     if isinstance(exc, DofeAPIError):
         reason = (exc.details or {}).get("reason")
@@ -270,6 +276,17 @@ def _error_result(
             "model": model,
             "capability": spec.capability,
         }
+    if isinstance(exc, DofeNetworkError):
+        details = exc.details or {}
+        idempotency_key = details.get("idempotency_key")
+        request_path = details.get("path")
+        if details.get("request_outcome") == "unknown" and idempotency_key and request_path:
+            data["dofe_recovery"] = {
+                "status": "unknown",
+                "idempotency_key": idempotency_key,
+                "request_path": request_path,
+                "recommended_action": "retry_same_idempotency_key",
+            }
     return ToolResult(
         success=False,
         data=data,

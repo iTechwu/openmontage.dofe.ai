@@ -9,6 +9,7 @@ from tools.avatar.dofe_avatar import DofeAvatar
 from tools.base_tool import ToolStatus
 from tools.dofe.client import DofeClient
 from tools.dofe.errors import DofeNetworkError
+from tools.dofe.runtime import DofeToolSpec, _error_result
 from tools.dofe.status import catalog_snapshot, configured_model_is_visible
 from tools.graphics.dofe_image import DofeImage
 from tools.video.dofe_video import DofeVideo
@@ -138,3 +139,32 @@ def test_catalog_snapshot_fails_closed_and_caches_unreachable_catalog(monkeypatc
 
     # The failure is cached: one fetch shared across both checks, not two.
     assert len(calls) == 1
+
+
+def test_network_error_result_exposes_same_key_recovery_action():
+    error = DofeNetworkError(
+        "dofe POST /v1/generation/tasks failed: IncompleteRead",
+        details={
+            "method": "POST",
+            "path": "/v1/generation/tasks",
+            "request_outcome": "unknown",
+            "idempotency_key": "scene-007-video-01",
+        },
+    )
+    spec = DofeToolSpec(
+        capability="video",
+        endpoint_kind="video_async",
+        asset_kind="video",
+        default_ext=".mp4",
+        probe=lambda _path: {},
+    )
+
+    result = _error_result(object(), error, "seedance-2.0-fast", spec, 0.0)
+
+    assert result.data["dofe_recovery"] == {
+        "status": "unknown",
+        "idempotency_key": "scene-007-video-01",
+        "request_path": "/v1/generation/tasks",
+        "recommended_action": "retry_same_idempotency_key",
+    }
+    assert "outcome is unknown" in result.error
