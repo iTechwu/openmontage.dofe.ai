@@ -235,6 +235,113 @@ def test_live_preflight_blocks_incompatible_multi_reference_image_request(monkey
     assert any("does not support ratio '16:9'" in message for message in messages)
 
 
+def test_live_preflight_accepts_declared_multi_reference_input_binding(monkeypatch):
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_IMAGE_MODEL", "seedream-5.0")
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.list_models",
+        lambda _self: [{"id": "seedream-5.0"}],
+    )
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.get_playground_capability",
+        lambda _self, _model: {
+            "alias": "seedream-5.0",
+            "modelType": "image",
+            "state": "ready",
+            "executor": "generation_task",
+            "endpointKind": "image_async",
+            "input": {"text": True, "acceptedAssetTypes": ["image"], "maxInputAssets": 14},
+            "operations": [
+                {
+                    "id": "image_to_image",
+                    "constraints": {
+                        "acceptedAssetTypes": ["image"],
+                        "roles": ["reference"],
+                        "minInputAssets": 1,
+                        "maxInputAssets": 14,
+                        "allowedValues": {"ratio": ["16:9"]},
+                        "allowedParams": ["ratio", "resolution", "outputCount"],
+                    },
+                }
+            ],
+            "form": {"fields": []},
+            "output": {"mode": "asset"},
+            "readiness": [],
+        },
+    )
+
+    result = DofeImage().preflight(
+        {
+            "prompt": "compose three references",
+            "model_name": "seedream-5.0",
+            "generation_mode": "edit",
+            "aspect_ratio": "16:9",
+            "image_paths": ["vehicle-a.png", "vehicle-b.png", "yard.png"],
+            "reference_roles": [{"binding_mode": "input_parameter"}],
+        },
+        live=True,
+    )
+
+    assert result["status"] == "passed"
+    assert result["reference_binding"] == {
+        "requested_modes": ["input_parameter"],
+        "supported_modes": ["input_parameter"],
+        "input_fields": [
+            "image_url",
+            "image_path",
+            "image_urls",
+            "image_paths",
+            "mask_url",
+            "mask_path",
+        ],
+        "prompt_token_syntax": None,
+    }
+
+
+def test_live_preflight_maps_explicit_output_format_without_name_error(monkeypatch):
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_IMAGE_MODEL", "gpt-image-2-sp")
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.list_models",
+        lambda _self: [{"id": "gpt-image-2-sp"}],
+    )
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.get_playground_capability",
+        lambda _self, _model: {
+            "alias": "gpt-image-2-sp",
+            "modelType": "image",
+            "state": "ready",
+            "executor": "generation_task",
+            "endpointKind": "image_async",
+            "input": {"text": True, "acceptedAssetTypes": ["image"], "maxInputAssets": 1},
+            "operations": [
+                {
+                    "id": "text_to_image",
+                    "constraints": {
+                        "minInputAssets": 0,
+                        "maxInputAssets": 0,
+                        "allowedParams": ["outputFormat"],
+                    },
+                }
+            ],
+            "form": {"fields": []},
+            "output": {"mode": "asset"},
+            "readiness": [],
+        },
+    )
+
+    result = DofeImage().preflight(
+        {
+            "prompt": "a clean frame",
+            "model_name": "gpt-image-2-sp",
+            "output_format": "png",
+        },
+        live=True,
+    )
+
+    assert result["status"] == "passed"
+
+
 def test_downloaded_jpeg_is_normalized_to_requested_png(tmp_path):
     output = tmp_path / "generated.png"
     Image.new("RGB", (32, 24), "red").save(output, format="JPEG")

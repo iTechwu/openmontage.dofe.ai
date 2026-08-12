@@ -71,6 +71,18 @@ class DofeImage(BaseTool):
         "custom_size": True,
         "aspect_ratio": True,
     }
+    reference_binding_contract = {
+        "supported_modes": ["input_parameter"],
+        "input_fields": [
+            "image_url",
+            "image_path",
+            "image_urls",
+            "image_paths",
+            "mask_url",
+            "mask_path",
+        ],
+        "prompt_token_syntax": None,
+    }
     best_for = [
         "image generation using an exact ID from the tenant-visible gateway catalog",
         "reference-conditioned image edits when DOFE_ENABLED=true",
@@ -407,7 +419,7 @@ class DofeImage(BaseTool):
                 key
                 for key in requested_params
                 if inputs.get(key) is not None
-                and _playground_param_name(key) not in allowed_params
+                and self._playground_param_name(key) not in allowed_params
             ]
             if unsupported:
                 errors.append(
