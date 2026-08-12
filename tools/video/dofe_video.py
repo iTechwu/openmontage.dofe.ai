@@ -169,12 +169,12 @@ class DofeVideo(BaseTool):
             "reference_image_urls": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Up to 9 reference image URLs for reference_to_video.",
+                "description": "Supplemental references for image_to_video or references for reference_to_video.",
             },
             "reference_image_paths": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Local reference image paths (inlined as data URIs).",
+                "description": "Local supplemental/reference images (inlined as data URIs).",
             },
             "model_name": {
                 "type": "string",
@@ -197,6 +197,8 @@ class DofeVideo(BaseTool):
     idempotency_key_fields = [
         "prompt", "operation", "duration", "aspect_ratio", "resolution",
         "generate_audio", "negative_prompt", "seed", "model_name",
+        "image_url", "image_path", "reference_image_url", "reference_image_path",
+        "reference_image_urls", "reference_image_paths",
     ]
     side_effects = ["paid remote generation via models.dofe.ai gateway", "writes video file to output_path"]
     user_visible_verification = ["Watch generated clip for motion coherence and prompt adherence"]
@@ -438,17 +440,26 @@ class DofeVideo(BaseTool):
         content: list[dict[str, Any]] = [{"part": {"type": "text", "text": prompt}, "order": 0}]
 
         if operation == "image_to_video":
-            url = inputs.get("image_url") or inputs.get("reference_image_url")
-            path = inputs.get("image_path") or inputs.get("reference_image_path")
-            if not url and not path:
+            source_specs = _image_to_video_source_specs(inputs)
+            if not source_specs:
                 raise ValueError("image_to_video requires image_url/image_path (first frame)")
-            content.append(
-                {
-                    "part": {"type": "image_url", "image_url": {"url": resolve_image_source(url=url, path=path)}},
-                    "order": len(content),
-                    "role": "first_frame",
-                }
-            )
+            if len(source_specs) > MAX_REFERENCE_IMAGES:
+                raise ValueError(
+                    f"dofe image_to_video accepts at most {MAX_REFERENCE_IMAGES} input images; "
+                    f"got {len(source_specs)}"
+                )
+            for index, (source_kind, source) in enumerate(source_specs):
+                resolved = resolve_image_source(
+                    url=source if source_kind == "url" else None,
+                    path=source if source_kind == "path" else None,
+                )
+                content.append(
+                    {
+                        "part": {"type": "image_url", "image_url": {"url": resolved}},
+                        "order": len(content),
+                        "role": "first_frame" if index == 0 else "reference",
+                    }
+                )
         elif operation == "reference_to_video":
             refs: list[str] = []
             single_url = inputs.get("reference_image_url") or inputs.get("image_url")
@@ -534,16 +545,37 @@ def _blocked_probe(
     }
 
 
+def _image_to_video_source_specs(inputs: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return ordered, unique I2V sources: first frame, then references."""
+
+    specs: list[tuple[str, str]] = []
+    image_url = inputs.get("image_url")
+    image_path = inputs.get("image_path")
+    reference_url = inputs.get("reference_image_url")
+    reference_path = inputs.get("reference_image_path")
+
+    if image_url:
+        specs.append(("url", str(image_url)))
+    elif image_path:
+        specs.append(("path", str(image_path)))
+    elif reference_url:
+        specs.append(("url", str(reference_url)))
+    elif reference_path:
+        specs.append(("path", str(reference_path)))
+
+    if image_url or image_path:
+        if reference_url:
+            specs.append(("url", str(reference_url)))
+        elif reference_path:
+            specs.append(("path", str(reference_path)))
+    specs.extend(("url", str(value)) for value in inputs.get("reference_image_urls") or [])
+    specs.extend(("path", str(value)) for value in inputs.get("reference_image_paths") or [])
+    return list(dict.fromkeys(specs))
+
+
 def _input_asset_count(operation: str, inputs: dict[str, Any]) -> int:
     if operation == "image_to_video":
-        return int(
-            bool(
-                inputs.get("image_url")
-                or inputs.get("image_path")
-                or inputs.get("reference_image_url")
-                or inputs.get("reference_image_path")
-            )
-        )
+        return len(_image_to_video_source_specs(inputs))
     if operation == "reference_to_video":
         sources: list[str] = []
         single_source = (
@@ -575,6 +607,12 @@ def _validate_operation_contract(
             errors.append(
                 f"DoFe operation {operation!r} does not expose role {required_role!r}"
             )
+        if (
+            operation == "image_to_video"
+            and asset_count > 1
+            and "reference" not in (constraints.get("roles") or [])
+        ):
+            errors.append("DoFe operation 'image_to_video' does not expose role 'reference'")
 
     minimum = constraints.get("minInputAssets")
     maximum = constraints.get("maxInputAssets")

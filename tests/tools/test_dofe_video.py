@@ -44,6 +44,44 @@ def test_image_to_video_uses_first_frame_role():
     assert roles == [None, "first_frame"]
 
 
+def test_image_to_video_supports_first_frame_plus_reference_image():
+    payload = _payload(
+        {
+            "prompt": "a controlled two-car drift",
+            "operation": "image_to_video",
+            "image_url": "https://cdn.test/start-frame.png",
+            "reference_image_urls": ["https://cdn.test/vehicle-reference.png"],
+        }
+    )
+
+    assert [item.get("role") for item in payload["content"]] == [
+        None,
+        "first_frame",
+        "reference",
+    ]
+    assert payload["content"][2]["part"]["image_url"]["url"] == (
+        "https://cdn.test/vehicle-reference.png"
+    )
+
+
+def test_image_inputs_change_the_paid_task_idempotency_key():
+    tool = DofeVideo()
+    base = {
+        "prompt": "a controlled two-car drift",
+        "operation": "image_to_video",
+        "image_url": "https://cdn.test/start-frame.png",
+    }
+
+    first = tool.idempotency_key(
+        {**base, "reference_image_urls": ["https://cdn.test/vehicle-a.png"]}
+    )
+    second = tool.idempotency_key(
+        {**base, "reference_image_urls": ["https://cdn.test/vehicle-b.png"]}
+    )
+
+    assert first != second
+
+
 def test_image_to_video_requires_image():
     with pytest.raises(ValueError, match="image_to_video requires"):
         _payload({"prompt": "x", "operation": "image_to_video"})
@@ -357,6 +395,62 @@ def test_live_preflight_verifies_dofe_reference_contract(monkeypatch):
     assert report["verification_level"] == "live_provider_contract"
     assert report["live_probe"]["operation"] == "reference_to_video"
     assert report["live_probe"]["reference_binding"]["roles"] == ["reference"]
+
+
+def test_live_preflight_counts_all_image_to_video_inputs(monkeypatch):
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_VIDEO_MODEL", "catalog-seedance")
+    monkeypatch.setattr(
+        DofeClient,
+        "list_models",
+        lambda _self: [{"id": "catalog-seedance"}],
+    )
+    monkeypatch.setattr(
+        DofeClient,
+        "get_playground_capability",
+        lambda _self, _model: {
+            "alias": "catalog-seedance",
+            "modelType": "video",
+            "state": "ready",
+            "executor": "generation_task",
+            "endpointKind": "video_async",
+            "input": {"text": True},
+            "operations": [
+                {
+                    "id": "image_to_video",
+                    "constraints": {
+                        "acceptedAssetTypes": ["image"],
+                        "roles": ["first_frame", "reference"],
+                        "minInputAssets": 1,
+                        "maxInputAssets": 1,
+                        "allowedValues": {"videoOperation": ["image_to_video"]},
+                    },
+                }
+            ],
+            "form": {
+                "fields": [
+                    {"key": "durationSeconds", "min": 5},
+                    {"key": "ratio", "options": ["16:9", "9:16"]},
+                    {"key": "generateAudio", "type": "switch", "labelKey": "audio"},
+                ]
+            },
+            "output": {"mode": "asset"},
+            "readiness": [],
+        },
+    )
+
+    report = DofeVideo().preflight(
+        {
+            "prompt": "Keep both vehicles stable.",
+            "operation": "image_to_video",
+            "image_url": "https://cdn.test/start-frame.png",
+            "reference_image_urls": ["https://cdn.test/vehicle-reference.png"],
+        },
+        live=True,
+    )
+
+    assert report["status"] == "blocked"
+    assert any("at most 1 input assets" in error["message"] for error in report["errors"])
 
 
 @pytest.mark.parametrize(
