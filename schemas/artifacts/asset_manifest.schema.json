@@ -183,7 +183,12 @@
           "uniqueItems": true
         },
         "compression_decisions": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
-        "endpoint_clause": { "type": "string", "minLength": 1 }
+        "endpoint_clause": { "type": "string", "minLength": 1 },
+        "duration_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Per-shot generation duration in seconds, derived from the generation contract (sum of temporal_beats durations plus dialogue pauses). Provider minimums are authoritative; a shot shorter than the provider floor must be satisfied by splitting/clipping in post, never by passing an unsupported smaller value."
+        }
       },
       "additionalProperties": false
     }

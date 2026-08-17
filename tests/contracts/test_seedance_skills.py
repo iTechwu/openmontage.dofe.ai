@@ -646,6 +646,7 @@ def _prompt_compile_spec() -> dict:
         ],
         "compression_decisions": ["omit background traffic detail"],
         "endpoint_clause": "Stop when the SUV is stationary at the lane marker.",
+        "duration_seconds": 6,
     }
 
 
@@ -1710,3 +1711,14 @@ def test_seedance_asset_requires_full_skill_and_check_audit():
     }
 
     assert list(Draft202012Validator(schema).iter_errors(artifact))
+
+def test_prompt_compile_spec_accepts_duration_seconds():
+    schema = json.loads(
+        (ROOT / "schemas" / "artifacts" / "asset_manifest.schema.json").read_text()
+    )
+    compile_spec = _prompt_compile_spec()
+    compile_spec["duration_seconds"] = 8
+
+    errors = list(Draft202012Validator(schema["$defs"]["promptCompileSpec"]).iter_errors(compile_spec))
+    assert errors == []
+    assert compile_spec["duration_seconds"] == 8

@@ -81,6 +81,11 @@ Registry contracts outrank this table when they differ.
 
 - Use 5-8 seconds for one controlled hero action, 10-15 seconds only when the
   provider supports the required multi-shot density.
+- Pass the resolved per-shot `duration_seconds` explicitly as the tool `duration`
+  (derive it from the generation contract, not a tool default). When a shot is
+  shorter than the provider floor (typically 5s), generate at one supported
+  length and satisfy the short timing by splitting/clipping in post; never pass
+  an unsupported smaller value.
 - Use the standard/high-quality variant for dialogue, identity-critical shots,
   multi-shot scenes, slow motion, or complex camera movement. Use fast for
   composition tests and simple inserts.

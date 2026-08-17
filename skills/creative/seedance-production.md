@@ -53,18 +53,24 @@ tag; never assume `@Image1` is portable across providers.
 
 1. Compile only the current scene from `generation_contract`; future scene
    prompts remain provisional.
-2. Run `seedance-quality` preflight. Build `prompt_review.compile_spec` before
+2. Resolve `compile_spec.duration_seconds` from the generation contract before
+   prose: sum the clip's `temporal_beats` durations plus dialogue pauses, vary
+   lengths so no three adjacent shots match, and pass this value explicitly as
+   the tool `duration`. Do not rely on a tool default. A shot shorter than the
+   provider floor must be generated at one supported length and split in post.
+3. Run `seedance-quality` preflight. Build `prompt_review.compile_spec` before
    final prose, then store draft, critique, final prompt, skills,
-   `carrier_coverage`, `compression_decisions`, and provider preflight together.
-3. Require provider preflight to be non-blocking. Generate one representative
+   `carrier_coverage`, `compression_decisions`, `duration_seconds`, and provider
+   preflight together.
+4. Require provider preflight to be non-blocking. Generate one representative
    sample before a batch. A degraded live probe may support the sample, but the
    batch requires explicit approval recorded as `allow_degraded_preflight=true`.
-4. Inspect the actual media, set `model_family="seedance"`, and write a
+5. Inspect the actual media, set `model_family="seedance"`, and write a
    schema-valid `take_review` with one observation per identity ID plus subjects,
    props, environment, camera, lighting, audio, and open motion.
-5. Only accepted observed state may seed the next connected clip. A rejected,
+6. Only accepted observed state may seed the next connected clip. A rejected,
    rerolled, rewritten, or re-anchored take never enters canon.
-6. Re-anchor after two consecutive output-sourced extensions by default and
+7. Re-anchor after two consecutive output-sourced extensions by default and
    never exceed the schema ceiling of three.
 
 ## Stop Conditions

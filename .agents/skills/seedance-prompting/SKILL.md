@@ -21,7 +21,16 @@ Build `asset_manifest.assets[].prompt_review.compile_spec` before prose. Record:
 - the preflight-verified surface profile, or a named conservative profile when
   live verification is unavailable;
 - ordered prompt sections, exact reference emissions, `carrier_coverage`,
-  `compression_decisions`, and the endpoint clause.
+  `compression_decisions`, the endpoint clause, and `duration_seconds`.
+
+Register `duration_seconds` per generated shot before prose: derive it from the
+generation contract as the sum of the clip's `temporal_beats` durations plus
+dialogue `pause_after_seconds`. Vary lengths deliberately so no three adjacent
+shots share the same duration (see `skills/creative/cinematic.md` pacing table:
+action 2-4s, cinematic average 4-8s, documentary 6-12s). Pass the resolved value
+explicitly as the tool's `duration` argument; a shot shorter than the provider
+floor (typically 5s) is satisfied by generating one supported clip and splitting
+it in post, never by passing an unsupported smaller value.
 
 The ordered sections must include both `action_beats` and `endpoint`. Emit
 `false` for `input_parameter` and `internal_only` references; only a provider-
