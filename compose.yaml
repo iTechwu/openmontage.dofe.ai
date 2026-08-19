@@ -20,8 +20,10 @@ x-openmontage-common: &openmontage-common
     OPENMONTAGE_EVENT_ENDPOINT: ${OPENMONTAGE_EVENT_ENDPOINT:-http://host.docker.internal:1455/api/internal/openmontage/events}
     OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL: ${OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL:-http://host.docker.internal:1455}
     OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL: ${OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL:-http://host.docker.internal:1455}
-    # The shared models Compose network exposes Airouter as api:3101.
-    DOFE_MODEL_BASE_URL: ${DOFE_DOCKER_MODEL_BASE_URL:-http://api:3101}
+    # Keep model traffic on the shared internal Compose network. The explicit
+    # Docker override remains available for deployments whose internal service
+    # name differs from the local MVP default.
+    DOFE_MODEL_BASE_URL: ${DOFE_DOCKER_MODEL_BASE_URL:-${DOFE_INTERNAL_BASE_URL:-http://api:3101}}
     OPENMONTAGE_AGENT_EXECUTOR_JSON: '${OPENMONTAGE_AGENT_EXECUTOR_JSON:-["codex","exec","--skip-git-repo-check","--ephemeral","--ignore-user-config","-s","workspace-write","-C","/app","--add-dir","{project_dir}","-"]}'
     OPENMONTAGE_AGENT_TIMEOUT_SECONDS: ${OPENMONTAGE_AGENT_TIMEOUT_SECONDS:-3600}
     OPENMONTAGE_AGENT_MODEL_ID: ${OPENMONTAGE_AGENT_MODEL_ID:-}
