@@ -29,9 +29,13 @@ For Douyin:
 
 - Accept `www.douyin.com/video/...`, `v.douyin.com/...`, mobile share URLs, and
   pasted Chinese share text containing a URL.
-- Use the dedicated cookie-free Douyin downloader (`DouyinShareClient` in
-  `tools/analysis/douyin.py`); the downloader routes Douyin to it automatically.
-  Never try yt-dlp for Douyin.
+- The downloader routes Douyin through the external MCP tool
+  `viral_video_douyin_tos_url` (tools.dofe.ai) **when
+  `OPENMONTAGE_DOUYIN_MCP_URL` is configured**: it returns a pre-signed TOS URL
+  that is downloaded directly, without triggering Douyin-side business ingestion.
+- If MCP is unconfigured or fails, it silently falls back to the dedicated
+  cookie-free `DouyinShareClient` in `tools/analysis/douyin.py`. The downloader
+  routes Douyin automatically; never try yt-dlp for Douyin.
 - When the public route is restricted, ask for an exported Netscape `cookies.txt`
   and pass `cookie_file` or `--cookies`. Never read browser cookies without
   explicit user authorization.
@@ -110,9 +114,11 @@ motion with still images. Stop at the relevant approval gate or structured block
 
 ## Troubleshoot
 
-- Download failure: for Douyin retry the dedicated `DouyinShareClient` downloader
-  (`tools/analysis/douyin.py`); request `cookies.txt` only if the public route is
-  restricted. Non-Douyin download failures retry with current yt-dlp.
+- Download failure: for Douyin, if MCP is configured, first retry the MCP → TOS
+  path (the code layer auto-falls back to local); otherwise retry the dedicated
+  `DouyinShareClient` downloader (`tools/analysis/douyin.py`); request
+  `cookies.txt` only if the public route is restricted. Non-Douyin download
+  failures retry with current yt-dlp.
 - Missing transcript: use `dofe_stt` with an STT ID returned by the current
   catalog. If the extracted file has no provider-accessible URL or the selected ID is not visible to the
   tenant, stop and report that AIRouter/storage blocker; do not fall back to a

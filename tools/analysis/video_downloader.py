@@ -33,6 +33,7 @@ from lib.video_sources import (
     normalize_video_url,
     resolve_cookie_file,
 )
+from tools.analysis.douyin_mcp import MCP_ENV, download_via_mcp
 
 
 class VideoDownloader(BaseTool):
@@ -218,20 +219,20 @@ class VideoDownloader(BaseTool):
         start = time.time()
 
         douyin_client = None
+        extract_error = None
         if platform == "douyin":
-            try:
-                from tools.analysis.douyin import DouyinShareClient
+            from tools.analysis.douyin import DouyinShareClient
 
-                douyin_client = DouyinShareClient()
+            douyin_client = DouyinShareClient()
+            try:
                 metadata = douyin_client.extract(url)
                 metadata["extractor"] = "douyin_public_share"
             except Exception as exc:
-                return ToolResult(
-                    success=False,
-                    error=f"Douyin extraction failed: {exc}",
-                    data={"platform": platform, "resolved_url": url},
-                    duration_seconds=round(time.time() - start, 2),
-                )
+                # MCP-priority: a local extract failure must not gate the MCP
+                # path (the MCP tool resolves + downloads without local parsing).
+                # Defer the error; surface it only if MCP download also fails.
+                metadata = {}
+                extract_error = f"Douyin extraction failed: {exc}"
         else:
             metadata = self._extract_metadata(url, cookie_file)
 
@@ -269,7 +270,14 @@ class VideoDownloader(BaseTool):
         try:
             if dl_format == "video":
                 if douyin_client is not None:
-                    video_path = douyin_client.download(metadata, output_dir / "reference_video.mp4")
+                    video_path = self._download_douyin_reference(url, metadata, output_dir)
+                    if video_path is None:
+                        return ToolResult(
+                            success=False,
+                            error=extract_error or "Douyin download failed.",
+                            data={"platform": platform, "resolved_url": url},
+                            duration_seconds=round(time.time() - start, 2),
+                        )
                     audio_path = self._extract_audio_track(video_path, output_dir)
                 else:
                     video_path, audio_path = self._download_video(
@@ -277,7 +285,14 @@ class VideoDownloader(BaseTool):
                     )
             elif dl_format == "audio_only":
                 if douyin_client is not None:
-                    video_path = douyin_client.download(metadata, output_dir / "reference_video.mp4")
+                    video_path = self._download_douyin_reference(url, metadata, output_dir)
+                    if video_path is None:
+                        return ToolResult(
+                            success=False,
+                            error=extract_error or "Douyin download failed.",
+                            data={"metadata": metadata, "platform": platform},
+                            duration_seconds=round(time.time() - start, 2),
+                        )
                     audio_path = self._extract_audio_track(video_path, output_dir)
                     if audio_path is None:
                         return ToolResult(
@@ -365,6 +380,88 @@ class VideoDownloader(BaseTool):
             return str(audio_out) if audio_out.exists() else None
         except Exception:
             return None
+
+    def _download_douyin_reference(
+        self, raw_url: str, metadata: dict[str, Any], output_dir: Path
+    ) -> str | None:
+        """Prefer the external MCP -> TOS URL path, then fall back to local client.
+
+        When ``OPENMONTAGE_DOUYIN_MCP_URL`` is set, attempt ``download_via_mcp``
+        first; on any failure (returns ``None``) fall back to the local
+        ``DouyinShareClient.download``. Returns ``None`` only when there is no
+        local ``play_url`` to fall back to (i.e. the local extract failed and MCP
+        did not succeed) — the caller then surfaces the extract error.
+
+        Either path patches the caller's ``metadata`` (in place) with fields the
+        brief needs but the local ``DouyinShareClient.extract`` may have failed to
+        supply: ``title`` (best-effort from the MCP envelope), ``duration`` and
+        ``resolution`` (probed from the downloaded file, always available).
+        """
+        if os.environ.get(MCP_ENV, "").strip():
+            mcp_result = download_via_mcp(raw_url, output_dir)
+            if mcp_result is not None and mcp_result.path:
+                self._fill_douyin_metadata(
+                    metadata, mcp_result.path, title=mcp_result.title
+                )
+                return mcp_result.path
+        metadata = metadata or {}
+        if not metadata.get("play_url"):
+            return None
+        from tools.analysis.douyin import DouyinShareClient
+
+        path = DouyinShareClient().download(
+            metadata, output_dir / "reference_video.mp4"
+        )
+        self._fill_douyin_metadata(metadata, path)
+        return path
+
+    def _fill_douyin_metadata(
+        self, metadata: dict[str, Any], video_path: str, *, title: str = ""
+    ) -> None:
+        """Patch the brief's metadata with fields missing after a successful download.
+
+        ``title`` is only applied when still empty (prefer the local extractor's
+        value when it succeeded); ``duration``/``resolution`` are probed from the
+        local file when absent. All operations are guarded so a populated metadata
+        dict is left untouched (no wasted ffprobe on the happy path).
+        """
+        # NOTE: do NOT guard with `metadata = metadata or {}` here. An empty dict
+        # is falsy, so that line would bind a *fresh* {} and the writes below would
+        # mutate a throwaway object instead of the caller's dict — exactly the case
+        # (local extract failed -> metadata == {}) this helper exists to fix.
+        if metadata is None:
+            return
+        if title and not metadata.get("title"):
+            metadata["title"] = title
+        if not metadata.get("duration") or not metadata.get("resolution"):
+            duration, resolution = self._probe_duration_and_resolution(video_path)
+            if not metadata.get("duration"):
+                metadata["duration"] = duration
+            if not metadata.get("resolution"):
+                metadata["resolution"] = resolution
+
+    def _probe_duration_and_resolution(
+        self, video_path: str
+    ) -> tuple[float, str]:
+        """Return ``(duration_seconds, "WxH")`` via ffprobe; ``(0, "")`` on failure."""
+        try:
+            cmd = [
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_format", "-show_streams", video_path,
+            ]
+            result = self.run_command(cmd, timeout=60)
+            data = json.loads(result.stdout)
+            duration = float(data.get("format", {}).get("duration") or 0)
+            streams = data.get("streams") or []
+            video_stream = next(
+                (s for s in streams if s.get("codec_type") == "video"), None
+            )
+            width = int(video_stream.get("width") or 0) if video_stream else 0
+            height = int(video_stream.get("height") or 0) if video_stream else 0
+            resolution = f"{width}x{height}" if width and height else ""
+            return duration, resolution
+        except Exception:  # noqa: BLE001 - metadata is best-effort, never fail closed.
+            return 0, ""
 
     def _download_audio(
         self, url: str, output_dir: Path, cookie_file: str | None = None

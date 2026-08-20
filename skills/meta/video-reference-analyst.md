@@ -38,8 +38,12 @@ video_analyzer.execute({
 ```
 
 For Douyin sources, VideoAnalyzer routes through the dedicated cookie-free
-downloader (`DouyinShareClient` in `tools/analysis/douyin.py`); it never uses
-yt-dlp for Douyin. Treat that routing as fixed.
+downloader; it never uses yt-dlp for Douyin. The download prefers the external MCP
+tool `viral_video_douyin_tos_url` (tools.dofe.ai) when `OPENMONTAGE_DOUYIN_MCP_URL`
+is configured — a pre-signed TOS URL is downloaded directly without triggering
+Douyin-side business ingestion — and silently falls back to `DouyinShareClient` in
+`tools/analysis/douyin.py` on any MCP failure. Treat this MCP-preference routing
+as fixed.
 
 Read the resulting VideoAnalysisBrief. Before proceeding, present a summary to the
 user. This is NOT a raw dump. It's a conversational interpretation, and it MUST be
