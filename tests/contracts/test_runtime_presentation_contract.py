@@ -76,6 +76,8 @@ assert ALL_MANIFESTS, "No pipeline manifests found"
 # an explicit reason. Everything else is required to follow the contract.
 _EXCLUDED_PIPELINES = {
     "framework-smoke": "minimal 2-stage smoke test, no compose stage",
+    "deterministic-video-smoke": "deterministic ffmpeg health-check smoke, "
+    "runtime locked to ffmpeg",
 }
 
 
