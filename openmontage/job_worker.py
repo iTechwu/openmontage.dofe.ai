@@ -373,7 +373,11 @@ class JobWorker:
             local_inputs=local_inputs,
         )
         credential: DelegatedModelCredential | None = None
-        if self.model_credential_bridge is not None:
+        requires_credential = _executor_requires_model_credential(
+            self.executor,
+            assignment,
+        )
+        if self.model_credential_bridge is not None and requires_credential:
             try:
                 credential = self.model_credential_bridge.issue(
                     job_id=latest.job_id,
@@ -783,6 +787,14 @@ def _bounded_executor_error(error: PipelineExecutionError) -> str:
     if not message:
         return "External Agent executor failed"
     return _summarize_error(message, 1000)
+
+
+def _executor_requires_model_credential(
+    executor: PipelineExecutor,
+    assignment: StageAssignment,
+) -> bool:
+    resolver = getattr(executor, "requires_model_credential", None)
+    return bool(resolver(assignment)) if callable(resolver) else True
 
 
 def _bounded_model_credential_error(error: ModelCredentialBridgeError) -> str:

@@ -195,6 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _build_job_worker(args: argparse.Namespace):
     from lib.paths import PROJECTS_DIR
     from openmontage.artifact_bridge import ArtifactBridgeClient
+    from openmontage.deterministic_video_executor import DeterministicVideoSmokeExecutor
     from openmontage.job_api import default_job_service
     from openmontage.job_worker import JobWorker
     from openmontage.model_credential_bridge import ModelCredentialBridgeClient
@@ -205,11 +206,12 @@ def _build_job_worker(args: argparse.Namespace):
     if not worker_id:
         worker_id = f"{socket.gethostname()}-{os.getpid()}"
     service = default_job_service()
+    agent_executor = AgentCommandPipelineExecutor.from_environment(
+        invocation_store=ModelInvocationStore(service.database_path),
+    )
     return JobWorker(
         service,
-        AgentCommandPipelineExecutor.from_environment(
-            invocation_store=ModelInvocationStore(service.database_path),
-        ),
+        DeterministicVideoSmokeExecutor(agent_executor),
         projects_dir=PROJECTS_DIR,
         worker_id=worker_id,
         lease_duration=timedelta(seconds=args.lease_seconds),

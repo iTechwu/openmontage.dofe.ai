@@ -325,6 +325,60 @@ def test_worker_fetches_and_scopes_a_delegated_model_credential_per_stage(tmp_pa
     assert executor.credentials[0].pipeline_stage == "research"
 
 
+def test_worker_skips_model_credential_for_credential_free_executor(tmp_path: Path) -> None:
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(
+        _request(
+            request_id="credential-free-stage",
+            workflow="deterministic-video-smoke",
+        ),
+        _attribution(),
+    )
+
+    class CredentialFreeExecutor(FakeExecutor):
+        def requires_model_credential(self, _assignment: StageAssignment) -> bool:
+            return False
+
+        def execute(self, assignment, *, credential=None, cancellation_requested=None):
+            assert credential is None
+            self.assignments.append(assignment)
+            write_checkpoint(
+                assignment.projects_dir,
+                assignment.project_id,
+                assignment.stage,
+                "completed",
+                {"render_report": sample_artifact("render_report")},
+                pipeline_type=assignment.pipeline,
+            )
+            checkpoint = read_checkpoint(
+                assignment.projects_dir,
+                assignment.project_id,
+                assignment.stage,
+            )
+            assert checkpoint is not None
+            return PipelineExecutionResult(
+                status="completed",
+                checkpoint=checkpoint,
+                assignment_path=assignment.project_dir / "assignment.json",
+            )
+
+    class UnexpectedCredentialBridge:
+        def issue(self, **_kwargs):
+            raise AssertionError("credential-free executor must not request a credential")
+
+    executor = CredentialFreeExecutor([])
+    result = _worker(
+        service,
+        executor,
+        tmp_path / "projects",
+        model_credential_bridge=UnexpectedCredentialBridge(),
+    ).run_once(now=NOW)
+
+    assert result is not None and result.outcome == "stage_completed"
+    assert result.stage == "compose"
+    assert service.get_job(job.job_id).stages[0].status == StageStatus.SUCCEEDED
+
+
 def test_worker_persists_safe_model_credential_failure_diagnostics(tmp_path: Path) -> None:
     database_path = tmp_path / "jobs.sqlite3"
     service = JobService(database_path)

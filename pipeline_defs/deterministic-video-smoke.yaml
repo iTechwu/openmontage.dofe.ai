@@ -1,0 +1,21 @@
+name: deterministic-video-smoke
+version: "1.0"
+description: Deterministic local MP4 smoke pipeline for AgentSpace availability verification.
+category: custom
+stability: beta
+default_checkpoint_policy: guided
+required_skills:
+  - pipelines/deterministic-video-smoke/compose-director
+stages:
+  - name: compose
+    skill: pipelines/deterministic-video-smoke/compose-director
+    produces:
+      - render_report
+    tools_available:
+      - ffmpeg
+      - ffprobe
+    checkpoint_required: true
+    human_approval_default: false
+    success_criteria:
+      - Produces a locally rendered H.264 MP4 with verified dimensions, frame rate, and duration
+      - Produces a schema-valid render_report artifact
