@@ -4,6 +4,7 @@ import json
 
 from tools.analysis.dofe_stt import DofeSpeechToText
 from tools.base_tool import ToolStatus
+from tools.dofe import DofeAPIError
 
 
 def _catalog(monkeypatch, model="catalog-stt"):
@@ -155,3 +156,64 @@ def test_dofe_stt_rejects_model_missing_from_catalog_before_submit(monkeypatch):
 
     assert not result.success
     assert "not returned by GET /v1/models" in result.error
+
+
+def test_dofe_stt_persists_created_task_and_resumes_before_upload(monkeypatch, tmp_path):
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    _catalog(monkeypatch)
+    source = tmp_path / "audio.wav"
+    source.write_bytes(b"RIFF")
+    output = tmp_path / "transcript.json"
+    calls = []
+
+    def fake_upload(_self, path, **_kwargs):
+        calls.append(("upload", str(path)))
+        return {
+            "url": "tos://dofe-transcode/temp/generation-assets/first.wav",
+            "bucket": "dofe-transcode",
+            "key": "temp/generation-assets/first.wav",
+            "sizeBytes": 4,
+        }
+
+    def fail_after_create(_self, _payload, **kwargs):
+        calls.append(("submit", kwargs.get("existing_task_id")))
+        raise DofeAPIError("poll failed", details={"task_id": "gen-recover-1"})
+
+    monkeypatch.setattr("tools.analysis.dofe_stt.DofeMediaUploadClient.upload", fake_upload)
+    monkeypatch.setattr("tools.analysis.dofe_stt.DofeClient.submit_and_collect", fail_after_create)
+
+    first = DofeSpeechToText().execute(
+        {"audio_path": str(source), "duration_seconds": 60, "output_path": str(output)}
+    )
+    resume_path = output.with_suffix(".resume.json")
+
+    assert not first.success
+    assert json.loads(resume_path.read_text(encoding="utf-8")) == {
+        "idempotency_key": DofeSpeechToText().idempotency_key(
+            {"audio_path": str(source), "duration_seconds": 60, "output_path": str(output)}
+        ),
+        "task_id": "gen-recover-1",
+    }
+
+    def recover(_self, _payload, **kwargs):
+        calls.append(("resume", kwargs.get("existing_task_id")))
+        return {
+            "task_id": "gen-recover-1",
+            "status": "succeeded",
+            "text": "恢复成功",
+            "final_cost": "0.01",
+            "cost_currency": "CNY",
+        }
+
+    monkeypatch.setattr("tools.analysis.dofe_stt.DofeClient.submit_and_collect", recover)
+    second = DofeSpeechToText().execute(
+        {"audio_path": str(source), "duration_seconds": 60, "output_path": str(output)}
+    )
+
+    assert second.success
+    assert calls == [
+        ("upload", str(source)),
+        ("submit", None),
+        ("resume", "gen-recover-1"),
+    ]
+    assert not resume_path.exists()

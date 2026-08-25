@@ -165,10 +165,22 @@ class DofeSpeechToText(BaseTool):
                 model=requested_model,
             )
 
+        output = Path(inputs.get("output_path") or "projects/dofe/analysis/transcript.json")
+        idempotency_key = self.idempotency_key(inputs)
+        resume_path = output.with_suffix(".resume.json")
+        existing_task_id = str(inputs.get("task_id") or "").strip() or None
+        if not existing_task_id and resume_path.is_file():
+            try:
+                resume = json.loads(resume_path.read_text(encoding="utf-8"))
+                if resume.get("idempotency_key") == idempotency_key:
+                    existing_task_id = str(resume.get("task_id") or "").strip() or None
+            except (OSError, ValueError, AttributeError):
+                pass
+
         audio_url = str(inputs.get("audio_url") or "").strip()
         source_asset: dict[str, Any] | None = None
         audio_path = str(inputs.get("audio_path") or "").strip()
-        if audio_path:
+        if audio_path and not existing_task_id:
             try:
                 source_asset = DofeMediaUploadClient().upload(audio_path, asset_type="audio")
                 audio_url = str(source_asset["url"])
@@ -180,7 +192,10 @@ class DofeSpeechToText(BaseTool):
                     duration_seconds=round(time.monotonic() - started, 2),
                     model=model,
                 )
-        if not (is_https_url(audio_url) or audio_url.startswith("tos://")):
+        if existing_task_id:
+            # The payload is not submitted on resume; only the existing task is polled.
+            audio_url = "https://resume.invalid/already-submitted-audio"
+        elif not (is_https_url(audio_url) or audio_url.startswith("tos://")):
             return ToolResult(
                 success=False,
                 error=(
@@ -214,7 +229,7 @@ class DofeSpeechToText(BaseTool):
             ],
             "params": params,
         }
-        metadata = build_metadata(inputs, self.idempotency_key(inputs))
+        metadata = build_metadata(inputs, idempotency_key)
         if metadata:
             payload["metadata"] = metadata
 
@@ -223,9 +238,25 @@ class DofeSpeechToText(BaseTool):
                 payload,
                 timeout_seconds=dofe_config.poll_max_seconds("stt"),
                 poll_interval=dofe_config.poll_interval(),
-                existing_task_id=inputs.get("task_id"),
+                existing_task_id=existing_task_id,
             )
         except DofeError as exc:
+            recoverable_task_id = str((exc.details or {}).get("task_id") or "").strip()
+            if recoverable_task_id:
+                resume_path.parent.mkdir(parents=True, exist_ok=True)
+                pending_path = resume_path.with_suffix(".json.tmp")
+                pending_path.write_text(
+                    json.dumps(
+                        {
+                            "idempotency_key": idempotency_key,
+                            "task_id": recoverable_task_id,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                pending_path.replace(resume_path)
             return ToolResult(
                 success=False,
                 data={"provider": "dofe", "model": model},
@@ -256,7 +287,6 @@ class DofeSpeechToText(BaseTool):
             "is_final": final_cost is not None,
             "pricing_breakdown": result.get("pricing_breakdown"),
         }
-        output = Path(inputs.get("output_path") or "projects/dofe/analysis/transcript.json")
         output.parent.mkdir(parents=True, exist_ok=True)
         transcript = {
             "full_text": text,
@@ -272,6 +302,7 @@ class DofeSpeechToText(BaseTool):
             **({"source_asset": source_asset} if source_asset else {}),
         }
         output.write_text(json.dumps(transcript, ensure_ascii=False, indent=2), encoding="utf-8")
+        resume_path.unlink(missing_ok=True)
         return ToolResult(
             success=True,
             data=transcript,

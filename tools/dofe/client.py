@@ -462,9 +462,15 @@ class DofeClient:
         awaited_terminal = status not in TERMINAL_STATUSES
 
         if awaited_terminal:
-            data = self.wait_for_terminal(
-                task_id, timeout_seconds=timeout_seconds, poll_interval=poll_interval,
-            )
+            try:
+                data = self.wait_for_terminal(
+                    task_id, timeout_seconds=timeout_seconds, poll_interval=poll_interval,
+                )
+            except DofeError as exc:
+                details = dict(exc.details or {})
+                details.setdefault("task_id", task_id)
+                exc.details = details
+                raise
             status = str(data.get("status") or "").lower()
             if isinstance(data.get("outputAssets"), list):
                 assets = data["outputAssets"]

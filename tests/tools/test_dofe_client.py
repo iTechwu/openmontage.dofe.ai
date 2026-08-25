@@ -328,6 +328,19 @@ def test_resume_existing_task_skips_create():
     assert _count(m, "POST", TASKS) == 0  # did not re-create
 
 
+def test_poll_error_after_create_exposes_task_id_for_resume():
+    task_url = f"{TASKS}/gen-resume"
+    with _rm.Mocker() as m:
+        m.post(TASKS, json=_ok({"taskId": "gen-resume", "status": "running"}))
+        m.get(task_url, status_code=500, json=_err(500, "database query error"))
+        with pytest.raises(DofeAPIError) as exc:
+            _client(max_5xx_retries=0).submit_and_collect(
+                {"model": "x"}, timeout_seconds=60, poll_interval=1
+            )
+
+    assert exc.value.details == {"task_id": "gen-resume"}
+
+
 # ------------------------------------------------------------------- retries
 
 def test_rate_limit_http_429_retries_then_succeeds():
