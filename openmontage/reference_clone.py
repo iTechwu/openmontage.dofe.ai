@@ -14,6 +14,7 @@ from lib.checkpoint import get_next_stage, init_project
 from lib.paths import PROJECTS_DIR
 from lib.pipeline_loader import load_pipeline_readonly, pipeline_supports_reference_input
 from lib.video_sources import detect_video_platform, normalize_video_url
+from openmontage.exchange import ProjectFileExporter
 from tools.analysis.video_analyzer import VideoAnalyzer
 from tools.dofe import config as dofe_config
 from tools.dofe.client import DofeClient
@@ -69,6 +70,31 @@ def _select_pipeline(requested: str, brief: dict[str, Any]) -> str:
 
 def _brief_path(project_dir: Path) -> Path:
     return project_dir / "artifacts" / "video_analysis_brief.json"
+
+
+def _exports_block(project_id: str) -> dict[str, Any]:
+    """Describe the on-demand file-server export surface for a project.
+
+    When the file-server exporter is configured (docker/CI deployment) the workspace
+    agent cannot read the container project directory, so it must mirror files into
+    the shared exchange via ``export_project_file`` and then read
+    ``/exchange/...`` or fetch the public URL. Local (non-docker) runs leave this
+    disabled and return container paths directly.
+    """
+    exporter = ProjectFileExporter()
+    if not exporter.enabled:
+        return {"enabled": False}
+    root = exporter.root(project_id)
+    return {
+        "enabled": True,
+        "project_root_url": root["url"],
+        "project_root_host_path": root["host_path"],
+        "instructions": (
+            "List generated files with list_project_files(project_id); mirror any file "
+            "into the shared exchange with export_project_file(project_id, relative_path), "
+            "then read it from the returned host_path or fetch the returned url."
+        ),
+    }
 
 
 def _airouter_model_preflight() -> dict[str, Any]:
@@ -201,6 +227,7 @@ class ReferenceCloneService:
             "next_stage": get_next_stage(
                 self.projects_root, resolved_project_id, selected_pipeline
             ),
+            "exports": _exports_block(resolved_project_id),
             "agent_instructions": [
                 "Read skills/meta/video-reference-analyst.md and inspect the extracted keyframes.",
                 "Present a five-aspect reference analysis and 2-3 differentiated concepts; do not make a carbon copy.",
@@ -235,6 +262,7 @@ class ReferenceCloneService:
             "pipeline_type": pipeline,
             "next_stage": get_next_stage(self.projects_root, resolved, pipeline),
             "analysis": request.get("analysis", {}),
+            "exports": _exports_block(resolved),
             "project_dir": str(project_dir),
         }
 

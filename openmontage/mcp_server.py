@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 from openmontage.contracts import JobCreateRequest
+from openmontage.exchange import ProjectFileExporter
 from openmontage.reference_clone import ReferenceCloneService, capability_summary
 
 try:
@@ -202,6 +203,29 @@ def create_server(
             "artifacts": [artifact.to_wire() for artifact in snapshot.artifacts],
             "lastSequence": snapshot.last_sequence,
         }
+
+    @server.tool()
+    def list_project_files(project_id: str) -> dict[str, Any]:
+        """List the files generated for a prepared reference project.
+
+        Returns every file's project-relative path and size (metadata only; nothing is
+        copied), plus the shared file-server export root when the file-server exporter
+        is enabled. Use ``export_project_file`` to mirror a specific file into the
+        shared exchange so the workspace agent can read it.
+        """
+        return ProjectFileExporter().list(project_id)
+
+    @server.tool()
+    def export_project_file(project_id: str, relative_path: str, include_media: bool = False) -> dict[str, Any]:
+        """Mirror one project file (or a whole directory) into the shared file-server.
+
+        Returns the file's public URL (``http://host.docker.internal:18090/...``) and the
+        harness host path (``/exchange/...``). Copying is on demand and, by default,
+        skips large media files, so the small analysis outputs (brief, keyframes, scenes,
+        transcript, request JSON) are what get mirrored. Pass ``include_media=true`` to
+        also mirror a media file (e.g. the reference video).
+        """
+        return ProjectFileExporter().export(project_id, relative_path, include_media=include_media)
 
     @server.resource("openmontage://reference-clone-guide")
     def reference_clone_guide() -> str:
