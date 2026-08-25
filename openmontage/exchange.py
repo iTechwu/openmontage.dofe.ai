@@ -3,9 +3,11 @@
 The workspace agent (DSH harness) cannot read OpenMontage's project directory
 (``/data/projects/<id>/...``): it lives in the OpenMontage container namespace
 and is not mounted into the harness. To let the agent fetch generated files we
-mirror them *on demand* into the shared exchange directory that the
-``mcp-file-server`` already serves (host ``/data/mcp-exchange`` ->
-``http://host.docker.internal:18090``, and ``/exchange`` inside the harness).
+mirror them into the shared exchange directory that the ``mcp-file-server``
+already serves (host ``/data/mcp-exchange`` -> ``http://127.0.0.1:18090``, and
+``/exchange`` inside the harness). The base URL uses ``127.0.0.1`` because the
+harness runs in host-network mode and cannot resolve ``host.docker.internal``;
+OpenMontage only builds this URL string and never fetches it.
 
 The exporter mirrors files with a small margin but never over-copies, and keeps
 the mirror healthy with periodic cleanup:

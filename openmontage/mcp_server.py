@@ -219,7 +219,7 @@ def create_server(
     def export_project_file(project_id: str, relative_path: str, include_media: bool = False) -> dict[str, Any]:
         """Mirror one project file (or a whole directory) into the shared file-server.
 
-        Returns the file's public URL (``http://host.docker.internal:18090/...``) and the
+        Returns the file's public URL (``http://127.0.0.1:18090/...``) and the
         harness host path (``/exchange/...``). Copying is on demand and, by default,
         skips large media files, so the small analysis outputs (brief, keyframes, scenes,
         transcript, request JSON) are what get mirrored. Pass ``include_media=true`` to

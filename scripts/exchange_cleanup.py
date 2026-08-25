@@ -32,7 +32,7 @@ from openmontage.exchange import ProjectFileExporter  # noqa: E402
 def main() -> int:
     exporter = ProjectFileExporter(
         export_dir=os.environ.get("OPENMONTAGE_EXPORT_DIR", "/data/mcp-exchange/openmontage"),
-        base_url=os.environ.get("OPENMONTAGE_FILE_SERVER_BASE_URL", "http://host.docker.internal:18090"),
+        base_url=os.environ.get("OPENMONTAGE_FILE_SERVER_BASE_URL", "http://127.0.0.1:18090"),
     )
     if not exporter.enabled:
         print("OpenMontage file-server exporter is not enabled; nothing to clean.")

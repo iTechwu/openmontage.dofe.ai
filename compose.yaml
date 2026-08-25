@@ -36,8 +36,11 @@ x-openmontage-common: &openmontage-common
     # On-demand project-file export through the shared mcp-file-server so the
     # workspace agent can read generated files (it cannot see /data/projects).
     # Both unset => disabled (local dev keeps container paths).
+    # Base URL uses 127.0.0.1 (not host.docker.internal) so the DSH harness, which
+    # runs in host-network mode and cannot resolve host.docker.internal, can reach
+    # the shared file-server. OpenMontage only builds this string; it never fetches it.
     OPENMONTAGE_EXPORT_DIR: ${OPENMONTAGE_EXPORT_DIR:-/data/mcp-exchange/openmontage}
-    OPENMONTAGE_FILE_SERVER_BASE_URL: ${OPENMONTAGE_FILE_SERVER_BASE_URL:-http://host.docker.internal:18090}
+    OPENMONTAGE_FILE_SERVER_BASE_URL: ${OPENMONTAGE_FILE_SERVER_BASE_URL:-http://127.0.0.1:18090}
     OPENMONTAGE_EXPORT_PREFIX: ${OPENMONTAGE_EXPORT_PREFIX:-openmontage}
     DOFE_ENABLED: "true"
     DOFE_CA_BUNDLE: ${DOFE_CA_BUNDLE:-}
