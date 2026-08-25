@@ -7,7 +7,7 @@ gates to produce the new video.
 
 All model-backed stages are fail-closed to the DoFe Airouter. Host processes use
 `https://model.local.dofe.ai/api`; Compose services use the shared-network
-address `${DOFE_DOCKER_MODEL_BASE_URL:-http://api:3101}`. Before choosing a
+address `${DOFE_DOCKER_MODEL_BASE_URL:-http://dofe-models-api:3101}`. Before choosing a
 model, OpenMontage performs an authenticated `GET /v1/models` against that
 effective base URL and accepts only an exact returned ID. Direct vendor model
 fallbacks and guessed defaults are disabled when `DOFE_ENABLED=true`.
@@ -27,7 +27,8 @@ exchange-rate source and timestamp.
 Price preflight uses AIRouter's HMAC-authenticated internal quote endpoint. Set
 `DOFE_TENANT_ID` and `INTERNAL_API_SECRET` in the OpenMontage deployment
 environment. The Compose service sends these requests over the shared network
-to `http://api:3101/internal/pricing/quote`; secrets are never returned by MCP.
+to `${DOFE_DOCKER_INTERNAL_API_BASE_URL:-http://dofe-models-api:3101}/internal/pricing/quote`;
+secrets are never returned by MCP.
 The quote request uses the exact model ID selected from the current tenant
 catalog. Actual spend is finalized from the provider-reported output-token usage.
 
@@ -49,7 +50,10 @@ curl http://localhost:8765/healthz
 The MCP endpoint is `http://localhost:8765/mcp`. Generated projects persist in
 `./projects`; the local music library is mounted from `./music_library`.
 The durable Job snapshot and transactional event outbox are stored at
-`./projects/.openmontage/jobs.sqlite3`.
+`./projects/.openmontage/jobs.sqlite3`. The MCP container is ready only when its
+own `/healthz` endpoint and the authenticated DoFe `/v1/models` catalog are both
+reachable, so a broken shared-network hostname or missing model credential fails
+the deployment health gate before a production job starts.
 
 When AgentSpace is available, start the signed event publisher as well:
 
@@ -107,15 +111,15 @@ export OPENMONTAGE_AGENT_MODEL_ID="<exact-id-from-catalog>"
 #   set -a; . ./.env; set +a
 #   curl -H "Authorization: Bearer $DOFE_MODEL_API_KEY" "${DOFE_MODEL_BASE_URL:-https://model.local.dofe.ai/api}/v1/models"
 #
-# Container-internal — api:3101 is Compose DNS on the shared dofe-models network,
+# Container-internal — dofe-models-api:3101 is Compose DNS on the shared dofe-models network,
 # so it is NOT reachable from the host. Run curl INSIDE a service. The whole curl
 # is single-quoted so the HOST shell does not expand $DOFE_MODEL_API_KEY (which
 # the host may not have loaded); the container's login shell expands it from the
 # already-injected container env. Read $DOFE_MODEL_BASE_URL — that is the var
 # compose.yaml injects into the container (resolved from the host's
-# $DOFE_DOCKER_MODEL_BASE_URL, default http://api:3101); the host-only
+# $DOFE_DOCKER_MODEL_BASE_URL, default http://dofe-models-api:3101); the host-only
 # $DOFE_DOCKER_MODEL_BASE_URL is NOT in the container env:
-#   docker compose exec openmontage-mcp sh -lc 'curl -fsS -H "Authorization: Bearer $DOFE_MODEL_API_KEY" "${DOFE_MODEL_BASE_URL:-http://api:3101}/v1/models"'
+#   docker compose exec openmontage-mcp sh -lc 'curl -fsS -H "Authorization: Bearer $DOFE_MODEL_API_KEY" "${DOFE_MODEL_BASE_URL:-http://dofe-models-api:3101}/v1/models"'
 openmontage worker run --once --json
 openmontage worker run --interval 2 --json
 ```

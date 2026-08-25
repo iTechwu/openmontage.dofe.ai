@@ -16,6 +16,10 @@ def test_compose_wires_durable_jobs_and_a_dedicated_event_publisher() -> None:
 
     assert mcp["environment"]["OPENMONTAGE_JOB_DB"] == "/data/projects/.openmontage/jobs.sqlite3"
     assert "OPENMONTAGE_SERVICE_TOKEN" in mcp["environment"]
+    assert "/healthz" in mcp["healthcheck"]["test"][-1]
+    assert "/v1/models" in mcp["healthcheck"]["test"][-1]
+    assert "$${DOFE_MODEL_BASE_URL}" in mcp["healthcheck"]["test"][-1]
+    assert "$${DOFE_MODEL_API_KEY}" in mcp["healthcheck"]["test"][-1]
     assert publisher["command"][:2] == ["events", "publish"]
     assert publisher["environment"]["OPENMONTAGE_EVENT_ENDPOINT"]
     assert "OPENMONTAGE_EVENT_SIGNING_SECRET" in publisher["environment"]
@@ -28,7 +32,10 @@ def test_compose_wires_durable_jobs_and_a_dedicated_event_publisher() -> None:
     assert worker["environment"]["OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL"]
     assert worker["environment"]["OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL"]
     assert worker["environment"]["DOFE_MODEL_BASE_URL"] == (
-        "${DOFE_DOCKER_MODEL_BASE_URL:-http://api:3101}"
+        "${DOFE_DOCKER_MODEL_BASE_URL:-http://dofe-models-api:3101}"
+    )
+    assert worker["environment"]["DOFE_INTERNAL_API_BASE_URL"] == (
+        "${DOFE_DOCKER_INTERNAL_API_BASE_URL:-http://dofe-models-api:3101}"
     )
     assert worker["environment"]["OPENMONTAGE_AGENT_MODEL_ID"] == (
         "${OPENMONTAGE_AGENT_MODEL_ID:-}"

@@ -102,7 +102,7 @@ tenant-visible catalog with an authenticated `GET /v1/models` request against
 the effective DoFe base URL:
 
 - host runtime: `https://model.local.dofe.ai/api/v1/models`
-- Docker Compose runtime: `${DOFE_DOCKER_MODEL_BASE_URL:-http://api:3101}/v1/models`
+- Docker Compose runtime: `${DOFE_DOCKER_MODEL_BASE_URL:-http://dofe-models-api:3101}/v1/models`
 
 Use only an exact `id` returned by that request. An explicit `model_name` or a
 `DOFE_*_MODEL` environment value is only a candidate and MUST be checked against

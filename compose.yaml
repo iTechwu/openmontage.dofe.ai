@@ -21,9 +21,12 @@ x-openmontage-common: &openmontage-common
     OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL: ${OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL:-http://host.docker.internal:1455}
     OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL: ${OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL:-http://host.docker.internal:1455}
     # Keep model traffic on the shared internal Compose network. The explicit
-    # Docker override remains available for deployments whose internal service
-    # name differs from the local MVP default.
-    DOFE_MODEL_BASE_URL: ${DOFE_DOCKER_MODEL_BASE_URL:-http://api:3101}
+    # Docker overrides remain available for deployments whose internal service
+    # name differs from the centrally managed default. Override the internal
+    # API separately so a host-only localhost value from .env cannot leak into
+    # the container and point back at OpenMontage itself.
+    DOFE_MODEL_BASE_URL: ${DOFE_DOCKER_MODEL_BASE_URL:-http://dofe-models-api:3101}
+    DOFE_INTERNAL_API_BASE_URL: ${DOFE_DOCKER_INTERNAL_API_BASE_URL:-http://dofe-models-api:3101}
     OPENMONTAGE_AGENT_EXECUTOR_JSON: '${OPENMONTAGE_AGENT_EXECUTOR_JSON:-["codex","exec","--skip-git-repo-check","--ephemeral","--ignore-user-config","-s","workspace-write","-C","/app","--add-dir","{project_dir}","-"]}'
     OPENMONTAGE_AGENT_TIMEOUT_SECONDS: ${OPENMONTAGE_AGENT_TIMEOUT_SECONDS:-3600}
     OPENMONTAGE_AGENT_MODEL_ID: ${OPENMONTAGE_AGENT_MODEL_ID:-}
@@ -46,6 +49,18 @@ services:
     command: ["mcp", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8765"]
     ports:
       - "${OPENMONTAGE_MCP_PORT:-8765}:8765"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS http://127.0.0.1:8765/healthz >/dev/null &&
+          curl -fsS --connect-timeout 5 --max-time 10
+          -H "Authorization: Bearer $${DOFE_MODEL_API_KEY}"
+          "$${DOFE_MODEL_BASE_URL}/v1/models" >/dev/null
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
 
   openmontage-cli:

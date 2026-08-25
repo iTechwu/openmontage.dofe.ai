@@ -76,6 +76,7 @@ def test_container_model_query_reads_compose_injected_var() -> None:
         "DOFE_DOCKER_MODEL_BASE_URL is host-only and is not injected into the "
         "container; reading it there always hits the default"
     )
+    assert "http://dofe-models-api:3101" in body
 
 
 def test_host_model_query_documents_env_loading() -> None:
