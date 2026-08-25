@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -30,9 +31,19 @@ from tools.dofe.runtime import _parse_cost, build_metadata
 from tools.dofe.status import configured_model_is_visible
 
 
+def _write_resume_state(path: Path, state: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pending_path = path.with_name(f"{path.name}.tmp")
+    pending_path.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    pending_path.replace(path)
+
+
 class DofeSpeechToText(BaseTool):
     name = "dofe_stt"
-    version = "0.1.0"
+    version = "0.1.1"
     tier = ToolTier.CORE
     capability = "analysis"
     provider = "dofe"
@@ -100,10 +111,12 @@ class DofeSpeechToText(BaseTool):
     retry_policy = RetryPolicy(max_retries=2, retryable_errors=["rate_limit", "timeout"])
     idempotency_key_fields = [
         "audio_url",
-        "audio_path",
         "duration_seconds",
         "language",
         "asr_mode",
+        "sample_rate",
+        "audio_format",
+        "model_name",
     ]
     side_effects = [
         "uploads local audio to dofe-transcode through the AIRouter internal API",
@@ -131,6 +144,30 @@ class DofeSpeechToText(BaseTool):
 
     def estimate_runtime(self, inputs: dict[str, Any]) -> float:
         return max(20.0, float(inputs.get("duration_seconds") or 0) * 0.25)
+
+    def idempotency_key(self, inputs: dict[str, Any]) -> str:
+        key_data = {
+            "audio_url": str(inputs.get("audio_url") or "").strip() or None,
+            "duration_seconds": float(inputs.get("duration_seconds") or 0),
+            "language": str(inputs.get("language") or "zh-CN"),
+            "asr_mode": str(inputs.get("asr_mode") or "fast"),
+            "sample_rate": int(inputs.get("sample_rate") or 16000),
+            "audio_format": str(inputs.get("audio_format") or "").strip() or None,
+            "model_name": self.resolve_model(inputs),
+        }
+        audio_path = str(inputs.get("audio_path") or "").strip()
+        if audio_path:
+            source = Path(audio_path)
+            if source.is_file():
+                digest = hashlib.sha256()
+                with source.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                key_data["audio_sha256"] = digest.hexdigest()
+            else:
+                key_data["audio_path"] = audio_path
+        raw = json.dumps(key_data, sort_keys=True)
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
         started = time.monotonic()
@@ -169,29 +206,44 @@ class DofeSpeechToText(BaseTool):
         idempotency_key = self.idempotency_key(inputs)
         resume_path = output.with_suffix(".resume.json")
         existing_task_id = str(inputs.get("task_id") or "").strip() or None
+        resume_state: dict[str, Any] = {}
         if not existing_task_id and resume_path.is_file():
             try:
                 resume = json.loads(resume_path.read_text(encoding="utf-8"))
                 if resume.get("idempotency_key") == idempotency_key:
+                    resume_state = resume
                     existing_task_id = str(resume.get("task_id") or "").strip() or None
             except (OSError, ValueError, AttributeError):
                 pass
 
         audio_url = str(inputs.get("audio_url") or "").strip()
-        source_asset: dict[str, Any] | None = None
+        saved_source_asset = resume_state.get("source_asset")
+        source_asset: dict[str, Any] | None = (
+            saved_source_asset if isinstance(saved_source_asset, dict) else None
+        )
         audio_path = str(inputs.get("audio_path") or "").strip()
         if audio_path and not existing_task_id:
-            try:
-                source_asset = DofeMediaUploadClient().upload(audio_path, asset_type="audio")
-                audio_url = str(source_asset["url"])
-            except DofeMediaUploadError as exc:
-                return ToolResult(
-                    success=False,
-                    data={"provider": "dofe", "model": model},
-                    error=f"AIRouter audio staging failed before {model!r}: {exc}",
-                    duration_seconds=round(time.monotonic() - started, 2),
-                    model=model,
-                )
+            saved_audio_url = str(resume_state.get("audio_url") or "").strip()
+            if is_https_url(saved_audio_url) or saved_audio_url.startswith("tos://"):
+                audio_url = saved_audio_url
+            else:
+                try:
+                    source_asset = DofeMediaUploadClient().upload(audio_path, asset_type="audio")
+                    audio_url = str(source_asset["url"])
+                except DofeMediaUploadError as exc:
+                    return ToolResult(
+                        success=False,
+                        data={"provider": "dofe", "model": model},
+                        error=f"AIRouter audio staging failed before {model!r}: {exc}",
+                        duration_seconds=round(time.monotonic() - started, 2),
+                        model=model,
+                    )
+                resume_state = {
+                    "idempotency_key": idempotency_key,
+                    "audio_url": audio_url,
+                    "source_asset": source_asset,
+                }
+                _write_resume_state(resume_path, resume_state)
         if existing_task_id:
             # The payload is not submitted on resume; only the existing task is polled.
             audio_url = "https://resume.invalid/already-submitted-audio"
@@ -243,20 +295,13 @@ class DofeSpeechToText(BaseTool):
         except DofeError as exc:
             recoverable_task_id = str((exc.details or {}).get("task_id") or "").strip()
             if recoverable_task_id:
-                resume_path.parent.mkdir(parents=True, exist_ok=True)
-                pending_path = resume_path.with_suffix(".json.tmp")
-                pending_path.write_text(
-                    json.dumps(
-                        {
-                            "idempotency_key": idempotency_key,
-                            "task_id": recoverable_task_id,
-                        },
-                        ensure_ascii=False,
-                        indent=2,
-                    ),
-                    encoding="utf-8",
+                resume_state.update(
+                    {
+                        "idempotency_key": idempotency_key,
+                        "task_id": recoverable_task_id,
+                    }
                 )
-                pending_path.replace(resume_path)
+                _write_resume_state(resume_path, resume_state)
             return ToolResult(
                 success=False,
                 data={"provider": "dofe", "model": model},

@@ -28,6 +28,53 @@ def test_dofe_stt_status_requires_catalog_selection(monkeypatch):
     assert DofeSpeechToText().get_status() == ToolStatus.AVAILABLE
 
 
+def test_dofe_stt_idempotency_tracks_audio_content_and_request_shape(tmp_path):
+    first_path = tmp_path / "first.wav"
+    second_path = tmp_path / "second.wav"
+    first_path.write_bytes(b"same audio")
+    second_path.write_bytes(b"same audio")
+    tool = DofeSpeechToText()
+    base = {
+        "duration_seconds": 60,
+        "language": "zh-CN",
+        "asr_mode": "fast",
+        "sample_rate": 16000,
+        "audio_format": "wav",
+        "model_name": "catalog-stt",
+    }
+
+    first_key = tool.idempotency_key({**base, "audio_path": str(first_path)})
+    assert first_key == tool.idempotency_key({**base, "audio_path": str(second_path)})
+
+    second_path.write_bytes(b"different audio")
+    assert first_key != tool.idempotency_key({**base, "audio_path": str(second_path)})
+    assert first_key != tool.idempotency_key(
+        {**base, "audio_path": str(first_path), "model_name": "other-stt"}
+    )
+    assert first_key != tool.idempotency_key(
+        {**base, "audio_path": str(first_path), "sample_rate": 48000}
+    )
+
+
+def test_dofe_stt_idempotency_normalizes_defaults_and_resolved_model(monkeypatch):
+    tool = DofeSpeechToText()
+    minimal = {"audio_url": "https://media.example.test/audio.wav"}
+    explicit_defaults = {
+        **minimal,
+        "duration_seconds": 0,
+        "language": "zh-CN",
+        "asr_mode": "fast",
+        "sample_rate": 16000,
+    }
+
+    monkeypatch.setenv("DOFE_STT_MODEL", "catalog-stt-v1")
+    first_key = tool.idempotency_key(minimal)
+    assert first_key == tool.idempotency_key(explicit_defaults)
+
+    monkeypatch.setenv("DOFE_STT_MODEL", "catalog-stt-v2")
+    assert first_key != tool.idempotency_key(minimal)
+
+
 def test_dofe_stt_uses_catalog_model_and_preserves_native_cost(monkeypatch, tmp_path):
     monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
     _catalog(monkeypatch)
@@ -192,6 +239,13 @@ def test_dofe_stt_persists_created_task_and_resumes_before_upload(monkeypatch, t
         "idempotency_key": DofeSpeechToText().idempotency_key(
             {"audio_path": str(source), "duration_seconds": 60, "output_path": str(output)}
         ),
+        "audio_url": "tos://dofe-transcode/temp/generation-assets/first.wav",
+        "source_asset": {
+            "url": "tos://dofe-transcode/temp/generation-assets/first.wav",
+            "bucket": "dofe-transcode",
+            "key": "temp/generation-assets/first.wav",
+            "sizeBytes": 4,
+        },
         "task_id": "gen-recover-1",
     }
 
@@ -216,4 +270,63 @@ def test_dofe_stt_persists_created_task_and_resumes_before_upload(monkeypatch, t
         ("submit", None),
         ("resume", "gen-recover-1"),
     ]
+    assert not resume_path.exists()
+
+
+def test_dofe_stt_reuses_staged_audio_after_create_fails_without_task_id(monkeypatch, tmp_path):
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
+    _catalog(monkeypatch)
+    source = tmp_path / "audio.wav"
+    source.write_bytes(b"RIFF")
+    output = tmp_path / "transcript.json"
+    uploaded_urls = []
+    submitted_urls = []
+
+    def fake_upload(_self, _path, **_kwargs):
+        url = (
+            "tos://dofe-transcode/temp/generation-assets/"
+            f"upload-{len(uploaded_urls) + 1}.wav"
+        )
+        uploaded_urls.append(url)
+        return {
+            "url": url,
+            "bucket": "dofe-transcode",
+            "key": url.removeprefix("tos://dofe-transcode/"),
+            "sizeBytes": 4,
+        }
+
+    def fail_create(_self, payload, **_kwargs):
+        submitted_urls.append(payload["content"][0]["part"]["audio_url"]["url"])
+        raise DofeAPIError("create failed without a recoverable task id")
+
+    monkeypatch.setattr("tools.analysis.dofe_stt.DofeMediaUploadClient.upload", fake_upload)
+    monkeypatch.setattr("tools.analysis.dofe_stt.DofeClient.submit_and_collect", fail_create)
+
+    first = DofeSpeechToText().execute(
+        {"audio_path": str(source), "duration_seconds": 60, "output_path": str(output)}
+    )
+
+    assert not first.success
+    resume_path = output.with_suffix(".resume.json")
+    resume = json.loads(resume_path.read_text(encoding="utf-8"))
+    assert resume["audio_url"] == uploaded_urls[0]
+
+    def succeed(_self, payload, **_kwargs):
+        submitted_urls.append(payload["content"][0]["part"]["audio_url"]["url"])
+        return {
+            "task_id": "gen-recovered-with-staged-audio",
+            "status": "succeeded",
+            "text": "复用暂存音频成功",
+            "final_cost": "0.01",
+            "cost_currency": "CNY",
+        }
+
+    monkeypatch.setattr("tools.analysis.dofe_stt.DofeClient.submit_and_collect", succeed)
+    second = DofeSpeechToText().execute(
+        {"audio_path": str(source), "duration_seconds": 60, "output_path": str(output)}
+    )
+
+    assert second.success
+    assert uploaded_urls == ["tos://dofe-transcode/temp/generation-assets/upload-1.wav"]
+    assert submitted_urls == [uploaded_urls[0], uploaded_urls[0]]
     assert not resume_path.exists()
