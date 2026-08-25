@@ -45,6 +45,8 @@ def detect_video_platform(value: str) -> str:
     path = parsed.path.lower()
     if host == "douyin.com" or host.endswith(".douyin.com") or host.endswith(".iesdouyin.com"):
         return "douyin"
+    if "xiaohongshu.com" in host or host.endswith("xhslink.com"):
+        return "xiaohongshu"
     if "youtube.com" in host and "/shorts/" in path:
         return "shorts"
     if host == "youtu.be" or "youtube.com" in host:

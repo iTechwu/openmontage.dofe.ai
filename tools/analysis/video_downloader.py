@@ -35,6 +35,11 @@ from lib.video_sources import (
 )
 from tools.analysis.douyin_mcp import MCP_ENV, download_via_mcp
 
+# Chinese short-video platforms routed through the external tools.dofe.ai MCP
+# resolver (viral_video_douyin_tos_url -> pre-signed TOS URL). Overseas
+# platforms use yt-dlp.
+_MCP_ROUTED_PLATFORMS = frozenset({"douyin", "xiaohongshu"})
+
 
 class VideoDownloader(BaseTool):
     name = "video_downloader"
@@ -206,7 +211,7 @@ class VideoDownloader(BaseTool):
         try:
             cookie_file = (
                 None
-                if platform == "douyin"
+                if platform in _MCP_ROUTED_PLATFORMS
                 else resolve_cookie_file(
                     inputs.get("cookie_file")
                     or os.environ.get("OPENMONTAGE_YTDLP_COOKIES")
@@ -220,7 +225,7 @@ class VideoDownloader(BaseTool):
 
         douyin_client = None
         extract_error = None
-        if platform == "douyin":
+        if platform in _MCP_ROUTED_PLATFORMS:
             from tools.analysis.douyin import DouyinShareClient
 
             douyin_client = DouyinShareClient()
