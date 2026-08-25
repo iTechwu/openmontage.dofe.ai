@@ -219,11 +219,12 @@ def create_server(
     def export_project_file(project_id: str, relative_path: str, include_media: bool = False) -> dict[str, Any]:
         """Mirror one project file (or a whole directory) into the shared file-server.
 
-        Returns the file's public URL (``http://127.0.0.1:18090/...``) and the
-        harness host path (``/exchange/...``). Copying is on demand and, by default,
-        skips large media files, so the small analysis outputs (brief, keyframes, scenes,
-        transcript, request JSON) are what get mirrored. Pass ``include_media=true`` to
-        also mirror a media file (e.g. the reference video).
+        Returns the DSH-readable ``host_path``/``file_path`` (``/exchange/...``) as the
+        reference to show — the DSH backend streams it to the browser from the shared
+        mount. The ``url`` (``http://127.0.0.1:18090/...``) is only for the agent's own
+        fetch on the CI host and is NOT reachable from the user's browser. Copying is on
+        demand and, by default, skips large media files; pass ``include_media=true`` to
+        mirror a media file (e.g. the reference video).
         """
         return ProjectFileExporter().export(project_id, relative_path, include_media=include_media)
 
@@ -233,7 +234,8 @@ def create_server(
 
         Copies the artifacts, keyframes, scenes, transcript, briefs and manifest —
         everything the agent inspects — while leaving large media files uncopied. Returns
-        the export root URL/host path and the list of files now available.
+        the DSH-readable ``export_file_path`` (``/exchange/...``) and the list of files
+        now available; each entry's ``file_path`` is what the DSH GUI can open.
         """
         return ProjectFileExporter().export_analysis(project_id)
 

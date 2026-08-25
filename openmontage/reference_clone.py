@@ -92,14 +92,17 @@ def _exports_block(project_id: str) -> dict[str, Any]:
     root = exporter.root(project_id)
     return {
         "enabled": True,
+        "export_file_path": root["host_path"],
+        "project_host_path": root["host_path"],
         "project_root_url": root["url"],
         "project_root_host_path": root["host_path"],
         "mirrored_files": mirrored,
         "instructions": (
             "List the prepared project files with list_project_files(project_id); mirror the "
             "analysis set (already available) or a single file with sync_project_exports / "
-            "export_project_file, then read it from the returned host_path or fetch the "
-            "returned url."
+            "export_project_file. Reference the file by its file_path/host_path "
+            "(/exchange/openmontage/<id>/...) so the DSH GUI can open it; the http url is "
+            "only for your own curl on the CI host and is NOT reachable from the user's browser."
         ),
     }
 

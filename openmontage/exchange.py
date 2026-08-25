@@ -222,11 +222,16 @@ class ProjectFileExporter:
         }
 
     def export(self, project_id: str, relative_path: str, *, include_media: bool = False) -> dict[str, Any]:
-        """Mirror one file (or a whole directory) into the exchange and return URLs.
+        """Mirror one file (or a whole directory) into the exchange and return references.
 
         ``include_media=False`` (default) skips large media files so the default path
         mirrors only the small analysis outputs. Set ``include_media=True`` to mirror
         media files too (e.g. the reference video when the video is the deliverable).
+
+        ``host_path``/``file_path`` (``/exchange/...``) is the reference the DSH GUI can
+        open — the DSH backend reads the shared mount and streams it to the browser.
+        ``url`` is only for the agent's own fetch on the CI host (127.0.0.1 reaches the
+        file-server there); it is NOT reachable from the user's browser.
         """
         self._require_enabled()
         project_dir = _project_dir(self.projects_root, project_id)
@@ -239,13 +244,15 @@ class ProjectFileExporter:
 
         destination = (self._export_project_dir(project_id) / rel).resolve()
         copied_size = self._mirror(source, destination, include_media=include_media)
+        host_path = f"{self._root_host_path(project_id)}/{rel}"
         return {
             "project_id": project_id,
             "relative_path": str(rel),
             "size_bytes": copied_size,
             "is_media": _is_media(source),
+            "file_path": host_path,
+            "host_path": host_path,
             "url": f"{self._root_public_url(project_id)}/{rel}",
-            "host_path": f"{self._root_host_path(project_id)}/{rel}",
         }
 
     def export_analysis(self, project_id: str) -> dict[str, Any]:
@@ -254,6 +261,9 @@ class ProjectFileExporter:
         This is the "need-plus-margin" copy: it mirrors the artifacts, keyframes,
         scenes, transcript, briefs and project manifest — everything the agent
         inspects — but leaves any media file (e.g. the reference video) uncopied.
+
+        ``export_file_path``/``export_host_path`` (``/exchange/...``) is the reference the
+        DSH GUI can open; ``export_root_url`` is only for the agent's own fetch on CI.
         """
         self._require_enabled()
         project_dir = _project_dir(self.projects_root, project_id)
@@ -262,10 +272,12 @@ class ProjectFileExporter:
         destination = self._export_project_dir(project_id)
         copied_size = self._mirror(project_dir, destination, include_media=False)
         mirrored = self._mirrored_files(project_id)
+        host_path = self._root_host_path(project_id)
         return {
             "project_id": project_id,
+            "export_file_path": host_path,
+            "export_host_path": host_path,
             "export_root_url": self._root_public_url(project_id),
-            "export_host_path": self._root_host_path(project_id),
             "size_bytes": copied_size,
             "mirrored_files": mirrored,
         }
