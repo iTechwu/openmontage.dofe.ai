@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import os
 import re
 import socket
 from pathlib import Path
@@ -60,18 +61,28 @@ def detect_video_platform(value: str) -> str:
 
 
 def validate_public_http_url(url: str, *, resolve_dns: bool = True) -> None:
-    """Reject non-HTTP and private-network targets before a server-side fetch."""
+    """Reject non-HTTP and private-network targets before a server-side fetch.
+
+    ``OPENMONTAGE_ALLOW_PRIVATE_URLS`` (1/true/yes/on) opts into accepting
+    private/non-global targets (e.g. localhost, 127.0.0.1, 172.x, a
+    ``host.docker.internal`` service). This is an intentional escape hatch for
+    internal deployments where the DSH harness serves a reference video on the
+    same host and OpenMontage must fetch it; the default stays strict.
+    """
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise VideoSourceError("Only absolute HTTP(S) video URLs are supported")
+    allow_private = os.environ.get("OPENMONTAGE_ALLOW_PRIVATE_URLS", "").strip().lower() in {
+        "1", "true", "yes", "y", "on",
+    }
     host = parsed.hostname.lower().rstrip(".")
-    if host == "localhost" or host.endswith(".localhost"):
+    if (host == "localhost" or host.endswith(".localhost")) and not allow_private:
         raise VideoSourceError("Localhost video URLs are not allowed")
     try:
         literal_ip = ipaddress.ip_address(host)
     except ValueError:
         literal_ip = None
-    if literal_ip is not None and not literal_ip.is_global:
+    if literal_ip is not None and not literal_ip.is_global and not allow_private:
         raise VideoSourceError("Private or non-global video URL targets are not allowed")
     if not resolve_dns or literal_ip is not None:
         return
@@ -82,7 +93,7 @@ def validate_public_http_url(url: str, *, resolve_dns: bool = True) -> None:
     if not addresses:
         raise VideoSourceError(f"Could not resolve video URL host: {host}")
     for address in addresses:
-        if not ipaddress.ip_address(address).is_global:
+        if not ipaddress.ip_address(address).is_global and not allow_private:
             raise VideoSourceError("Video URL resolves to a private or non-global address")
 
 
