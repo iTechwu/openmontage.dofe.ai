@@ -7,12 +7,18 @@ mirror them *on demand* into the shared exchange directory that the
 ``mcp-file-server`` already serves (host ``/data/mcp-exchange`` ->
 ``http://host.docker.internal:18090``, and ``/exchange`` inside the harness).
 
-The exporter is deliberately **lazy and disk-conscious**:
+The exporter mirrors files with a small margin but never over-copies, and keeps
+the mirror healthy with periodic cleanup:
 
-* Nothing is copied until a specific file or directory is requested.
-* Copies happen one path at a time, so a 100+ MB media file is only mirrored
-  when the caller explicitly asks for it. The small analysis outputs (brief,
-  keyframes, scenes, transcript, request JSON) are a few KB each.
+* ``export_analysis`` mirrors a project's whole analysis set (artifacts, keyframes,
+  scenes, transcript, briefs, manifest) in one go — everything the agent inspects —
+  while leaving large media files uncopied.
+* ``export`` mirrors a single file (or directory) on demand; media is skipped unless
+  ``include_media=true``.
+* ``cleanup`` prunes stale mirrors (by age) and evicts the oldest files when the
+  mirror exceeds a size budget, so the exchange directory does not grow without bound.
+  It only touches the mirror; the authoritative project under ``/data/projects`` is
+  never modified.
 
 Configuration (the docker/CI deployment sets these; local dev leaves them unset,
 in which case the exporter is disabled and container paths are returned as-is):
@@ -28,6 +34,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -107,7 +114,18 @@ def _path_size(path: Path, *, include_media: bool = True) -> int:
 
 
 class ProjectFileExporter:
-    """Mirror project files into the shared file-server on demand."""
+    """Mirror project files into the shared file-server, with a small margin.
+
+    Mirroring is *need-driven but not stingy*: when a project is prepared (or the
+    agent asks to sync it), the whole *analysis* set is mirrored in one go —
+    artifacts, keyframes, scenes, transcript, briefs — but large media files are
+    left alone unless the agent explicitly requests one. That mirrors the outputs
+    the agent actually inspects while avoiding an unbounded copy of every video.
+
+    Disk is kept healthy through ``cleanup``, which prunes stale mirrors (by age)
+    and caps the mirror size (oldest-first eviction), so the exchange directory
+    does not grow without bound.
+    """
 
     def __init__(
         self,
@@ -145,6 +163,35 @@ class ProjectFileExporter:
             "host_path": self._root_host_path(project_id),
         }
 
+    def _require_enabled(self) -> None:
+        if not self.enabled:
+            raise ProjectFileExportError(
+                "The file-server exporter is not configured; set OPENMONTAGE_EXPORT_DIR "
+                "and OPENMONTAGE_FILE_SERVER_BASE_URL to enable it"
+            )
+
+    def _mirror(self, source: Path, destination: Path, *, include_media: bool) -> int:
+        """Copy a file/dir into the destination, honoring the media policy.
+
+        Returns the number of bytes mirrored. ``include_media=False`` skips media
+        files inside a directory (but keeps the directory structure + analysis files).
+        """
+        if source.is_file():
+            if _is_media(source) and not include_media:
+                raise ProjectFileExportError(
+                    f"{source.name} is a media file; pass include_media=true to mirror it"
+                )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            return source.stat().st_size
+        if destination.exists():
+            shutil.rmtree(destination)
+        if include_media:
+            shutil.copytree(source, destination, symlinks=True)
+        else:
+            shutil.copytree(source, destination, symlinks=True, ignore=_ignore_media)
+        return _path_size(source, include_media=include_media)
+
     def list(self, project_id: str) -> dict[str, Any]:
         """Inventory the files generated for a project (relative paths + sizes).
 
@@ -179,37 +226,17 @@ class ProjectFileExporter:
         mirrors only the small analysis outputs. Set ``include_media=True`` to mirror
         media files too (e.g. the reference video when the video is the deliverable).
         """
-        if not self.enabled:
-            raise ProjectFileExportError(
-                "The file-server exporter is not configured; set OPENMONTAGE_EXPORT_DIR "
-                "and OPENMONTAGE_FILE_SERVER_BASE_URL to enable it"
-            )
+        self._require_enabled()
         project_dir = _project_dir(self.projects_root, project_id)
         rel = _safe_relative(relative_path)
         source = (project_dir / rel).resolve()
-        project_root_str = str(project_dir) + os.sep
-        if not str(source).startswith(project_root_str) and source != project_dir:
+        if not str(source).startswith(str(project_dir) + os.sep) and source != project_dir:
             raise ProjectFileExportError("relative_path escaped the project directory")
         if not source.exists():
             raise ProjectFileExportError(f"Not found in project {project_id}: {relative_path}")
 
         destination = (self._export_project_dir(project_id) / rel).resolve()
-        if source.is_dir():
-            if destination.exists():
-                shutil.rmtree(destination)
-            if include_media:
-                shutil.copytree(source, destination, symlinks=True)
-            else:
-                shutil.copytree(source, destination, symlinks=True, ignore=_ignore_media)
-            copied_size = _path_size(source, include_media=include_media)
-        else:
-            if _is_media(source) and not include_media:
-                raise ProjectFileExportError(
-                    f"{relative_path} is a media file; pass include_media=true to mirror it"
-                )
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-            copied_size = source.stat().st_size
+        copied_size = self._mirror(source, destination, include_media=include_media)
         return {
             "project_id": project_id,
             "relative_path": str(rel),
@@ -218,6 +245,134 @@ class ProjectFileExporter:
             "url": f"{self._root_public_url(project_id)}/{rel}",
             "host_path": f"{self._root_host_path(project_id)}/{rel}",
         }
+
+    def export_analysis(self, project_id: str) -> dict[str, Any]:
+        """Mirror the whole project analysis set, skipping large media files.
+
+        This is the "need-plus-margin" copy: it mirrors the artifacts, keyframes,
+        scenes, transcript, briefs and project manifest — everything the agent
+        inspects — but leaves any media file (e.g. the reference video) uncopied.
+        """
+        self._require_enabled()
+        project_dir = _project_dir(self.projects_root, project_id)
+        if not project_dir.is_dir():
+            raise ProjectFileExportError(f"Project not found: {project_id}")
+        destination = self._export_project_dir(project_id)
+        copied_size = self._mirror(project_dir, destination, include_media=False)
+        mirrored = self._mirrored_files(project_id)
+        return {
+            "project_id": project_id,
+            "export_root_url": self._root_public_url(project_id),
+            "export_host_path": self._root_host_path(project_id),
+            "size_bytes": copied_size,
+            "mirrored_files": mirrored,
+        }
+
+    def _mirrored_files(self, project_id: str) -> list[dict[str, Any]]:
+        """List files already mirrored for a project under the exchange dir."""
+        destination = self._export_project_dir(project_id)
+        if not destination.is_dir():
+            return []
+        files: list[dict[str, Any]] = []
+        for root, _dirs, names in os.walk(destination):
+            for name in names:
+                path = Path(root) / name
+                rel = path.relative_to(destination)
+                files.append(
+                    {
+                        "relative_path": str(rel),
+                        "size_bytes": path.stat().st_size,
+                        "is_media": _is_media(path),
+                    }
+                )
+        files.sort(key=lambda item: item["relative_path"])
+        return files
+
+    def mirror_size(self, project_id: str | None = None) -> int:
+        """Total bytes currently mirrored under the exchange dir."""
+        base = self._project_scope(project_id) if project_id else self.export_dir
+        if not base.exists():
+            return 0
+        total = 0
+        for root, _dirs, names in os.walk(base):
+            for name in names:
+                try:
+                    total += (Path(root) / name).stat().st_size
+                except OSError:
+                    pass
+        return total
+
+    def cleanup(
+        self,
+        *,
+        project_id: str | None = None,
+        max_age_days: float | None = None,
+        max_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        """Prune stale/over-budget mirrors to keep the exchange directory healthy.
+
+        ``max_age_days`` removes files not modified within the window. ``max_bytes``
+        caps the total mirror size and evicts the oldest files first when exceeded.
+        Empty directories are removed afterwards. This runs on the *mirror* only; the
+        authoritative project under ``/data/projects`` is never touched.
+        """
+        base = self._project_scope(project_id) if project_id else self.export_dir
+        if not base.exists():
+            return {"removed_count": 0, "removed_bytes": 0, "remaining_bytes": 0}
+
+        now = time.time()
+        cutoff = now - (max_age_days * 86400.0) if max_age_days else now
+        entries: list[tuple[float, int, Path]] = []  # (mtime, size, path) for files
+        for root, _dirs, names in os.walk(base):
+            for name in names:
+                path = Path(root) / name
+                try:
+                    st = path.stat()
+                except OSError:
+                    continue
+                entries.append((st.st_mtime, st.st_size, path))
+
+        removed_bytes = 0
+        remaining = [e for e in entries]
+        if max_age_days is not None:
+            removed, keep = [], []
+            for (mtime, size, path) in entries:
+                (removed if mtime < cutoff else keep).append((mtime, size, path))
+            for (_mtime, _size, path) in removed:
+                try:
+                    removed_bytes += _size
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            remaining = keep
+
+        if max_bytes is not None and sum(size for _m, size, _p in remaining) > max_bytes:
+            total = sum(size for _m, size, _p in remaining)
+            # evict oldest first until under budget
+            for (_mtime, size, path) in sorted(remaining, key=lambda item: item[0]):
+                if total <= max_bytes:
+                    break
+                try:
+                    total -= size
+                    removed_bytes += size
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+        # remove empty dirs (bottom-up)
+        for root, _dirs, _names in os.walk(base, topdown=False):
+            try:
+                os.rmdir(root)
+            except OSError:
+                pass
+        return {
+            "removed_count": 0,
+            "removed_bytes": removed_bytes,
+            "remaining_bytes": self.mirror_size(project_id=project_id),
+        }
+
+    def _project_scope(self, project_id: str) -> Path:
+        return (self.export_dir / project_id).resolve()
 
 
 def from_environment(*, projects_root: str | Path | None = None) -> ProjectFileExporter:

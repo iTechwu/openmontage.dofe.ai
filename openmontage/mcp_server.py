@@ -227,6 +227,32 @@ def create_server(
         """
         return ProjectFileExporter().export(project_id, relative_path, include_media=include_media)
 
+    @server.tool()
+    def sync_project_exports(project_id: str) -> dict[str, Any]:
+        """Mirror a prepared project's whole analysis set into the shared file-server.
+
+        Copies the artifacts, keyframes, scenes, transcript, briefs and manifest —
+        everything the agent inspects — while leaving large media files uncopied. Returns
+        the export root URL/host path and the list of files now available.
+        """
+        return ProjectFileExporter().export_analysis(project_id)
+
+    @server.tool()
+    def cleanup_exports(project_id: str = "", max_age_days: float = 7.0, max_bytes: int = 0) -> dict[str, Any]:
+        """Prune stale or over-budget project mirrors to keep the exchange healthy.
+
+        Removes mirror files not modified within ``max_age_days`` and, when
+        ``max_bytes`` is positive, evicts the oldest files until the mirror is under
+        budget. Limits to one project when ``project_id`` is given. Only the mirror is
+        touched; the authoritative project under ``/data/projects`` is never modified.
+        """
+        exporter = ProjectFileExporter()
+        return exporter.cleanup(
+            project_id=project_id or None,
+            max_age_days=max_age_days,
+            max_bytes=max_bytes or None,
+        )
+
     @server.resource("openmontage://reference-clone-guide")
     def reference_clone_guide() -> str:
         """Return the authoritative agent workflow for URL-driven video recreation."""

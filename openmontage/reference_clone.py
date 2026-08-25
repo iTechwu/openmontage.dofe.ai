@@ -14,7 +14,7 @@ from lib.checkpoint import get_next_stage, init_project
 from lib.paths import PROJECTS_DIR
 from lib.pipeline_loader import load_pipeline_readonly, pipeline_supports_reference_input
 from lib.video_sources import detect_video_platform, normalize_video_url
-from openmontage.exchange import ProjectFileExporter
+from openmontage.exchange import ProjectFileExportError, ProjectFileExporter
 from tools.analysis.video_analyzer import VideoAnalyzer
 from tools.dofe import config as dofe_config
 from tools.dofe.client import DofeClient
@@ -73,26 +73,33 @@ def _brief_path(project_dir: Path) -> Path:
 
 
 def _exports_block(project_id: str) -> dict[str, Any]:
-    """Describe the on-demand file-server export surface for a project.
+    """Describe (and materialize) the on-demand file-server export surface.
 
     When the file-server exporter is configured (docker/CI deployment) the workspace
-    agent cannot read the container project directory, so it must mirror files into
-    the shared exchange via ``export_project_file`` and then read
-    ``/exchange/...`` or fetch the public URL. Local (non-docker) runs leave this
-    disabled and return container paths directly.
+    agent cannot read the container project directory, so project files are mirrored
+    into the shared exchange. We mirror the analysis set with a small margin (whole
+    artifacts/keyframes/scenes/transcript, leaving media uncopied) so the agent can
+    fetch it immediately. Local (non-docker) runs leave this disabled and return
+    container paths directly.
     """
     exporter = ProjectFileExporter()
     if not exporter.enabled:
         return {"enabled": False}
+    try:
+        mirrored = exporter.export_analysis(project_id).get("mirrored_files", [])
+    except ProjectFileExportError:
+        mirrored = []
     root = exporter.root(project_id)
     return {
         "enabled": True,
         "project_root_url": root["url"],
         "project_root_host_path": root["host_path"],
+        "mirrored_files": mirrored,
         "instructions": (
-            "List generated files with list_project_files(project_id); mirror any file "
-            "into the shared exchange with export_project_file(project_id, relative_path), "
-            "then read it from the returned host_path or fetch the returned url."
+            "List the prepared project files with list_project_files(project_id); mirror the "
+            "analysis set (already available) or a single file with sync_project_exports / "
+            "export_project_file, then read it from the returned host_path or fetch the "
+            "returned url."
         ),
     }
 
