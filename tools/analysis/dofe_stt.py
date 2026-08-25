@@ -154,6 +154,8 @@ class DofeSpeechToText(BaseTool):
             "sample_rate": int(inputs.get("sample_rate") or 16000),
             "audio_format": str(inputs.get("audio_format") or "").strip() or None,
             "model_name": self.resolve_model(inputs),
+            "run_id": str(inputs.get("run_id") or inputs.get("project_id") or "").strip()
+            or None,
         }
         audio_path = str(inputs.get("audio_path") or "").strip()
         if audio_path:

@@ -75,6 +75,16 @@ def test_dofe_stt_idempotency_normalizes_defaults_and_resolved_model(monkeypatch
     assert first_key != tool.idempotency_key(minimal)
 
 
+def test_dofe_stt_idempotency_tracks_gateway_run_metadata(monkeypatch):
+    monkeypatch.setenv("DOFE_STT_MODEL", "catalog-stt")
+    tool = DofeSpeechToText()
+    base = {"audio_url": "https://media.example.test/audio.wav"}
+
+    first_key = tool.idempotency_key({**base, "project_id": "project-1"})
+    assert first_key == tool.idempotency_key({**base, "run_id": "project-1"})
+    assert first_key != tool.idempotency_key({**base, "project_id": "project-2"})
+
+
 def test_dofe_stt_uses_catalog_model_and_preserves_native_cost(monkeypatch, tmp_path):
     monkeypatch.setenv("DOFE_MODEL_API_KEY", "test-key")
     _catalog(monkeypatch)
