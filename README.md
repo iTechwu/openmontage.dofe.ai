@@ -729,7 +729,9 @@ See `docs/ARCHITECTURE.md` for the full technical reference, `docs/PROVIDERS.md`
 OpenMontage can run as a Dockerized MCP server for Codex or Claude and includes
 the `$recreate-video` skill. It accepts YouTube, TikTok, Instagram, **Douyin**
 (including `v.douyin.com` short links and pasted share text), and local video
-references. See [Docker and agent integration](docs/DOCKER_AND_AGENTS.md).
+references. The image ships as an MCP server only — no agent CLI is bundled;
+the connecting agent drives production through the MCP tools. See
+[Docker and agent integration](docs/DOCKER_AND_AGENTS.md).
 
 ### Join the Community
 

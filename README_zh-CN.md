@@ -695,5 +695,6 @@ make test
 
 OpenMontage 现在可以作为 Docker 化的 MCP 服务供 Codex 或 Claude 调用，并提供
 `$recreate-video` Skill。支持 YouTube、TikTok、Instagram、**抖音**（包括
-`v.douyin.com` 短链和完整分享文本）以及本地视频作为参考。部署与调用方式见
-[Docker 与智能体集成](docs/DOCKER_AND_AGENTS.md)。
+`v.douyin.com` 短链和完整分享文本）以及本地视频作为参考。镜像仅内置 MCP
+服务，不捆绑任何 agent CLI，由接入方 agent 通过 MCP 工具驱动生产。部署与
+调用方式见 [Docker 与智能体集成](docs/DOCKER_AND_AGENTS.md)。
