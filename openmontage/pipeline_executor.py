@@ -256,8 +256,21 @@ class AgentCommandPipelineExecutor:
 
         try:
             if credential is None:
+                # Self-contained path (no delegated Job credential): pin the
+                # internal DoFe gateway and the configured agent model on the
+                # Codex command so the agent stage runs with OpenMontage's own
+                # credentials instead of a delegated escrowed credential.
+                configured_command = command
+                standalone_base = os.environ.get("DOFE_MODEL_BASE_URL", "").strip().rstrip("/")
+                if standalone_base and _is_codex_exec_command(command):
+                    standalone_model = os.environ.get("OPENMONTAGE_AGENT_MODEL_ID", "").strip() or None
+                    configured_command = _configure_agent_command_for_delegation(
+                        command,
+                        f"{standalone_base}/v1",
+                        model=standalone_model,
+                    )
                 completed = self._run(
-                    command,
+                    configured_command,
                     prompt,
                     environment=None,
                     cancellation_requested=cancellation_requested,
