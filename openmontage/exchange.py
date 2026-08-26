@@ -42,7 +42,7 @@ from typing import Any
 
 from lib.paths import PROJECTS_DIR
 
-_PROJECT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$|^[a-z0-9]$")
+_PROJECT_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}[a-zA-Z0-9]$|^[a-zA-Z0-9]$")
 
 # Harness mount point for the shared exchange directory.
 _HARNESS_EXCHANGE_PATH = os.environ.get("OPENMONTAGE_HARNESS_EXCHANGE_PATH", "/exchange")
