@@ -50,6 +50,7 @@ x-openmontage-common: &openmontage-common
     # Shared exchange dir (mcp-file-server) so project files can be mirrored on
     # demand for the workspace agent via /exchange or http://host.docker.internal:18090.
     - /data/mcp-exchange:/data/mcp-exchange
+    - ./config.yaml:/app/config.yaml:ro
   networks:
     - dofe-models
   extra_hosts:
