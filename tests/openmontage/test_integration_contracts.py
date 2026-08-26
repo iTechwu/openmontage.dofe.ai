@@ -61,13 +61,17 @@ async def test_mcp_server_publishes_reference_clone_surface():
     assert {tool.name for tool in tools.tools} == {
         "approve_video_stage",
         "cancel_video_job",
+        "cleanup_exports",
+        "export_project_file",
         "get_video_job",
+        "list_project_files",
         "list_video_artifacts",
         "list_video_job_events",
         "openmontage_capabilities",
         "prepare_reference_clone",
         "reference_clone_status",
         "submit_video_job",
+        "sync_project_exports",
     }
     assert {str(resource.uri) for resource in resources.resources} == {
         "openmontage://reference-clone-guide"
