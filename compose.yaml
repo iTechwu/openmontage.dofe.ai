@@ -8,6 +8,10 @@ x-openmontage-common: &openmontage-common
       OPENMONTAGE_IMAGE_REVISION: ${OPENMONTAGE_IMAGE_REVISION:-unknown}
   image: openmontage:local
   shm_size: "512mb"
+  security_opt:
+    - apparmor=unconfined
+  privileged: true
+  user: root
   env_file:
     - path: .env
       required: false
