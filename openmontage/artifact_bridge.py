@@ -54,9 +54,14 @@ class ArtifactBridgeClient:
         self.timeout = (connect_timeout, read_timeout)
 
     @classmethod
-    def from_environment(cls, *, session: Any | None = None) -> "ArtifactBridgeClient":
+    def from_environment(cls, *, session: Any | None = None) -> "ArtifactBridgeClient | None":
+        base_url = os.environ.get("OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL", "").strip()
+        if not base_url:
+            # Clean-MCP mode: no AgentSpace artifact bridge. Final artifacts are
+            # delivered as project files via the file-server exporter instead.
+            return None
         return cls(
-            base_url=os.environ.get("OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL", ""),
+            base_url=base_url,
             service_token=os.environ.get("OPENMONTAGE_SERVICE_TOKEN", ""),
             session=session,
         )

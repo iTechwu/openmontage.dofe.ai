@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, Thread
 from typing import Any
@@ -22,6 +22,7 @@ from openmontage.contracts import (
     ApprovalStatus,
     JobSnapshot,
     JobStatus,
+    PublishedArtifact,
     StageSnapshot,
     StageStatus,
 )
@@ -238,46 +239,63 @@ class JobWorker:
         published = None
         if not any(artifact.role == "final_video" for artifact in snapshot.artifacts):
             if self.artifact_bridge is None:
-                return self._terminal_failure(
-                    heartbeat,
-                    stage=None,
-                    code="OPENMONTAGE_ARTIFACT_BRIDGE_UNAVAILABLE",
-                    message="Artifact Bridge is required to publish the final video",
-                    now=now,
-                )
-            try:
-                final_video = self._resolve_final_video(snapshot)
-                published = self.artifact_bridge.upload_output(
-                    job_id=snapshot.job_id,
-                    attribution=snapshot.attribution,
-                    path=final_video,
-                    role="final_video",
-                    media_type="video/mp4",
-                )
-            except FinalArtifactError:
-                return self._terminal_failure(
-                    heartbeat,
-                    stage=None,
-                    code="OPENMONTAGE_RENDER_FAILED",
-                    message="Pipeline did not produce a safe final MP4",
-                    now=now,
-                )
-            except (ArtifactBridgeError, OSError):
-                if lease.attempt >= self.max_executor_attempts:
+                # Clean-MCP mode: no AgentSpace artifact bridge. Deliver the final
+                # video as a project file via the shared file-server exporter
+                # (the caller fetches it with export_project_file or reads
+                # /exchange/openmontage/<job_id>/<path>).
+                try:
+                    final_video = self._resolve_final_video(snapshot)
+                    published = self._publish_local_final_video(snapshot, final_video)
+                except FinalArtifactError:
+                    return self._terminal_failure(
+                        heartbeat,
+                        stage=None,
+                        code="OPENMONTAGE_RENDER_FAILED",
+                        message="Pipeline did not produce a safe final MP4",
+                        now=now,
+                    )
+                except OSError as exc:
                     return self._terminal_failure(
                         heartbeat,
                         stage=None,
                         code="OPENMONTAGE_ARTIFACT_UPLOAD_FAILED",
-                        message="Final video upload failed after bounded retries",
+                        message=f"Final video local delivery failed: {_summarize_error(exc)}",
                         now=now,
                     )
-                return self._schedule_retry_or_confirm_cancel(
-                    heartbeat,
-                    stage=None,
-                    outcome="artifact_retry_scheduled",
-                    now=now,
-                    error="Final video upload failed",
-                )
+            else:
+                try:
+                    final_video = self._resolve_final_video(snapshot)
+                    published = self.artifact_bridge.upload_output(
+                        job_id=snapshot.job_id,
+                        attribution=snapshot.attribution,
+                        path=final_video,
+                        role="final_video",
+                        media_type="video/mp4",
+                    )
+                except FinalArtifactError:
+                    return self._terminal_failure(
+                        heartbeat,
+                        stage=None,
+                        code="OPENMONTAGE_RENDER_FAILED",
+                        message="Pipeline did not produce a safe final MP4",
+                        now=now,
+                    )
+                except (ArtifactBridgeError, OSError):
+                    if lease.attempt >= self.max_executor_attempts:
+                        return self._terminal_failure(
+                            heartbeat,
+                            stage=None,
+                            code="OPENMONTAGE_ARTIFACT_UPLOAD_FAILED",
+                            message="Final video upload failed after bounded retries",
+                            now=now,
+                        )
+                    return self._schedule_retry_or_confirm_cancel(
+                        heartbeat,
+                        stage=None,
+                        outcome="artifact_retry_scheduled",
+                        now=now,
+                        error="Final video upload failed",
+                    )
         heartbeat.release()
         settled = self.service.complete_job_or_confirm_cancel(
             snapshot.job_id,
@@ -674,6 +692,37 @@ class JobWorker:
                 ):
                     return resolved
         raise FinalArtifactError("No safe final MP4 was declared by the pipeline")
+
+    def _publish_local_final_video(self, snapshot: JobSnapshot, final_video: Path) -> PublishedArtifact:
+        """Publish the final video as a project file (clean-MCP mode, no AgentSpace).
+
+        The artifact's ``employee_artifact_id`` is the project-relative path; the
+        caller fetches the bytes via ``export_project_file(job_id, <path>)`` or reads
+        ``/exchange/openmontage/<job_id>/<path>`` from the shared file-server.
+        """
+        project_dir = (self.projects_dir / snapshot.job_id).resolve()
+        rel = str(final_video.resolve().relative_to(project_dir))
+        size_bytes, sha256 = self._hash_file(final_video)
+        try:
+            from openmontage.exchange import ProjectFileExporter
+
+            exporter = ProjectFileExporter(projects_root=self.projects_dir)
+            if exporter.enabled:
+                exporter.export(snapshot.job_id, rel, include_media=True)
+        except Exception:
+            pass  # still deliverable on demand via export_project_file
+        return PublishedArtifact(
+            schema_version=1,
+            job_id=snapshot.job_id,
+            employee_artifact_id=rel,
+            employee_id=snapshot.attribution.employee_id,
+            role="final_video",
+            file_name=final_video.name,
+            media_type="video/mp4",
+            size_bytes=size_bytes,
+            sha256=sha256,
+            published_at=datetime.now(timezone.utc),
+        )
 
     @staticmethod
     def _hash_file(path: Path) -> tuple[int, str]:
