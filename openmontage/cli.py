@@ -281,6 +281,18 @@ def main(argv: list[str] | None = None) -> int:
             if args.limit <= 0:
                 raise ValueError("--limit must be greater than zero")
             publisher = OutboxPublisher.from_environment()
+            if publisher is None:
+                _print(
+                    {
+                        "event_bridge": "disabled",
+                        "message": "OPENMONTAGE_EVENT_ENDPOINT not set; caller is the orchestration hub",
+                    },
+                    as_json=args.json,
+                )
+                if args.once:
+                    return 0
+                while True:
+                    time.sleep(args.interval)
             while True:
                 result = publisher.publish_pending(limit=args.limit)
                 _print(

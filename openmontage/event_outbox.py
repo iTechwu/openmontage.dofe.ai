@@ -133,10 +133,14 @@ class OutboxPublisher:
         self.not_found_max_attempts = not_found_max_attempts
 
     @classmethod
-    def from_environment(cls, service: JobService | None = None) -> "OutboxPublisher":
+    def from_environment(cls, service: JobService | None = None) -> "OutboxPublisher | None":
+        # OpenMontage is a pure MCP producer service: event delivery up to a
+        # control plane (DSH or AgentSpace) is OPT-IN. When no endpoint is
+        # configured the bridge is DISABLED and the caller (DSH/AgentSpace) is
+        # the orchestration hub that polls job/approval state itself.
         endpoint = os.environ.get("OPENMONTAGE_EVENT_ENDPOINT", "").strip()
         if not endpoint:
-            raise ValueError("OPENMONTAGE_EVENT_ENDPOINT is required")
+            return None
         secret = os.environ.get("OPENMONTAGE_EVENT_SIGNING_SECRET", "")
         if not secret:
             raise ValueError("OPENMONTAGE_EVENT_SIGNING_SECRET is required")

@@ -21,7 +21,7 @@ x-openmontage-common: &openmontage-common
     OPENMONTAGE_MCP_HOST: 0.0.0.0
     OPENMONTAGE_MCP_PORT: 8765
     OPENMONTAGE_SERVICE_TOKEN: ${OPENMONTAGE_SERVICE_TOKEN:?Set OPENMONTAGE_SERVICE_TOKEN in .env}
-    OPENMONTAGE_EVENT_ENDPOINT: ${OPENMONTAGE_EVENT_ENDPOINT:-http://host.docker.internal:1455/api/internal/openmontage/events}
+    OPENMONTAGE_EVENT_ENDPOINT: ${OPENMONTAGE_EVENT_ENDPOINT-http://host.docker.internal:1455/api/internal/openmontage/events}
     OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL: ${OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL:-http://host.docker.internal:1455}
     OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL: ${OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL-http://host.docker.internal:1455}
     # Keep model traffic on the shared internal Compose network. The explicit

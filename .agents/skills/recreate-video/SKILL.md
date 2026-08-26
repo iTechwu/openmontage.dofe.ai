@@ -127,3 +127,14 @@ motion with still images. Stop at the relevant approval gate or structured block
 - MCP unavailable: use the same CLI command; the output contract is identical.
 - Docker: use `docker compose run --rm openmontage-cli clone ... --json` or connect
   an MCP client to `http://localhost:8765/mcp`.
+
+
+## Drive the job to completion (DSH is the orchestration hub)
+
+OpenMontage is a pure MCP producer. After `submit_video_job`, YOU (DSH) are the orchestration hub: poll the job yourself, auto-handle approval gates, and report the outcome. Do NOT assume a push notification will arrive.
+
+1. After submit, loop calling `get_video_job` (and `list_video_job_events`) until the job reaches a terminal status (`SUCCEEDED`, `FAILED`, `CANCELLED`).
+2. When the current stage is `WAITING_APPROVAL` (e.g. `proposal`/`script`/`scene_plan`/`assets`/`publish`), call `approve_video_stage` with `approved=true` for that stage to keep the pipeline flowing. (To require human review, present the gate via `ask_user_question` first and only approve after the user confirms.)
+3. Keep polling + approving through all stages until the job is terminal.
+4. On `SUCCEEDED`, report the final video path and any `publish_log`/artifacts to the user. On `FAILED`, report the stage and the error message (e.g. search the executor checkpoint for the failing stage).
+5. If a stage blocks for a long time (>10 min) with no progress, surface it to the user rather than silently waiting.

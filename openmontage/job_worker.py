@@ -332,7 +332,7 @@ class JobWorker:
                 if settled.status == JobStatus.CANCELLED:
                     return JobWorkerResult(snapshot.job_id, stage.code, "job_cancelled")
                 return JobWorkerResult(snapshot.job_id, stage.code, "waiting_approval")
-            if checkpoint["status"] == "completed":
+            if checkpoint["status"] in {"completed", "awaiting_human"}:
                 heartbeat.release()
                 settled = self.service.complete_stage_or_confirm_cancel(
                     snapshot.job_id,
