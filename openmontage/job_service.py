@@ -30,6 +30,8 @@ from openmontage.contracts import (
 )
 from openmontage.pipeline_executor import delegated_executor_availability
 
+from lib.paths import PROJECTS_DIR
+
 
 class JobConflictError(RuntimeError):
     """Raised when an idempotency key is reused with different immutable input."""
@@ -180,6 +182,28 @@ def _summarize_error(message: str, max_len: int) -> str:
     return f"{message[:head_len]} ... {message[-tail_len:]}"
 
 
+def _validate_artifact_input(request: JobCreateRequest) -> None:
+    """Reject ``input.type=artifact`` when the ``artifactId`` is a prepared project id.
+
+    The agent-facing video workflow expects the creative brief as ``input.type=text``
+    with ``inlineText``. A common mistake is to pass the reference-clone ``project_id``
+    (e.g. ``clone-douyin-...``) as ``input.artifactId``; that is not an artifact — the
+    worker would later fail to resolve it via the artifact bridge with
+    ``OPENMONTAGE_ARTIFACT_INPUT_FAILED``. Reject it here, at submission time, with a
+    clear message instead.
+    """
+    input_value = request.input
+    if getattr(input_value, "type", None) != "artifact":
+        return
+    artifact_id = input_value.artifact_id
+    if PROJECTS_DIR.joinpath(artifact_id).is_dir():
+        raise JobSubmissionError(
+            f"input.artifactId '{artifact_id}' is a prepared project id, not an artifact; "
+            'set input.type="text" with inlineText (the creative brief) for a video job, '
+            "or upload a real file through the artifact bridge."
+        )
+
+
 class JobService:
     def __init__(self, database_path: str | Path):
         self.database_path = Path(database_path)
@@ -286,6 +310,7 @@ class JobService:
         request: JobCreateRequest,
         attribution: JobAttribution,
     ) -> JobSnapshot:
+        _validate_artifact_input(request)
         request_identity = {
             "request": request.to_wire(),
             "attribution": attribution.to_wire(),

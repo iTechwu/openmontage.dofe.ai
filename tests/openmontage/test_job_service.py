@@ -23,6 +23,7 @@ from openmontage.job_service import (
     JobStateError,
     JobSubmissionError,
 )
+import openmontage.job_service as job_service_module
 
 
 def _attribution() -> JobAttribution:
@@ -505,4 +506,37 @@ def test_completion_requires_every_stage_to_be_terminal_success(tmp_path: Path) 
         service.complete_job(job.job_id)
 
     assert service.get_job(job.job_id).status == JobStatus.QUEUED
+
+
+def _artifact_request(artifactId: str) -> JobCreateRequest:
+    return JobCreateRequest(
+        client_request_id=f"artifact-{artifactId}-{hashlib.sha256(artifactId.encode()).hexdigest()[:8]}",
+        workflow="animated-explainer",
+        input={"type": "artifact", "artifactId": artifactId},
+        brief={"title": "Reference-driven video", "durationSeconds": 30},
+        output={"container": "mp4", "resolution": "1080x1920"},
+        budget={"maxAmount": "20.00", "currency": "CNY"},
+    )
+
+
+def test_create_job_rejects_project_id_as_artifact_at_submission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PROJECTS_DIR is a module-level singleton; point it at a temp root so the
+    # prepared-project-dir check is deterministic.
+    projects_root = tmp_path / "projects"
+    projects_root.mkdir()
+    monkeypatch.setattr(job_service_module, "PROJECTS_DIR", projects_root)
+    service = _service(tmp_path / "jobs.sqlite3")
+
+    # A real prepared project id passed as artifactId must be rejected up front.
+    (projects_root / "clone-douyin-12345").mkdir()
+    with pytest.raises(JobSubmissionError, match="prepared project id"):
+        service.create_job(_artifact_request("clone-douyin-12345"), _attribution())
+
+    # A non-project artifactId (not a directory under PROJECTS_DIR) is allowed at
+    # submission; only the artifact bridge resolution during the run decides it.
+    job = service.create_job(_artifact_request("attachment-abc"), _attribution())
+    assert job.status == JobStatus.QUEUED
+    assert job.request.input["type"] == "artifact"
     assert len(service.list_events(job.job_id)) == 1

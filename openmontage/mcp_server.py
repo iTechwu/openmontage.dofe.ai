@@ -91,7 +91,19 @@ def create_server(
 
     @server.tool()
     def submit_video_job(request: JobCreateRequest, ctx: Context) -> dict[str, Any]:
-        """Create a video Job; request.workflow must name a pipeline, not a stage."""
+        """Create a video Job.
+
+        contract:
+          request.workflow: a pipeline name (e.g. "animation"), never a stage (compose is
+            a stage, not a workflow).
+          request.input: use the TEXT branch — {"type":"text","inlineText":"<creative
+            brief / concept>"}. Do NOT use the ARTIFACT branch {"type":"artifact",
+            "artifactId":"..."} to reference a prepared project: a project id (clone-...)
+            is not an artifact and is rejected at submission. artifactId is only for a real
+            file already uploaded through the artifact bridge.
+          request.brief/{title,durationSeconds,audience}, request.output/{container,resolution,
+            fps}, request.budget/{maxAmount,currency}, request.clientRequestId (idempotency key).
+        """
         attribution = resolve_attribution(ctx.headers)
         return jobs().create_job(request, attribution).to_wire()
 

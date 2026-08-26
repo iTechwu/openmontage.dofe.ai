@@ -25,6 +25,7 @@ from openmontage.job_service import (
     JobNotFoundError,
     JobService,
     JobStateError,
+    JobSubmissionError,
 )
 
 
@@ -250,6 +251,11 @@ def _error_response(error: Exception) -> JSONResponse:
                 }
             },
             status_code=503,
+        )
+    if isinstance(error, JobSubmissionError):
+        return JSONResponse(
+            {"error": {"code": "OPENMONTAGE_SUBMISSION_REJECTED", "message": str(error)}},
+            status_code=422,
         )
     if isinstance(error, (ValidationError, ValueError, KeyError)):
         return JSONResponse(
