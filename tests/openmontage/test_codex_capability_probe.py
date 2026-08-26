@@ -81,14 +81,6 @@ def _bail(message: str) -> NoReturn:
     pytest.skip(message)
 
 
-def _dockerfile_codex_version() -> str:
-    match = re.search(
-        r"^ARG CODEX_CLI_VERSION=(?P<v>\d+\.\d+\.\d+)\s*$", _DOCKERFILE, re.MULTILINE
-    )
-    assert match, "Dockerfile must declare ARG CODEX_CLI_VERSION=<semver>"
-    return match.group("v")
-
-
 def test_manifest_tracks_the_pinned_codex_version() -> None:
     """The audited manifest must track exactly the current pin and carry the
     behavioral baseline the live probe checks against. A bump that does not
@@ -96,13 +88,14 @@ def test_manifest_tracks_the_pinned_codex_version() -> None:
     status rather than a silent stale record."""
     from openmontage.delegation_proxy import PINNED_CODEX_CLI_VERSION
 
-    pin = _dockerfile_codex_version()
-    assert _MANIFEST["pinned_codex_version"] == pin, (
-        f"manifest pinned_codex_version ({_MANIFEST['pinned_codex_version']}) "
-        f"must match the Dockerfile CODEX_CLI_VERSION pin ({pin})"
+    assert "codex" not in _DOCKERFILE.lower(), (
+        "the Docker image is MCP-only and must not reference the Codex CLI; "
+        "the pin lives in delegation_proxy.PINNED_CODEX_CLI_VERSION"
     )
     assert _MANIFEST["pinned_codex_version"] == PINNED_CODEX_CLI_VERSION, (
-        "manifest must match delegation_proxy.PINNED_CODEX_CLI_VERSION"
+        f"manifest pinned_codex_version ({_MANIFEST['pinned_codex_version']}) "
+        f"must match delegation_proxy.PINNED_CODEX_CLI_VERSION "
+        f"({PINNED_CODEX_CLI_VERSION})"
     )
     assert _MANIFEST["blocker_id"] == "KB-001"
     baseline = _MANIFEST["behavioral_probe_baseline"]
@@ -200,7 +193,7 @@ def test_ci_wires_the_strict_capability_probe() -> None:
     skips, so a changed request surface or stale pin would pass green.
 
     This test pins that wiring in place: the workflow must install the
-    Dockerfile-pinned @openai/codex, set OPENMONTAGE_CODEX_PROBE_STRICT=1, and
+    pinned @openai/codex, set OPENMONTAGE_CODEX_PROBE_STRICT=1, and
     run this probe module. Dropping the job or the strict flag would return the
     probe to skip-on-green drift, so this fails until the wiring is restored —
     making the behavioral-evidence path a durable, tested invariant rather than a
@@ -209,9 +202,10 @@ def test_ci_wires_the_strict_capability_probe() -> None:
     assert "@openai/codex@" in workflow, (
         "ci.yml must install the pinned @openai/codex via npm install -g @openai/codex@<pin>"
     )
-    assert "CODEX_CLI_VERSION" in workflow and "${{ steps.pin.outputs.version }}" in workflow, (
-        "ci.yml must read the pin from the Dockerfile (ARG CODEX_CLI_VERSION) and install "
-        "that exact version, so a bump flows through automatically instead of drifting"
+    assert "PINNED_CODEX_CLI_VERSION" in workflow and "${{ steps.pin.outputs.version }}" in workflow, (
+        "ci.yml must read the pin from openmontage/delegation_proxy.py "
+        "(PINNED_CODEX_CLI_VERSION) and install that exact version, so a bump flows "
+        "through automatically instead of drifting"
     )
     assert 'OPENMONTAGE_CODEX_PROBE_STRICT: "1"' in workflow, (
         "ci.yml must set OPENMONTAGE_CODEX_PROBE_STRICT: \"1\" so the probe FAILS (not "

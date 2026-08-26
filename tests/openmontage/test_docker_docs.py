@@ -90,34 +90,27 @@ def test_host_model_query_documents_env_loading() -> None:
 def test_codex_version_pin_is_the_single_source() -> None:
     """The Codex CLI pin must be identical wherever it is referenced.
 
-    The canonical pin is the Dockerfile ``CODEX_CLI_VERSION`` build arg; the
-    delegation proxy's ``PINNED_CODEX_CLI_VERSION`` constant is the code-side
-    source the external-blocker analysis is verified against, and the docs state
-    the same revision in prose. A bump in any one without the others is a silent
+    The image no longer bundles the Codex CLI (Docker deployments are
+    MCP-only), so the canonical pin is the delegation proxy's
+    ``PINNED_CODEX_CLI_VERSION`` constant — the revision the KB-001 analysis
+    and the host-run Worker path are verified against — and the docs state the
+    same revision in prose. A bump in any one without the others is a silent
     drift — and the blocker tracking is only correct while these agree, so the
-    test fails until all three (and the blocker re-verification) move together.
+    test fails until all of them (and the blocker re-verification) move
+    together.
     """
-    dockerfile_match = re.search(
-        r"^ARG CODEX_CLI_VERSION=(?P<v>\d+\.\d+\.\d+)\s*$",
-        _DOCKERFILE,
-        re.MULTILINE,
+    assert "codex" not in _DOCKERFILE.lower(), (
+        "the Docker image is MCP-only and must not reference the Codex CLI; "
+        "host-run Workers install the pinned CLI themselves"
     )
-    assert dockerfile_match, "Dockerfile must declare ARG CODEX_CLI_VERSION=<semver>"
-    dockerfile_version = dockerfile_match.group("v")
 
     from openmontage.delegation_proxy import PINNED_CODEX_CLI_VERSION
 
-    assert PINNED_CODEX_CLI_VERSION == dockerfile_version, (
-        f"delegation_proxy.PINNED_CODEX_CLI_VERSION ({PINNED_CODEX_CLI_VERSION}) "
-        f"must match Dockerfile CODEX_CLI_VERSION ({dockerfile_version}); bumping "
-        "the pin must re-verify the per-call-identity blocker claim."
-    )
-
     doc_versions = set(re.findall(r"codex-cli\s+(?P<v>\d+\.\d+\.\d+)", _DOC))
     assert doc_versions, "DOCKER_AND_AGENTS.md must state the codex-cli pin version"
-    assert doc_versions == {dockerfile_version}, (
-        f"docs codex-cli version(s) {doc_versions} must match the Dockerfile pin "
-        f"({dockerfile_version})"
+    assert doc_versions == {PINNED_CODEX_CLI_VERSION}, (
+        f"docs codex-cli version(s) {doc_versions} must match "
+        f"delegation_proxy.PINNED_CODEX_CLI_VERSION ({PINNED_CODEX_CLI_VERSION})"
     )
     # KB-001 records the revision the blocker was first verified against; that
     # literal must move with the pin or the tracking goes stale. Match EVERY
@@ -128,15 +121,18 @@ def test_codex_version_pin_is_the_single_source() -> None:
         "KNOWN_BLOCKERS.md must reference the codex-cli pin "
         "(KB-001 First verified revision)"
     )
-    assert kb_versions == {dockerfile_version}, (
-        f"KNOWN_BLOCKERS.md codex-cli version(s) {kb_versions} must all match the "
-        f"Dockerfile pin ({dockerfile_version}); a partial update leaves a stale literal"
+    assert kb_versions == {PINNED_CODEX_CLI_VERSION}, (
+        f"KNOWN_BLOCKERS.md codex-cli version(s) {kb_versions} must all match "
+        f"delegation_proxy.PINNED_CODEX_CLI_VERSION ({PINNED_CODEX_CLI_VERSION}); "
+        "a partial update leaves a stale literal"
     )
     # The proxy module body must not re-literal the version outside the constant,
     # so the constant is the sole in-file source.
     proxy_src = (PROJECT_ROOT / "openmontage" / "delegation_proxy.py").read_text()
-    literal_occurrences = re.findall(rf"\b{re.escape(dockerfile_version)}\b", proxy_src)
-    assert literal_occurrences == [dockerfile_version], (
+    literal_occurrences = re.findall(
+        rf"\b{re.escape(PINNED_CODEX_CLI_VERSION)}\b", proxy_src
+    )
+    assert literal_occurrences == [PINNED_CODEX_CLI_VERSION], (
         "delegation_proxy.py must contain the pinned Codex version exactly once "
         "(in PINNED_CODEX_CLI_VERSION); comments must reference the constant by "
         f"name, not re-literal it. Found {len(literal_occurrences)} occurrence(s)."

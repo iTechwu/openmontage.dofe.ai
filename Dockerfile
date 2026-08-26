@@ -7,7 +7,6 @@ ARG DEBIAN_MIRROR=http://mirrors.aliyun.com/debian
 ARG DEBIAN_SECURITY_MIRROR=http://mirrors.aliyun.com/debian-security
 ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
 ARG NPM_REGISTRY=https://registry.npmmirror.com
-ARG CODEX_CLI_VERSION=0.146.0
 USER root
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -45,8 +44,6 @@ COPY remotion-composer/package.json remotion-composer/package-lock.json ./remoti
 RUN cd remotion-composer \
     && npm config set registry "${NPM_REGISTRY}" \
     && npm ci --no-audit --no-fund \
-    && npm install --global --no-audit --no-fund "@openai/codex@${CODEX_CLI_VERSION}" \
-    && codex --version | grep -F "codex-cli ${CODEX_CLI_VERSION}" \
     && npm run runtime:browser \
     && mkdir -p "/home/${RUNTIME_USER}/.cache" "/home/${RUNTIME_USER}/.hyperframes" \
     && HOME="/home/${RUNTIME_USER}" npm exec -- hyperframes telemetry disable \

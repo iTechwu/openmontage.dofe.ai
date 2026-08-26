@@ -15,8 +15,8 @@ drift into silence.
 | **Status** | MITIGATED — the proxy combines the durable content fingerprint with a stable occurrence ordinal. Concurrent and sequential distinct calls receive different invocation IDs, while a deterministic stage restart replays each occurrence in order. A native Codex per-call identity would remove the remaining order-dependence. |
 | **Owner** | OpenMontage backend maintainer (delegation proxy / worker executor) |
 | **External tracker** | **PENDING** — no upstream `openai/codex` issue is known to track this (issue [#1194](https://github.com/openai/codex/issues/1194) is alt-provider auth, not per-call identity). Upstream issues search: <https://github.com/openai/codex/issues?q=is%3Aissue+idempotency>. Owner must **file** `external_tracker.issue_draft` (verbatim or adapted) before **Next review**, then set the tracker to FILED with the issue URL here and in `docs/codex_capability_probe.json`. The structured/test-enforced tracker state lives in `docs/codex_capability_probe.json` → `external_tracker`; `test_external_tracker_is_concrete_not_a_placeholder` fails if PENDING lacks a ready-to-file `issue_draft` (title + body) or if the review date lapses, and `test_review_deadline_window_bounds_probe_recency` fails if the deadline is pushed more than a quarter past the last probe. |
-| **First verified** | codex-cli 0.146.0 (the `CODEX_CLI_VERSION` Dockerfile pin) |
-| **Next review** | On every `CODEX_CLI_VERSION` bump (enforced by `test_codex_capability_probe.py`) **and** no later than 2026-11-07, whichever comes first |
+| **First verified** | codex-cli 0.146.0 (the `delegation_proxy.PINNED_CODEX_CLI_VERSION` single-source pin) |
+| **Next review** | On every `PINNED_CODEX_CLI_VERSION` bump (enforced by `test_codex_capability_probe.py`) **and** no later than 2026-11-07, whichever comes first |
 | **Probe** | `tests/openmontage/test_codex_capability_probe.py` + audited manifest `docs/codex_capability_probe.json` |
 | **Code reference** | `openmontage/delegation_proxy.py` — `KB-001` comment and the content-fingerprint occurrence sequence |
 

@@ -40,12 +40,14 @@ _SUPPORTED_UPSTREAM_CONTENT_ENCODINGS = frozenset(
     for encoding in requests.utils.DEFAULT_ACCEPT_ENCODING.split(",")
     if encoding.strip()
 ) | {"identity"}
-# The Codex CLI revision the KB-001 analysis below was verified against. This is
-# the single code-side source of that version: it is kept in sync with
-# Dockerfile's CODEX_CLI_VERSION (the canonical build-time pin) and with
-# docs/DOCKER_AND_AGENTS.md by test_codex_version_pin_is_the_single_source.
-# Bumping the pin MUST trigger re-verification of the per-call-identity claim in
-# the KB-001 comment, and a re-run of the capability probe.
+# The Codex CLI revision the KB-001 analysis below was verified against. This
+# constant is the single source of that version (the Docker image is MCP-only
+# and no longer bundles the CLI); it is kept in sync with
+# docs/DOCKER_AND_AGENTS.md and docs/KNOWN_BLOCKERS.md by
+# test_codex_version_pin_is_the_single_source, and the CI capability-probe job
+# installs exactly this revision. Bumping the pin MUST trigger re-verification
+# of the per-call-identity claim in the KB-001 comment, and a re-run of the
+# capability probe.
 PINNED_CODEX_CLI_VERSION = "0.146.0"
 # ---------------------------------------------------------------------------
 # KB-001 — Responses same-content wrong-merge is MITIGATED (not an open bug).

@@ -55,6 +55,14 @@ own `/healthz` endpoint and the authenticated DoFe `/v1/models` catalog are both
 reachable, so a broken shared-network hostname or missing model credential fails
 the deployment health gate before a production job starts.
 
+The image ships as an MCP server only: it does not bundle an agent CLI, and
+Compose runs no in-container Job Worker. External agents drive production through
+the MCP tools (`prepare_reference_clone`, `reference_clone_status`, the
+`openmontage://reference-clone-guide` resource, and the project-file exchange
+tools); `submit_video_job` fails closed while no agent executor is available and
+`openmontage_capabilities` reports the situation under
+`job_submission.delegated_execution`.
+
 When AgentSpace is available, start the signed event publisher as well:
 
 ```bash
@@ -92,10 +100,20 @@ protocol, so any non-Codex `OPENMONTAGE_AGENT_EXECUTOR_JSON` fails closed before
 a paid task is created rather than being allowed to choose its own model. The
 Agent reads the repository pipeline manifest and director skills, uses the
 normal OpenMontage tools, and records its result as a validated checkpoint.
-Configure the process as a JSON argv array; shell strings are intentionally
-rejected:
+
+**The Docker image no longer bundles the Codex CLI and Compose runs no worker
+service.** The Worker is a host-run path for local development: install the
+pinned Codex CLI (`codex-cli 0.146.0`, tracked by
+`openmontage/delegation_proxy.py` `PINNED_CODEX_CLI_VERSION` as the single
+source) on the host, export the executor environment, and run the worker from
+the repository checkout. `openmontage worker run` verifies at startup that the
+configured executable actually resolves on `PATH` and exits with a clear error
+before claiming any lease; `submit_video_job` likewise fails closed at
+submission time while the executor is unavailable. Configure the process as a
+JSON argv array; shell strings are intentionally rejected:
 
 ```bash
+npm install -g @openai/codex@0.146.0  # match PINNED_CODEX_CLI_VERSION exactly
 export OPENMONTAGE_AGENT_EXECUTOR_JSON='["codex","exec","--skip-git-repo-check","--ephemeral","--ignore-user-config","-s","workspace-write","-C","/absolute/path/to/OpenMontage","--add-dir","{project_dir}","-"]'
 export OPENMONTAGE_AGENT_TIMEOUT_SECONDS=3600
 # Required: an exact model id visible in the delegated tenant GET /v1/models.
@@ -132,37 +150,36 @@ approved for the selected Agent CLI. The exact `{project_dir}` argv item is
 replaced with the trusted current Job directory; no other interpolation is
 performed. Do not put API keys, delegation secrets, or user input in argv.
 
-For Docker, the image pins the approved `@openai/codex` CLI version and verifies
-the executable during the build. A Codex executable installed on a macOS host
-cannot be bind-mounted as a Linux executable. The Worker obtains a short-lived
-Job delegation from AgentSpace for every stage, starts a loopback signing proxy,
-and injects the key only into that stage process. The key is not stored in the
-assignment, checkpoint, Compose source, argv, or executor log. The Docker
-default also uses an ephemeral Codex session, ignores user configuration,
-skips the absent image Git metadata check, keeps `/app` read-only at the OS
-layer, and grants sandbox write access only to the current Job project. Codex
-authenticates with the delegated models key; no interactive Codex account is
-required. HyperFrames also runs without an account, and its anonymous telemetry
-is disabled during the image build. It reuses Remotion's pinned Chrome Headless
-Shell so the image does not download a second competing browser build. The image
-includes the browser's Debian shared libraries, skips HyperFrames' optional CUDA
-payload in favor of the bundled CPU runtime, and allocates 512 MB of shared
-memory for render processes. The pinned Remotion fonts are included explicitly
-in the build context, while its Webpack cache is redirected to the writable
-`/data/cache` volume. Then start all three long-lived processes:
+The Worker obtains a short-lived Job delegation from AgentSpace for every
+stage, starts a loopback signing proxy, and injects the key only into that
+stage process. The key is not stored in the assignment, checkpoint, argv, or
+executor log. The recommended host executor flags use an ephemeral Codex
+session, ignore user configuration, skip the repository Git metadata check, and
+grant sandbox write access only to the current Job project. Codex authenticates
+with the delegated models key; no interactive Codex account is required.
+
+The Compose image keeps the composition stack self-contained: HyperFrames runs
+without an account and its anonymous telemetry is disabled during the image
+build. It reuses Remotion's pinned Chrome Headless Shell so the image does not
+download a second competing browser build. The image includes the browser's
+Debian shared libraries, skips HyperFrames' optional CUDA payload in favor of
+the bundled CPU runtime, and allocates 512 MB of shared memory for render
+processes. The pinned Remotion fonts are included explicitly in the build
+context, while its Webpack cache is redirected to the writable `/data/cache`
+volume. The long-lived Compose processes are the MCP server and, when
+AgentSpace is available, the signed event publisher:
 
 ```bash
 docker compose --profile agentspace up --build -d \
-  openmontage-mcp openmontage-events openmontage-worker
+  openmontage-mcp openmontage-events
 ```
 
-`openmontage-worker` fails closed when the Agent executor, Artifact Bridge, or
-AgentSpace model credential bridge configuration is absent, or when
-`OPENMONTAGE_AGENT_MODEL_ID` is unset or not visible in the delegated tenant
-`GET /v1/models`. Compose passes `OPENMONTAGE_AGENT_MODEL_ID` through from
-`.env`; set it to an exact catalog id before starting the worker. This is
-deliberate: the service does not fall back to a Python creative orchestrator, a
-shared provider key, a Runtime's parent credential, or an unverified model.
+The host-run worker fails closed when the Agent executor executable is missing,
+when the Artifact Bridge or AgentSpace model credential bridge configuration is
+absent, or when `OPENMONTAGE_AGENT_MODEL_ID` is unset or not visible in the
+delegated tenant `GET /v1/models`. This is deliberate: the service does not
+fall back to a Python creative orchestrator, a shared provider key, a Runtime's
+parent credential, or an unverified model.
 
 ### Recovery and publication semantics
 
@@ -195,8 +212,9 @@ employee attribution.
 
 **Codex Responses same-content replay (KB-001, mitigated).** Native tool paths
 supply a stable logical-call identity, so the proxy keys replay strictly on it.
-Codex cannot: verified against codex-cli 0.146.0 (the Dockerfile
-`CODEX_CLI_VERSION` pin), its model-provider configuration has no per-call
+Codex cannot: verified against codex-cli 0.146.0 (the
+`delegation_proxy.PINNED_CODEX_CLI_VERSION` single-source pin), its
+model-provider configuration has no per-call
 header or Idempotency-Key. The proxy therefore combines the durable content
 fingerprint with a stable occurrence ordinal. Sequential and concurrent
 same-content calls receive distinct invocation IDs; a deterministic stage
@@ -330,7 +348,11 @@ Use /recreate-video on this Douyin link: <url>. Create an original 9:16 version.
 - `prepare_reference_clone`: download, analyze, preflight, and initialize.
 - `openmontage_capabilities`: compact provider/runtime readiness summary.
 - `reference_clone_status`: current project and next pipeline stage.
-- `submit_video_job`: create an asynchronous, attributable video Job.
+- `submit_video_job`: create an asynchronous, attributable video Job. Fails
+  closed while no agent executor is available (see
+  `job_submission.delegated_execution` in `openmontage_capabilities`); the
+  Docker MCP deployment does not bundle an executor, so Jobs run only where a
+  host-run Worker is configured.
 - `get_video_job`: return the durable Job and manifest-derived stage snapshot.
 - `list_video_job_events`: replay ordered Job events after a sequence cursor.
 - `list_video_artifacts`: list durable AgentSpace-backed outputs for a Job.
