@@ -343,6 +343,23 @@ class VideoAnalyzer(BaseTool):
 
         # Strict AIRouter transcription. The gateway requires a provider-visible
         # URL; Douyin's public extractor supplies play_url for this path.
+        # Reuse a prior successful transcript for the same project instead of
+        # re-transcribing (a repeat would collide on the AIRouter idempotency key).
+        existing_transcript_path = output_dir / "transcript_airouter.json"
+        if transcript_data is None and strict_dofe_routing and existing_transcript_path.is_file():
+            try:
+                prior = json.loads(existing_transcript_path.read_text(encoding="utf-8"))
+                if prior.get("full_text"):
+                    transcript_data = {
+                        "full_text": prior.get("full_text", ""),
+                        "segments": prior.get("segments", []),
+                        "language": prior.get("language", "zh-CN"),
+                        "word_count": prior.get("word_count", 0),
+                    }
+                    brief["narration_transcript"] = transcript_data
+                    steps_completed.append("transcript_airouter_reused")
+            except (OSError, ValueError):
+                pass
         if transcript_data is None and strict_dofe_routing:
             try:
                 from tools.analysis.dofe_stt import DofeSpeechToText
@@ -365,6 +382,7 @@ class VideoAnalyzer(BaseTool):
                     "asr_mode": inputs.get("asr_mode", "fast"),
                     "output_path": str(output_dir / "transcript_airouter.json"),
                     "project_dir": str(output_dir),
+                    "run_id": output_dir.parent.name,
                 })
                 if stt_result.success:
                     if stt_result.data.get("source_asset"):
