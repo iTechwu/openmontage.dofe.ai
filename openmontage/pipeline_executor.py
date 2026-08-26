@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -502,6 +503,48 @@ def _validate_command(command: Sequence[str]) -> tuple[str, ...]:
             "OPENMONTAGE_AGENT_EXECUTOR_JSON must be a nonempty JSON argv array"
         )
     return tuple(command)
+
+
+def delegated_executor_availability() -> dict[str, Any]:
+    """Report whether the configured external Agent executor can actually run.
+
+    Unlike ``AgentCommandPipelineExecutor.from_environment`` this never raises:
+    an unset, invalid, or unresolvable executor is reported as unavailable with
+    a reason, so capability preflight and Job submission can fail closed with
+    an actionable message instead of queueing work that can never execute.
+    """
+    raw = os.environ.get("OPENMONTAGE_AGENT_EXECUTOR_JSON", "")
+    if not raw.strip():
+        return {
+            "available": False,
+            "executor": "",
+            "reason": (
+                "OPENMONTAGE_AGENT_EXECUTOR_JSON is not set; no external agent "
+                "executor is configured"
+            ),
+        }
+    try:
+        command = _validate_command(json.loads(raw))
+    except (json.JSONDecodeError, TypeError, PipelineExecutionError) as exc:
+        return {
+            "available": False,
+            "executor": "",
+            "reason": f"invalid OPENMONTAGE_AGENT_EXECUTOR_JSON: {exc}",
+        }
+    executable = command[0]
+    if shutil.which(executable) is None:
+        return {
+            "available": False,
+            "executor": executable,
+            "reason": (
+                f"executor executable {executable!r} not found on PATH. The Docker "
+                "image does not bundle an agent CLI: MCP-only deployments drive "
+                "production through prepare_reference_clone/reference_clone_status; "
+                "host-run workers must install the executor (the pinned Codex CLI) "
+                "themselves"
+            ),
+        }
+    return {"available": True, "executor": executable, "reason": ""}
 
 
 def _is_codex_exec_command(command: Sequence[str]) -> bool:

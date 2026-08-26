@@ -200,7 +200,10 @@ def _build_job_worker(args: argparse.Namespace):
     from openmontage.job_worker import JobWorker
     from openmontage.model_credential_bridge import ModelCredentialBridgeClient
     from openmontage.invocation_store import ModelInvocationStore
-    from openmontage.pipeline_executor import AgentCommandPipelineExecutor
+    from openmontage.pipeline_executor import (
+        AgentCommandPipelineExecutor,
+        delegated_executor_availability,
+    )
 
     worker_id = os.environ.get("OPENMONTAGE_WORKER_ID", "").strip()
     if not worker_id:
@@ -209,6 +212,14 @@ def _build_job_worker(args: argparse.Namespace):
     agent_executor = AgentCommandPipelineExecutor.from_environment(
         invocation_store=ModelInvocationStore(service.database_path),
     )
+    # Fail fast at startup rather than per-Job: a missing executor binary can
+    # only surface as FileNotFoundError mid-lease, burning retries on work
+    # that can never run.
+    executor_availability = delegated_executor_availability()
+    if not executor_availability["available"]:
+        raise RuntimeError(
+            f"openmontage worker cannot start: {executor_availability['reason']}"
+        )
     return JobWorker(
         service,
         DeterministicVideoSmokeExecutor(agent_executor),

@@ -21,6 +21,7 @@ from openmontage.pipeline_executor import (
     StageAssignment,
     _configure_agent_command_for_delegation,
     _is_codex_exec_command,
+    delegated_executor_availability,
 )
 from tools.dofe.delegation import DelegatedModelCredential
 
@@ -303,6 +304,63 @@ def test_executor_environment_requires_nonempty_json_argv(
 
     with pytest.raises(PipelineExecutionError, match="JSON argv"):
         AgentCommandPipelineExecutor.from_environment()
+
+
+def test_delegated_executor_availability_reports_unset_executor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENMONTAGE_AGENT_EXECUTOR_JSON", raising=False)
+
+    report = delegated_executor_availability()
+
+    assert report == {
+        "available": False,
+        "executor": "",
+        "reason": (
+            "OPENMONTAGE_AGENT_EXECUTOR_JSON is not set; no external agent "
+            "executor is configured"
+        ),
+    }
+
+
+def test_delegated_executor_availability_reports_invalid_executor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENMONTAGE_AGENT_EXECUTOR_JSON", "not json")
+
+    report = delegated_executor_availability()
+
+    assert report["available"] is False
+    assert report["executor"] == ""
+    assert report["reason"].startswith("invalid OPENMONTAGE_AGENT_EXECUTOR_JSON")
+
+
+def test_delegated_executor_availability_reports_missing_binary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "OPENMONTAGE_AGENT_EXECUTOR_JSON",
+        json.dumps(["openmontage-no-such-executor", "exec", "-"]),
+    )
+
+    report = delegated_executor_availability()
+
+    assert report["available"] is False
+    assert report["executor"] == "openmontage-no-such-executor"
+    assert "not found on PATH" in report["reason"]
+
+
+def test_delegated_executor_availability_accepts_resolvable_executor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "OPENMONTAGE_AGENT_EXECUTOR_JSON",
+        json.dumps([sys.executable, "-c", "pass"]),
+    )
+
+    report = delegated_executor_availability()
+
+    assert report == {"available": True, "executor": sys.executable, "reason": ""}
 
 
 def test_is_codex_exec_command_recognizes_windows_exe() -> None:

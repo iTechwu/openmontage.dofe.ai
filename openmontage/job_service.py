@@ -28,10 +28,15 @@ from openmontage.contracts import (
     validate_job_transition,
     validate_stage_transition,
 )
+from openmontage.pipeline_executor import delegated_executor_availability
 
 
 class JobConflictError(RuntimeError):
     """Raised when an idempotency key is reused with different immutable input."""
+
+
+class JobSubmissionError(RuntimeError):
+    """Raised when a new Job cannot be executed by the configured runtime."""
 
 
 class JobStateError(RuntimeError):
@@ -305,6 +310,17 @@ class JobService:
                         "client_request_id was already used with different Job input or attribution"
                     )
                 return JobSnapshot.model_validate_json(existing["snapshot_json"])
+
+            # Fail closed before a new Job is persisted: without a runnable
+            # external agent executor the Job can never leave QUEUED, so the
+            # submission surface (MCP or CLI) must reject it with the
+            # availability reason instead of silently queueing forever.
+            executor_availability = delegated_executor_availability()
+            if not executor_availability["available"]:
+                raise JobSubmissionError(
+                    "Job submission is unavailable: "
+                    + executor_availability["reason"]
+                )
 
             workflow = WorkflowDefinition.from_pipeline(request.workflow)
             now = _now()

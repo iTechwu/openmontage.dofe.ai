@@ -17,7 +17,12 @@ from openmontage.contracts import (
     PublishedArtifact,
     StageStatus,
 )
-from openmontage.job_service import JobConflictError, JobService, JobStateError
+from openmontage.job_service import (
+    JobConflictError,
+    JobService,
+    JobStateError,
+    JobSubmissionError,
+)
 
 
 def _attribution() -> JobAttribution:
@@ -128,6 +133,50 @@ def test_create_job_is_idempotent_for_the_same_workspace_and_request(tmp_path: P
 
     assert second.job_id == first.job_id
     assert [event.sequence for event in service.list_events(first.job_id)] == [1]
+
+
+def test_create_job_fails_closed_when_executor_is_unconfigured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path / "jobs.sqlite3")
+    monkeypatch.delenv("OPENMONTAGE_AGENT_EXECUTOR_JSON", raising=False)
+
+    with pytest.raises(JobSubmissionError, match="no external agent executor"):
+        service.create_job(_request(), _attribution())
+
+    with sqlite3.connect(service.database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM openmontage_job").fetchone()[0] == 0
+
+
+def test_create_job_fails_closed_when_executor_binary_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path / "jobs.sqlite3")
+    monkeypatch.setenv(
+        "OPENMONTAGE_AGENT_EXECUTOR_JSON",
+        json.dumps(["openmontage-no-such-executor", "exec", "-"]),
+    )
+
+    with pytest.raises(JobSubmissionError, match="not found on PATH"):
+        service.create_job(_request(), _attribution())
+
+    with sqlite3.connect(service.database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM openmontage_job").fetchone()[0] == 0
+
+
+def test_create_job_idempotent_replay_bypasses_executor_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path / "jobs.sqlite3")
+    created = service.create_job(_request(), _attribution())
+
+    monkeypatch.delenv("OPENMONTAGE_AGENT_EXECUTOR_JSON", raising=False)
+    replayed = service.create_job(_request(), _attribution())
+
+    assert replayed.job_id == created.job_id
 
 
 def test_existing_v1_job_with_legacy_nested_shapes_remains_readable(tmp_path: Path) -> None:

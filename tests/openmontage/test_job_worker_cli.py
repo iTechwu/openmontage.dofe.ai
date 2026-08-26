@@ -64,3 +64,22 @@ def test_worker_fails_closed_without_executor_configuration(
     error = json.loads(captured.err)
     assert error["success"] is False
     assert "OPENMONTAGE_AGENT_EXECUTOR_JSON" in error["error"]
+
+
+def test_worker_fails_fast_when_executor_binary_is_missing(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv(
+        "OPENMONTAGE_AGENT_EXECUTOR_JSON",
+        json.dumps(["openmontage-no-such-executor", "exec", "-"]),
+    )
+
+    exit_code = cli.main(["worker", "run", "--once", "--json"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert captured.out == ""
+    error = json.loads(captured.err)
+    assert error["success"] is False
+    assert "not found on PATH" in error["error"]

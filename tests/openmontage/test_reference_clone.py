@@ -133,6 +133,7 @@ def test_capabilities_include_replayable_job_submission_contract(monkeypatch):
     }
     assert contract["request_schema"] == JobCreateRequest.model_json_schema(by_alias=True)
     assert JobCreateRequest.model_validate(contract["request_example"]).workflow == "animated-explainer"
+    assert set(contract["delegated_execution"]) == {"available", "executor", "reason"}
 
 
 def test_job_submission_preflight_excludes_invalid_workflow(monkeypatch):
