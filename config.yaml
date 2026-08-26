@@ -3,7 +3,7 @@
 llm:
   provider: dofe                 # unified models.dofe.ai router
   protocol: openai               # openai | openai_response | anthropic | gemini
-  base_url: https://model.local.dofe.ai/api
+  base_url: http://dofe-models-api:3101
   api_key_env: DOFE_MODEL_API_KEY
   model: null                    # select an exact ID from authenticated GET /v1/models
   temperature: 0.7

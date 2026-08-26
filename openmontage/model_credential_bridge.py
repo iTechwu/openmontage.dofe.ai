@@ -36,9 +36,17 @@ class ModelCredentialBridgeClient:
         self.timeout = timeout
 
     @classmethod
-    def from_environment(cls, *, session: Any | None = None) -> "ModelCredentialBridgeClient":
+    def from_environment(cls, *, session: Any | None = None) -> "ModelCredentialBridgeClient | None":
+        # Path A (self-contained OpenMontage): when the AgentSpace model-credential
+        # escrow is not configured, run agent stages with OpenMontage's own model
+        # credentials instead of requiring a delegated Job credential. A missing
+        # base URL disables the bridge entirely (worker passes credential=None and
+        # the pipeline executor runs the Codex agent against its internal gateway).
+        base_url = os.environ.get("OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL", "").strip()
+        if not base_url:
+            return None
         return cls(
-            base_url=os.environ.get("OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL", ""),
+            base_url=base_url,
             service_token=os.environ.get("OPENMONTAGE_SERVICE_TOKEN", ""),
             session=session,
         )

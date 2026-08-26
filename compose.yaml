@@ -8,6 +8,10 @@ x-openmontage-common: &openmontage-common
       OPENMONTAGE_IMAGE_REVISION: ${OPENMONTAGE_IMAGE_REVISION:-unknown}
   image: openmontage:local
   shm_size: "512mb"
+  security_opt:
+    - apparmor=unconfined
+  privileged: true
+  user: root
   env_file:
     - path: .env
       required: false
@@ -19,7 +23,7 @@ x-openmontage-common: &openmontage-common
     OPENMONTAGE_SERVICE_TOKEN: ${OPENMONTAGE_SERVICE_TOKEN:?Set OPENMONTAGE_SERVICE_TOKEN in .env}
     OPENMONTAGE_EVENT_ENDPOINT: ${OPENMONTAGE_EVENT_ENDPOINT:-http://host.docker.internal:1455/api/internal/openmontage/events}
     OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL: ${OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL:-http://host.docker.internal:1455}
-    OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL: ${OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL:-http://host.docker.internal:1455}
+    OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL: ${OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL-http://host.docker.internal:1455}
     # Keep model traffic on the shared internal Compose network. The explicit
     # Docker overrides remain available for deployments whose internal service
     # name differs from the centrally managed default. Override the internal
@@ -49,6 +53,9 @@ x-openmontage-common: &openmontage-common
     # The host path is overridable so machines without a shared /data root can
     # point it at a checkout-local directory via .env.
     - ${OPENMONTAGE_EXCHANGE_HOST_DIR:-/data/mcp-exchange}:/data/mcp-exchange
+    # Overlay the container config with the checked-out config.yaml (model gateway
+    # base_url / STT routing) so the container talks to the internal dofe-models-api.
+    - ./config.yaml:/app/config.yaml:ro
   networks:
     - dofe-models
   extra_hosts:
@@ -86,7 +93,10 @@ services:
     healthcheck:
       disable: true
     restart: unless-stopped
-
+  # MCP-only deployment: the openmontage-worker is intentionally NOT a compose
+  # service. It runs on the host via openmontage/delegation_proxy.py (see
+  # DOCKER_AND_AGENTS.md). add a worker here only if you want pipeline execution
+  # inside a container replica.
 networks:
   dofe-models:
     external: true

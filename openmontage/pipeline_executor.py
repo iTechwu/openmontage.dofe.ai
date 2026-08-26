@@ -257,10 +257,37 @@ class AgentCommandPipelineExecutor:
 
         try:
             if credential is None:
+                # Self-contained path (no delegated Job credential): pin the
+                # internal DoFe gateway and the configured agent model on the
+                # Codex command so the agent stage runs with OpenMontage's own
+                # credentials instead of a delegated escrowed credential.
+                configured_command = command
+                standalone_base = os.environ.get("DOFE_MODEL_BASE_URL", "").strip().rstrip("/")
+                if standalone_base and _is_codex_exec_command(command):
+                    standalone_model = os.environ.get("OPENMONTAGE_AGENT_MODEL_ID", "").strip() or None
+                    configured_command = _configure_agent_command_for_delegation(
+                        command,
+                        f"{standalone_base}/v1",
+                        model=standalone_model,
+                    )
+                # Mirror the delegated path's environment handling so the Codex
+                # subprocess always receives the gateway API key explicitly.
+                # Without this, Codex can miss OPENAI_API_KEY and the gateway
+                # rejects with 401 "Invalid API key format".
+                standalone_env = {
+                    key: value
+                    for key, value in os.environ.items()
+                    if key not in _CONTROL_PLANE_SECRET_ENV and not _SECRET_ENV_SUFFIX.search(key)
+                }
+                gateway_base = standalone_base or os.environ.get("DOFE_MODEL_BASE_URL", "").strip().rstrip("/")
+                standalone_env["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY", os.environ.get("DOFE_MODEL_API_KEY", ""))
+                standalone_env["OPENAI_BASE_URL"] = f"{gateway_base}/v1" if gateway_base else os.environ.get("OPENAI_BASE_URL", "")
+                standalone_env["DOFE_MODEL_API_KEY"] = os.environ.get("DOFE_MODEL_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
+                standalone_env["DOFE_MODEL_BASE_URL"] = gateway_base
                 completed = self._run(
-                    command,
+                    configured_command,
                     prompt,
-                    environment=None,
+                    environment=standalone_env,
                     cancellation_requested=cancellation_requested,
                 )
             else:
@@ -618,6 +645,8 @@ def _configure_agent_command_for_delegation(
         f"model_providers.{provider}.supports_websockets=false",
         "-c",
         f"model_providers.{provider}.requires_openai_auth=true",
+        "-c",
+        f"model_providers.{provider}.env_key=\"OPENAI_API_KEY\"",
     )
     # The catalog-verified model pins exactly which Responses model Codex calls,
     # so execution never silently falls back to the host's default model.
