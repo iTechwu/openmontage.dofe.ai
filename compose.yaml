@@ -46,7 +46,9 @@ x-openmontage-common: &openmontage-common
     - ./music_library:/data/music_library
     # Shared exchange dir (mcp-file-server) so project files can be mirrored on
     # demand for the workspace agent via /exchange or http://host.docker.internal:18090.
-    - /data/mcp-exchange:/data/mcp-exchange
+    # The host path is overridable so machines without a shared /data root can
+    # point it at a checkout-local directory via .env.
+    - ${OPENMONTAGE_EXCHANGE_HOST_DIR:-/data/mcp-exchange}:/data/mcp-exchange
   networks:
     - dofe-models
   extra_hosts:

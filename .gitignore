@@ -38,6 +38,10 @@ corpus/
 # User music library (personal royalty-free tracks — not part of repo)
 music_library/
 
+# Local MCP exchange dir (mirrored project files for external agents) —
+# host path is chosen via OPENMONTAGE_EXCHANGE_HOST_DIR in .env
+mcp-exchange/
+
 # Environment & credentials
 .env
 .env.local
