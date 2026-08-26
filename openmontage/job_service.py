@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -336,16 +337,20 @@ class JobService:
                     )
                 return JobSnapshot.model_validate_json(existing["snapshot_json"])
 
-            # Fail closed before a new Job is persisted: without a runnable
-            # external agent executor the Job can never leave QUEUED, so the
-            # submission surface (MCP or CLI) must reject it with the
-            # availability reason instead of silently queueing forever.
-            executor_availability = delegated_executor_availability()
-            if not executor_availability["available"]:
-                raise JobSubmissionError(
-                    "Job submission is unavailable: "
-                    + executor_availability["reason"]
-                )
+            # Producer mode: when OpenMontage configures no executor (MCP-only
+            # container, OPENMONTAGE_AGENT_EXECUTOR_JSON unset) the calling runtime
+            # (DSH / codex / claudecode) owns job execution, so accept the submission
+            # and let the caller's worker drive it. Only when OpenMontage itself runs a
+            # worker (executor configured) do we fail closed before persisting a Job
+            # that could never leave QUEUED.
+            executor_raw = os.environ.get("OPENMONTAGE_AGENT_EXECUTOR_JSON", "").strip()
+            if executor_raw:
+                executor_availability = delegated_executor_availability()
+                if not executor_availability["available"]:
+                    raise JobSubmissionError(
+                        "Job submission is unavailable: "
+                        + executor_availability["reason"]
+                    )
 
             workflow = WorkflowDefinition.from_pipeline(request.workflow)
             now = _now()

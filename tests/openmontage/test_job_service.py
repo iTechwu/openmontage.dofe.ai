@@ -136,18 +136,21 @@ def test_create_job_is_idempotent_for_the_same_workspace_and_request(tmp_path: P
     assert [event.sequence for event in service.list_events(first.job_id)] == [1]
 
 
-def test_create_job_fails_closed_when_executor_is_unconfigured(
+def test_create_job_accepts_in_producer_mode_when_executor_unconfigured(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Producer mode: an MCP-only OpenMontage configures no local executor; the
+    # calling runtime (DSH / codex / claudecode) owns execution, so submission is
+    # accepted instead of failing closed.
     service = _service(tmp_path / "jobs.sqlite3")
     monkeypatch.delenv("OPENMONTAGE_AGENT_EXECUTOR_JSON", raising=False)
 
-    with pytest.raises(JobSubmissionError, match="no external agent executor"):
-        service.create_job(_request(), _attribution())
+    job = service.create_job(_request(), _attribution())
 
+    assert job.status == JobStatus.QUEUED
     with sqlite3.connect(service.database_path) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM openmontage_job").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM openmontage_job").fetchone()[0] == 1
 
 
 def test_create_job_fails_closed_when_executor_binary_is_missing(
