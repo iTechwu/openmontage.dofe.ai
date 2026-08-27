@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from tools.base_tool import BaseTool, ToolResult, ToolRuntime, ToolStability, ToolTier, ToolStatus
+from tools.audio.dofe_tts import MINIMAX_VOICES, DEFAULT_VOICE
 
 
 class TTSSelector(BaseTool):
@@ -43,7 +44,12 @@ class TTSSelector(BaseTool):
             "text": {"type": "string"},
             "voice_id": {
                 "type": "string",
-                "description": "Provider-specific voice ID. Passed through to the selected TTS provider.",
+                "description": (
+                    "MiniMax 音色 id，必须传英文 id（括号内中文名仅供参考）："
+                    "男声 " + "；".join(f"{k}（{v}）" for k, v in MINIMAX_VOICES["male"])
+                    + "；女声 " + "；".join(f"{k}（{v}）" for k, v in MINIMAX_VOICES["female"])
+                    + f"。缺省用 {DEFAULT_VOICE}。"
+                ),
             },
             "voice_language": {
                 "type": "string",

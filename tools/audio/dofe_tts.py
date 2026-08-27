@@ -54,6 +54,9 @@ MINIMAX_VOICES = {
 # 缺省旁白音色（voice 未指定时兜底）
 DEFAULT_VOICE = "hunyin_6"
 
+# 合法音色 id 集合（非法值兜底默认，避免打到上游报 business_error）
+VALID_VOICE_IDS = frozenset(vid for group in MINIMAX_VOICES.values() for vid, _ in group)
+
 
 class DofeTTS(BaseTool):
     name = "dofe_tts"
@@ -167,7 +170,10 @@ class DofeTTS(BaseTool):
         content: list[dict[str, Any]] = [{"part": {"type": "text", "text": text}, "order": 0}]
 
         params: dict[str, Any] = {"format": inputs.get("format", "mp3")}
-        params["speaker"] = inputs.get("voice") or DEFAULT_VOICE
+        voice = inputs.get("voice") or inputs.get("voice_id") or DEFAULT_VOICE
+        if voice not in VALID_VOICE_IDS:
+            voice = DEFAULT_VOICE
+        params["speaker"] = voice
         if inputs.get("speed") is not None:
             params["speechRate"] = inputs["speed"]
 
