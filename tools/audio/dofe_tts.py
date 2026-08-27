@@ -28,6 +28,33 @@ from tools.dofe.runtime import build_metadata, run_dofe_generation
 from tools.dofe.status import configured_model_is_visible
 
 
+# MiniMax 音色清单（生成对话/narration 时从此列表选；id 中的空格是 MiniMax 原始 id 的一部分，必须保留）。
+MINIMAX_VOICES = {
+    "male": [
+        ("Chinese_bazong",                            "温柔霸总 - 低沉,成熟,深情"),
+        ("Chinese_worker_male",                       "班味男社畜 - 沉稳,职场,疲惫"),
+        ("hunyin_6",                                  "舒朗男声 - 清亮,干脆利落,意气风发"),
+        ("Chinese (Mandarin)_Unrestrained_Young_Man", "不羁青年 - 低沉磁性,慵懒随意,霸道"),
+        ("Chinese (Mandarin)_Stubborn_Friend",        "嘴硬竹马 - 清朗温暖,自然随性,邻家大男孩"),
+        ("Chinese_radient_storyteller_nv1",           "说书爷爷 - 沙哑,鼻音,引人入胜"),
+        ("Chinese_weather_forecaster_nv1",            "天气播报员 - 沙哑,有质感,节奏感"),
+        ("Chinese (Mandarin)_Pure-hearted_Boy",       "清澈邻家弟弟 - 清澈干净,娓娓道来,邻家男孩感"),
+    ],
+    "female": [
+        ("Chinese_huolishaonv",          "元气少女 - 甜美,活泼,娇俏"),
+        ("Chinese_worker_female",        "班味女社畜 - 疲惫,生动,紧张"),
+        ("Chinese_cixianglaoren",        "亲切奶奶 - 温厚,亲切,沧桑"),
+        ("Chinese (Mandarin)_Mature_Woman", "傲娇御姐 - 低沉沙哑,慵懒舒缓,性感撩人"),
+        ("Arrogant_Miss",                "嚣张小姐 - 娇俏明亮,灵动跳跃,傲娇自信"),
+        ("Chinese_sweet_girl_nv1",       "甜美少女 - 清脆,富有表现力,朝气蓬勃"),
+        ("Chinese_crisp_podcaster_nv1",  "清爽女声 - 清晰,对话感,深思"),
+    ],
+}
+
+# 缺省旁白音色（voice 未指定时兜底）
+DEFAULT_VOICE = "hunyin_6"
+
+
 class DofeTTS(BaseTool):
     name = "dofe_tts"
     version = "0.1.0"
@@ -71,7 +98,15 @@ class DofeTTS(BaseTool):
         "required": ["text"],
         "properties": {
             "text": {"type": "string"},
-            "voice": {"type": "string", "description": "Speaker/voice id. Maps to params.speaker."},
+            "voice": {
+                "type": "string",
+                "description": (
+                    "MiniMax 音色 id，从内置清单选："
+                    "男声 " + "；".join(f"{k}（{v}）" for k, v in MINIMAX_VOICES["male"])
+                    + "；女声 " + "；".join(f"{k}（{v}）" for k, v in MINIMAX_VOICES["female"])
+                    + f"。缺省用 {DEFAULT_VOICE}。"
+                ),
+            },
             "format": {
                 "type": "string",
                 "default": "mp3",
@@ -132,8 +167,7 @@ class DofeTTS(BaseTool):
         content: list[dict[str, Any]] = [{"part": {"type": "text", "text": text}, "order": 0}]
 
         params: dict[str, Any] = {"format": inputs.get("format", "mp3")}
-        if inputs.get("voice"):
-            params["speaker"] = inputs["voice"]
+        params["speaker"] = inputs.get("voice") or DEFAULT_VOICE
         if inputs.get("speed") is not None:
             params["speechRate"] = inputs["speed"]
 
