@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from typing import Any, Literal
 
@@ -54,6 +55,15 @@ def create_server(
             attribution_resolver = default_attribution_resolver()
         return attribution_resolver(headers)
 
+    def require_async_credential(ctx: Context) -> None:
+        """Do not enqueue a job that would later fall back to a service-wide key."""
+        from openmontage.mcp_gateway_auth import gateway_attribution
+
+        if gateway_attribution(ctx.headers) is not None:
+            raise RuntimeError(
+                "公网 MCP 视频作业暂不可用：短期 Models 运行凭据接入后开放"
+            )
+
     @server.tool()
     def prepare_reference_clone(
         source: str,
@@ -104,6 +114,7 @@ def create_server(
           request.brief/{title,durationSeconds,audience}, request.output/{container,resolution,
             fps}, request.budget/{maxAmount,currency}, request.clientRequestId (idempotency key).
         """
+        require_async_credential(ctx)
         attribution = resolve_attribution(ctx.headers)
         return jobs().create_job(request, attribution).to_wire()
 
@@ -293,6 +304,7 @@ def build_http_app(
         default_attribution_resolver,
         default_job_service,
     )
+    from openmontage.mcp_gateway_auth import McpGatewayAuthMiddleware
 
     service = job_service or default_job_service()
     resolver = attribution_resolver or default_attribution_resolver()
@@ -310,7 +322,11 @@ def build_http_app(
     routes = [Route("/healthz", health, methods=["GET"]), *create_job_routes(service, resolver)]
     for route in reversed(routes):
         app.routes.insert(0, route)
-    return app
+    return McpGatewayAuthMiddleware(
+        app,
+        gateway_only=os.environ.get("OPENMONTAGE_MCP_GATEWAY_ONLY", "false").strip().lower()
+        in {"1", "true", "yes", "on"},
+    )
 
 
 def run_server(

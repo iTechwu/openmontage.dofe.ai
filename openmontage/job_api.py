@@ -27,6 +27,7 @@ from openmontage.job_service import (
     JobStateError,
     JobSubmissionError,
 )
+from openmontage.mcp_gateway_auth import gateway_attribution, gateway_attempted
 
 
 class TrustedContextError(PermissionError):
@@ -62,6 +63,11 @@ class TrustedAttributionResolver:
         return cls(os.environ.get("OPENMONTAGE_SERVICE_TOKEN", ""))
 
     def __call__(self, headers: Mapping[str, str] | None) -> JobAttribution:
+        derived = gateway_attribution(headers)
+        if derived is not None:
+            return derived
+        if gateway_attempted(headers):
+            raise TrustedContextError("MCP Gateway context is invalid")
         authorization = _header(headers, "Authorization") or ""
         expected = f"Bearer {self.service_token}"
         if not hmac.compare_digest(authorization, expected):
