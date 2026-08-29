@@ -44,7 +44,10 @@ provision() {
   # 2. OpenMontage + third-party deps into the persistent volume (idempotent).
   #    Reuse the wheel the OpenMontage image exported, or install from the repo.
   mkdir -p "$SITE_PACKAGES"
-  if ! python3 -c "import yaml, pydantic" >/dev/null 2>&1; then
+  # Check the modules imported during CLI bootstrap, not just the two direct
+  # configuration dependencies. A partially populated persistent runtime can
+  # otherwise pass provisioning and make every supervised worker crash-loop.
+  if ! python3 -c "import yaml, pydantic, jsonschema, requests" >/dev/null 2>&1; then
     WHEEL="$(find /exchange/openmontage-wheel "$REPO" -maxdepth 2 -name 'openmontage-*.whl' 2>/dev/null | head -1 || true)"
     if [[ -n "$WHEEL" ]]; then
       python3 -m pip install --target "$SITE_PACKAGES" --break-system-packages "$WHEEL" >/dev/null 2>&1 || true
