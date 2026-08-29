@@ -255,6 +255,35 @@ class ProjectFileExporter:
             "url": f"{self._root_public_url(project_id)}/{rel}",
         }
 
+    def read_text(self, project_id: str, relative_path: str, *, max_bytes: int = 2_000_000) -> dict[str, Any]:
+        """Read a bounded UTF-8 project file through the MCP response."""
+        if max_bytes <= 0 or max_bytes > 10_000_000:
+            raise ProjectFileExportError("max_bytes must be between 1 and 10000000")
+        project_dir = _project_dir(self.projects_root, project_id)
+        rel = _safe_relative(relative_path)
+        source = (project_dir / rel).resolve()
+        if not str(source).startswith(str(project_dir) + os.sep):
+            raise ProjectFileExportError("relative_path escaped the project directory")
+        if not source.is_file():
+            raise ProjectFileExportError(f"Not a file in project {project_id}: {relative_path}")
+        if _is_media(source):
+            raise ProjectFileExportError("Media files must be delivered with export_project_file(include_media=true)")
+        size_bytes = source.stat().st_size
+        if size_bytes > max_bytes:
+            raise ProjectFileExportError(
+                f"File is {size_bytes} bytes; reduce max_bytes or use export_project_file"
+            )
+        try:
+            content = source.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise ProjectFileExportError("Only UTF-8 text files can be read through MCP") from exc
+        return {
+            "project_id": project_id,
+            "relative_path": str(rel),
+            "size_bytes": size_bytes,
+            "content": content,
+        }
+
     def export_analysis(self, project_id: str) -> dict[str, Any]:
         """Mirror the whole project analysis set, skipping large media files.
 

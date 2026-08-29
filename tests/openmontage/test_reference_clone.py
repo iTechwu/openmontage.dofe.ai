@@ -9,6 +9,7 @@ from tools.base_tool import ToolResult
 from openmontage import reference_clone
 from openmontage.capabilities import job_submission_capability
 from openmontage.contracts import JobCreateRequest
+from openmontage.exchange import ProjectFileExporter, ProjectFileExportError
 
 
 def test_prepare_creates_agent_ready_airouter_project(monkeypatch, tmp_path):
@@ -152,6 +153,25 @@ def test_prepare_reuses_completed_project_on_retry(monkeypatch, tmp_path):
     assert second["reused_existing_project"] is True
     assert any("reference_clone_status" in item for item in second["agent_instructions"])
     assert any("sync_project_exports" in item for item in second["agent_instructions"])
+
+
+def test_read_project_file_returns_bounded_text(tmp_path):
+    project_dir = tmp_path / "clone-example"
+    project_dir.mkdir()
+    (project_dir / "analysis.json").write_text('{"ok": true}', encoding="utf-8")
+    exporter = ProjectFileExporter(projects_root=tmp_path)
+
+    result = exporter.read_text("clone-example", "analysis.json")
+
+    assert result["content"] == '{"ok": true}'
+    assert result["relative_path"] == "analysis.json"
+
+    try:
+        exporter.read_text("clone-example", "analysis.json", max_bytes=1)
+    except ProjectFileExportError as exc:
+        assert "bytes" in str(exc)
+    else:
+        raise AssertionError("Expected the bounded read to reject an oversized file")
 
 
 def test_capabilities_include_replayable_job_submission_contract(monkeypatch):

@@ -252,6 +252,11 @@ def create_server(
         return ProjectFileExporter().export(project_id, relative_path, include_media=include_media)
 
     @server.tool()
+    def read_project_file(project_id: str, relative_path: str, max_bytes: int = 2_000_000) -> dict[str, Any]:
+        """Read a bounded UTF-8 analysis file through the authenticated MCP channel."""
+        return ProjectFileExporter().read_text(project_id, relative_path, max_bytes=max_bytes)
+
+    @server.tool()
     def sync_project_exports(project_id: str) -> dict[str, Any]:
         """Mirror a prepared project's whole analysis set into the shared file-server.
 
