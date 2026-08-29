@@ -290,7 +290,10 @@ def create_app() -> FastAPI:
                 max_age=session_ttl,
                 httponly=True,
                 secure=secure_cookie,
-                samesite="lax",
+                # Backlot is intentionally embedded by Yootun's sandboxed Web View.
+                # Secure + SameSite=None lets that cross-site iframe retain the
+                # read-only session without exposing the Models API key.
+                samesite="none",
                 path=base_path or "/",
             )
             return response

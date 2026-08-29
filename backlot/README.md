@@ -25,10 +25,11 @@ The public deployment uses these settings:
 | `OPENMONTAGE_BACKLOT_AUTH_URL` | Models internal `auth-context` | Validates the submitted Models API key |
 | `OPENMONTAGE_BACKLOT_PORT` | `14750` | CI loopback port for the tunnel |
 
-The login exchanges a valid Models API key for a random, 12-hour, Secure and
-HttpOnly session cookie. The key is not stored in the URL, browser storage, or
-Backlot session state. Local `python -m backlot serve` remains unauthenticated
-unless `OPENMONTAGE_BACKLOT_AUTH_URL` is explicitly set.
+The login exchanges a valid Models API key for a random, 12-hour, Secure,
+HttpOnly and `SameSite=None` session cookie so Yootun's cross-site sandboxed
+Web View can retain the read-only session. The key is not stored in the URL,
+browser storage, or Backlot session state. Local `python -m backlot serve`
+remains unauthenticated unless `OPENMONTAGE_BACKLOT_AUTH_URL` is explicitly set.
 
 The reverse proxy must strip `/montage` before forwarding to Backlot. Disable
 proxy buffering for `/montage/api/*/events` so the live SSE updates are not

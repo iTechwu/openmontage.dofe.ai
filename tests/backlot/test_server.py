@@ -152,6 +152,7 @@ class TestBacklotServerApi:
         assert accepted.status_code == 204
         assert "HttpOnly" in accepted.headers["set-cookie"]
         assert "Path=/montage" in accepted.headers["set-cookie"]
+        assert "SameSite=none" in accepted.headers["set-cookie"]
         assert projects.status_code == 200
 
     def test_projects_shape_and_state(self, client, projects_root):
