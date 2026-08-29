@@ -21,6 +21,11 @@ x-openmontage-common: &openmontage-common
     OPENMONTAGE_MCP_HOST: 0.0.0.0
     OPENMONTAGE_MCP_PORT: 8765
     OPENMONTAGE_SERVICE_TOKEN: ${OPENMONTAGE_SERVICE_TOKEN:?Set OPENMONTAGE_SERVICE_TOKEN in .env}
+    # The public MCP gateway authenticates with the Models API key and passes
+    # this signed context to OpenMontage. Keep the service gateway-only so the
+    # host-published 8765 port cannot be used as an unauthenticated bypass.
+    OPENMONTAGE_MCP_GATEWAY_SECRET: ${OPENMONTAGE_MCP_GATEWAY_SECRET:?Set OPENMONTAGE_MCP_GATEWAY_SECRET in .env}
+    OPENMONTAGE_MCP_GATEWAY_ONLY: ${OPENMONTAGE_MCP_GATEWAY_ONLY:-true}
     OPENMONTAGE_EVENT_ENDPOINT: ${OPENMONTAGE_EVENT_ENDPOINT-http://host.docker.internal:1455/api/internal/openmontage/events}
     OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL: ${OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL:-http://host.docker.internal:1455}
     OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL: ${OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL-http://host.docker.internal:1455}
