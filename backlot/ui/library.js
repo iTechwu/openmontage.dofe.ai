@@ -1,5 +1,5 @@
-import { el, fmtAgo, getJSON, subscribe, thumbURL } from "/ui/lib.js";
-import { label, pipelineLabel } from "/ui/i18n.js";
+import { appURL, el, fmtAgo, getJSON, subscribe, thumbURL } from "./lib.js";
+import { label, pipelineLabel } from "./i18n.js";
 
 const grid = document.getElementById("grid");
 const THEME_KEY = "backlot.theme";
@@ -65,7 +65,7 @@ function card(p) {
   );
 
   const staticSuffix = new URLSearchParams(location.search).has("static") ? "?static=1" : "";
-  return el("a", { class: `lib-card${p.live ? " live-card" : ""}`, href: `/p/${p.project_id}${staticSuffix}`, style: "text-decoration:none;color:inherit" },
+  return el("a", { class: `lib-card${p.live ? " live-card" : ""}`, href: `${appURL(`/p/${p.project_id}`)}${staticSuffix}`, style: "text-decoration:none;color:inherit" },
     poster,
     el("div", { class: "lib-body" },
       el("h3", {}, (p.title || p.project_id).toUpperCase()),

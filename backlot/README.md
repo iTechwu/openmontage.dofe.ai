@@ -11,6 +11,29 @@ python -m backlot open                # library view (all projects)
 python -m backlot serve --port 4750   # run the server in the foreground
 ```
 
+## Public read-only deployment
+
+`docker compose up -d openmontage-backlot` starts a least-privilege board
+service on host loopback port `14750`. The container mounts `projects/`
+read-only and does not receive the OpenMontage model/provider credentials.
+
+The public deployment uses these settings:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OPENMONTAGE_BACKLOT_BASE_PATH` | `/montage` | Browser-visible path prefix |
+| `OPENMONTAGE_BACKLOT_AUTH_URL` | Models internal `auth-context` | Validates the submitted Models API key |
+| `OPENMONTAGE_BACKLOT_PORT` | `14750` | CI loopback port for the tunnel |
+
+The login exchanges a valid Models API key for a random, 12-hour, Secure and
+HttpOnly session cookie. The key is not stored in the URL, browser storage, or
+Backlot session state. Local `python -m backlot serve` remains unauthenticated
+unless `OPENMONTAGE_BACKLOT_AUTH_URL` is explicitly set.
+
+The reverse proxy must strip `/montage` before forwarding to Backlot. Disable
+proxy buffering for `/montage/api/*/events` so the live SSE updates are not
+delayed.
+
 ## How it stays live
 
 No agent involvement. A `watchfiles` watcher on `projects/` publishes change

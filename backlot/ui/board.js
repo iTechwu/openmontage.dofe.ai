@@ -1,12 +1,15 @@
 // Backlot project board — renders BoardState and stays live via SSE.
 
 import {
-  STAGE_ICONS, el, fmtAgo, fmtClock, fmtDuration, fmtMoney,
+  STAGE_ICONS, appURL, el, fmtAgo, fmtClock, fmtDuration, fmtMoney,
   getJSON, mediaURL, subscribe, thumbURL, waveBars,
-} from "/ui/lib.js";
-import { formatToken, label, pipelineLabel, shotLabel, toolLabel } from "/ui/i18n.js";
+} from "./lib.js";
+import { formatToken, label, pipelineLabel, shotLabel, toolLabel } from "./i18n.js";
 
-const rawProjectPath = location.pathname.split("/p/")[1] || "";
+const projectPrefix = appURL("/p/");
+const rawProjectPath = location.pathname.startsWith(projectPrefix)
+  ? location.pathname.slice(projectPrefix.length)
+  : "";
 const projectId = decodeURIComponent(rawProjectPath);
 const encodedProjectId = encodeURIComponent(projectId);
 const app = document.getElementById("app");
@@ -94,7 +97,7 @@ function renderSlate(s) {
   return el("header", { class: "slate" },
     el("div", { class: "clapper" }),
     el("div", {},
-      el("a", { class: "wordmark", href: "/", style: "text-decoration:none" }, "Backlot"),
+      el("a", { class: "wordmark", href: appURL("/"), style: "text-decoration:none" }, "Backlot"),
       el("h1", {}, s.title),
     ),
     ...chips,

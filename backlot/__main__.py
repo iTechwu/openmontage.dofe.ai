@@ -79,10 +79,10 @@ def cmd_open(project_id: str | None) -> int:
     return 0
 
 
-def cmd_serve(port: int) -> int:
+def cmd_serve(port: int, host: str = "127.0.0.1") -> int:
     import uvicorn
 
-    uvicorn.run("backlot.server:app", host="127.0.0.1", port=port, log_level="warning")
+    uvicorn.run("backlot.server:app", host=host, port=port, log_level="warning")
     return 0
 
 
@@ -94,13 +94,14 @@ def main(argv: list[str] | None = None) -> int:
     p_open.add_argument("project_id", nargs="?", default=None)
 
     p_serve = sub.add_parser("serve", help="run the Backlot server in the foreground")
+    p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=_port())
 
     args = parser.parse_args(argv)
     if args.command == "open":
         return cmd_open(args.project_id)
     if args.command == "serve":
-        return cmd_serve(args.port)
+        return cmd_serve(args.port, args.host)
     parser.print_help()
     return 2
 

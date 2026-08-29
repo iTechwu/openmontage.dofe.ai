@@ -91,6 +91,69 @@ class TestBacklotServerApi:
         assert response.status_code == 200
         assert response.json() == {"ok": True, "app": "backlot"}
 
+    def test_public_base_path_is_embedded_in_ui_urls(
+        self,
+        projects_root,
+        monkeypatch,
+    ):
+        async def no_watch():
+            return None
+
+        monkeypatch.setattr(server_mod, "_watch_projects", no_watch)
+        monkeypatch.setenv("OPENMONTAGE_BACKLOT_BASE_PATH", "/montage/")
+
+        with TestClient(server_mod.create_app()) as prefixed_client:
+            library = prefixed_client.get("/")
+            board = prefixed_client.get("/p/film")
+
+        assert library.status_code == 200
+        assert '<meta name="backlot-base-path" content="/montage">' in library.text
+        assert 'href="/montage/ui/board.css?' in library.text
+        assert 'src="/montage/ui/library.js?' in library.text
+        assert '<meta name="backlot-base-path" content="/montage">' in board.text
+        assert 'src="/montage/ui/board.js?' in board.text
+
+    def test_models_key_authentication_issues_http_only_session(
+        self,
+        projects_root,
+        monkeypatch,
+    ):
+        async def no_watch():
+            return None
+
+        monkeypatch.setattr(server_mod, "_watch_projects", no_watch)
+        monkeypatch.setenv("OPENMONTAGE_BACKLOT_BASE_PATH", "/montage")
+        monkeypatch.setenv(
+            "OPENMONTAGE_BACKLOT_AUTH_URL",
+            "http://models.test/internal/mcp/auth-context",
+        )
+        monkeypatch.setenv("OPENMONTAGE_BACKLOT_SECURE_COOKIE", "false")
+        monkeypatch.setattr(
+            server_mod,
+            "_validate_models_api_key",
+            lambda api_key, auth_url: api_key == "valid-key",
+        )
+
+        with TestClient(server_mod.create_app(), follow_redirects=False) as auth_client:
+            page = auth_client.get("/")
+            api = auth_client.get("/api/projects")
+            rejected = auth_client.post("/auth/session", json={"apiKey": "bad-key"})
+            accepted = auth_client.post("/auth/session", json={"apiKey": "valid-key"})
+            session_cookie = accepted.headers["set-cookie"].split(";", 1)[0]
+            projects = auth_client.get(
+                "/api/projects",
+                headers={"Cookie": session_cookie},
+            )
+
+        assert page.status_code == 303
+        assert page.headers["location"] == "/montage/auth"
+        assert api.status_code == 401
+        assert rejected.status_code == 401
+        assert accepted.status_code == 204
+        assert "HttpOnly" in accepted.headers["set-cookie"]
+        assert "Path=/montage" in accepted.headers["set-cookie"]
+        assert projects.status_code == 200
+
     def test_projects_shape_and_state(self, client, projects_root):
         _make_project(projects_root, "film")
 

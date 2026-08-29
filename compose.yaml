@@ -86,6 +86,41 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  openmontage-backlot:
+    platform: ${OPENMONTAGE_PLATFORM:-linux/amd64}
+    build:
+      context: .
+      args:
+        OPENMONTAGE_IMAGE_REVISION: ${OPENMONTAGE_IMAGE_REVISION:-unknown}
+    image: openmontage:local
+    entrypoint: ["/usr/bin/tini", "--", "python", "-m", "backlot"]
+    command: ["serve", "--host", "0.0.0.0", "--port", "4750"]
+    environment:
+      OPENMONTAGE_PROJECTS_DIR: /data/projects
+      OPENMONTAGE_BACKLOT_CACHE_DIR: /data/cache/backlot
+      OPENMONTAGE_BACKLOT_BASE_PATH: ${OPENMONTAGE_BACKLOT_BASE_PATH:-/montage}
+      OPENMONTAGE_BACKLOT_AUTH_URL: ${OPENMONTAGE_BACKLOT_AUTH_URL:-http://dofe-models-api:3101/internal/mcp/auth-context}
+      OPENMONTAGE_BACKLOT_SECURE_COOKIE: "true"
+    volumes:
+      - ./projects:/data/projects:ro
+    tmpfs:
+      - /data/cache/backlot:size=256m
+    networks:
+      - dofe-models
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "127.0.0.1:${OPENMONTAGE_BACKLOT_PORT:-14750}:4750"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:4750/api/health >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
   openmontage-cli:
     <<: *openmontage-common
     profiles: ["tools"]

@@ -8,20 +8,32 @@ refetch state. The server never writes to project directories.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
+import os
+import secrets
 import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 from backlot.state import PROJECTS_DIR, REPO_ROOT, list_projects, load_board_state, summarize_project
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
-THUMB_CACHE_DIR = REPO_ROOT / ".backlot" / "thumbs"
+THUMB_CACHE_DIR = Path(
+    os.environ.get("OPENMONTAGE_BACKLOT_CACHE_DIR", REPO_ROOT / ".backlot" / "thumbs")
+)
 THUMB_WIDTHS = (320, 640, 960)
 
 # Paths inside a project whose changes are pure noise for the board.
@@ -30,14 +42,60 @@ _IGNORE_PARTS = {"node_modules", ".git", "__pycache__", ".cache"}
 SSE_HEARTBEAT_SECONDS = 15
 
 
-def _ui_html(name: str, assets: tuple[str, ...]) -> HTMLResponse:
-    html = (UI_DIR / name).read_text(encoding="utf-8")
+def _base_path() -> str:
+    value = os.environ.get("OPENMONTAGE_BACKLOT_BASE_PATH", "").strip()
+    if not value or value == "/":
+        return ""
+    if not value.startswith("/") or ".." in value or "//" in value:
+        raise RuntimeError("OPENMONTAGE_BACKLOT_BASE_PATH must be one safe absolute path")
+    return value.rstrip("/")
+
+
+def _ui_html(name: str, assets: tuple[str, ...], base_path: str) -> HTMLResponse:
+    content = (UI_DIR / name).read_text(encoding="utf-8")
+    content = content.replace(
+        "<head>",
+        f'<head>\n<meta name="backlot-base-path" content="{html.escape(base_path, quote=True)}">',
+        1,
+    )
     for asset in assets:
         path = UI_DIR / asset
         if path.is_file():
             version = str(int(path.stat().st_mtime))
-            html = html.replace(f"/ui/{asset}", f"/ui/{asset}?v={version}")
-    return HTMLResponse(html)
+            content = content.replace(
+                f"/ui/{asset}",
+                f"{base_path}/ui/{asset}?v={version}",
+            )
+    return HTMLResponse(content)
+
+
+class ModelsAuthUnavailable(RuntimeError):
+    """Raised when the internal Models authentication service is unavailable."""
+
+
+def _validate_models_api_key(api_key: str, auth_url: str) -> bool:
+    import requests
+
+    try:
+        response = requests.get(
+            auth_url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+    except requests.RequestException as exc:
+        raise ModelsAuthUnavailable("Models authentication is unavailable") from exc
+    if response.status_code == 200:
+        return True
+    if response.status_code in {401, 403}:
+        return False
+    raise ModelsAuthUnavailable("Models authentication returned an unexpected response")
+
+
+def _auth_html(base_path: str) -> HTMLResponse:
+    template = (UI_DIR / "auth.html").read_text(encoding="utf-8")
+    return HTMLResponse(
+        template.replace("__BACKLOT_BASE_PATH_JSON__", json.dumps(base_path))
+    )
 
 
 class ChangeHub:
@@ -164,6 +222,78 @@ async def _lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Backlot", docs_url=None, redoc_url=None, lifespan=_lifespan)
+    base_path = _base_path()
+    auth_url = os.environ.get("OPENMONTAGE_BACKLOT_AUTH_URL", "").strip()
+    secure_cookie = os.environ.get(
+        "OPENMONTAGE_BACKLOT_SECURE_COOKIE", "true"
+    ).lower() not in {"0", "false", "no"}
+    session_ttl = 12 * 60 * 60
+    sessions: dict[str, float] = {}
+
+    def session_is_valid(token: str | None) -> bool:
+        if not token:
+            return False
+        now = time.monotonic()
+        expires_at = sessions.get(token, 0)
+        if expires_at <= now:
+            sessions.pop(token, None)
+            return False
+        return True
+
+    if auth_url:
+        @app.middleware("http")
+        async def require_models_session(request: Request, call_next):
+            path = request.url.path
+            if (
+                path == "/api/health"
+                or path == "/auth"
+                or path == "/auth/session"
+                or session_is_valid(request.cookies.get("openmontage_backlot_session"))
+            ):
+                return await call_next(request)
+            if path == "/" or path.startswith("/p/"):
+                return RedirectResponse(f"{base_path}/auth", status_code=303)
+            return JSONResponse(
+                {"error": {"code": "OPENMONTAGE_BACKLOT_UNAUTHORIZED"}},
+                status_code=401,
+            )
+
+        @app.get("/auth")
+        async def auth_page() -> HTMLResponse:
+            return _auth_html(base_path)
+
+        @app.post("/auth/session")
+        async def create_auth_session(request: Request) -> Response:
+            try:
+                payload = await request.json()
+            except (json.JSONDecodeError, ValueError):
+                payload = {}
+            api_key = payload.get("apiKey") if isinstance(payload, dict) else None
+            if not isinstance(api_key, str) or not api_key or len(api_key) > 4096:
+                return JSONResponse({"error": "invalid_api_key"}, status_code=401)
+            try:
+                valid = await asyncio.to_thread(_validate_models_api_key, api_key, auth_url)
+            except ModelsAuthUnavailable:
+                return JSONResponse({"error": "auth_unavailable"}, status_code=503)
+            if not valid:
+                return JSONResponse({"error": "invalid_api_key"}, status_code=401)
+            now = time.monotonic()
+            for expired_token, expires_at in list(sessions.items()):
+                if expires_at <= now:
+                    sessions.pop(expired_token, None)
+            token = secrets.token_urlsafe(32)
+            sessions[token] = now + session_ttl
+            response = Response(status_code=204)
+            response.set_cookie(
+                "openmontage_backlot_session",
+                token,
+                max_age=session_ttl,
+                httponly=True,
+                secure=secure_cookie,
+                samesite="lax",
+                path=base_path or "/",
+            )
+            return response
 
     # ---- API ----------------------------------------------------------
 
@@ -279,15 +409,15 @@ def create_app() -> FastAPI:
 
     @app.get("/p/{project_id}")
     async def board_page(project_id: str) -> HTMLResponse:
-        return _ui_html("board.html", ("board.css", "board.js"))
+        return _ui_html("board.html", ("board.css", "board.js"), base_path)
 
     @app.get("/p/{project_path:path}")
     async def board_page_path(project_path: str) -> HTMLResponse:
-        return _ui_html("board.html", ("board.css", "board.js"))
+        return _ui_html("board.html", ("board.css", "board.js"), base_path)
 
     @app.get("/")
     async def library_page() -> HTMLResponse:
-        return _ui_html("index.html", ("board.css", "library.js"))
+        return _ui_html("index.html", ("board.css", "library.js"), base_path)
 
     if UI_DIR.is_dir():
         app.mount("/ui", StaticFiles(directory=UI_DIR), name="ui")
@@ -300,7 +430,12 @@ def create_app() -> FastAPI:
     async def ui_no_cache(request, call_next):
         response = await call_next(request)
         path = request.url.path
-        if path == "/" or path.startswith("/ui") or path.startswith("/p/"):
+        if (
+            path == "/"
+            or path == "/auth"
+            or path.startswith("/ui")
+            or path.startswith("/p/")
+        ):
             response.headers["Cache-Control"] = "no-cache"
         return response
 
