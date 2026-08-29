@@ -167,6 +167,32 @@ class ReferenceCloneService:
         if project_dir.parent != self.projects_root:
             raise ReferenceCloneError("Resolved project path escaped the projects directory")
 
+        # The automatic project id is derived from the normalized source URL. A
+        # client may therefore retry after its HTTP deadline without starting a
+        # second download/analysis run. Only reuse a fully materialized request;
+        # an incomplete directory is allowed to continue through normal setup.
+        request_path = project_dir / "artifacts" / "reference_clone_request.json"
+        marker_path = project_dir / "project.json"
+        if request_path.is_file() and marker_path.is_file():
+            try:
+                with request_path.open(encoding="utf-8") as handle:
+                    existing_request = json.load(handle)
+                existing_source = (existing_request.get("source") or {}).get("normalized_url")
+            except (OSError, ValueError, TypeError):
+                existing_request = None
+                existing_source = None
+            if (
+                isinstance(existing_request, dict)
+                and existing_request.get("status") == "prepared"
+                and existing_source == normalized_url
+            ):
+                reused = dict(existing_request)
+                reused["reused_existing_project"] = True
+                reused["exports"] = _exports_block(resolved_project_id)
+                reused["request_path"] = str(request_path)
+                reused["project_dir"] = str(project_dir)
+                return reused
+
         analysis_dir = project_dir / "reference"
         result = VideoAnalyzer().execute(
             {
@@ -239,7 +265,8 @@ class ReferenceCloneService:
             ),
             "exports": _exports_block(resolved_project_id),
             "agent_instructions": [
-                "Read skills/meta/video-reference-analyst.md and inspect the extracted keyframes.",
+                "Read skills/meta/video-reference-analyst.md and inspect the extracted keyframes. If the client timed out before this response arrived, call reference_clone_status(project_id) first and continue only when it reports prepared.",
+                "After status=prepared, call list_project_files(project_id) and sync_project_exports(project_id) (or export_project_file) before reading any /exchange/openmontage/<project_id>/... path; use only the returned file_path/host_path and never guess an exchange filename.",
                 "Present a five-aspect reference analysis and 2-3 differentiated concepts; do not make a carbon copy.",
                 "Run the selected pipeline stage by stage and honor every manifest approval gate.",
                 "Before submitting a Job, follow preflight.job_submission; workflow is the pipeline name, not a stage such as compose.",

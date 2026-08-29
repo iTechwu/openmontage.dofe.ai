@@ -112,6 +112,48 @@ def test_prepare_fails_when_download_did_not_complete(monkeypatch, tmp_path):
         raise AssertionError("Expected preparation to fail without a downloaded reference")
 
 
+def test_prepare_reuses_completed_project_on_retry(monkeypatch, tmp_path):
+    source_url = "https://www.douyin.com/video/7667931266800454975"
+    monkeypatch.setattr(reference_clone, "normalize_video_url", lambda _value: source_url)
+    calls = 0
+
+    def fake_execute(_self, inputs):
+        nonlocal calls
+        calls += 1
+        output = Path(inputs["output_dir"])
+        output.mkdir(parents=True, exist_ok=True)
+        brief = {
+            "source": {"type": "douyin", "title": "Reference title"},
+            "replication_guidance": {"suggested_pipeline": "animation"},
+            "_analysis_meta": {"steps_completed": ["download"], "steps_failed": []},
+        }
+        (output / "video_analysis_brief.json").write_text(json.dumps(brief))
+        return ToolResult(success=True, data=brief)
+
+    monkeypatch.setattr(reference_clone.VideoAnalyzer, "execute", fake_execute)
+    monkeypatch.setattr(reference_clone.registry, "discover", lambda: [])
+    monkeypatch.setattr(
+        reference_clone.DofeClient,
+        "list_models",
+        lambda _self: [],
+    )
+    monkeypatch.setattr(
+        reference_clone.registry,
+        "provider_menu_summary",
+        lambda: {"composition_runtimes": {}, "capabilities": [], "setup_offers": [], "runtime_warnings": []},
+    )
+
+    service = reference_clone.ReferenceCloneService(projects_root=tmp_path)
+    first = service.prepare(source_url)
+    second = service.prepare(source_url)
+
+    assert calls == 1
+    assert second["project_id"] == first["project_id"]
+    assert second["reused_existing_project"] is True
+    assert any("reference_clone_status" in item for item in second["agent_instructions"])
+    assert any("sync_project_exports" in item for item in second["agent_instructions"])
+
+
 def test_capabilities_include_replayable_job_submission_contract(monkeypatch):
     monkeypatch.setattr(
         reference_clone.registry,
