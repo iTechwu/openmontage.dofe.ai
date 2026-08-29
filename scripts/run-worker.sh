@@ -41,6 +41,13 @@ provision() {
     apt-get install -y -qq ffmpeg >/dev/null 2>&1 || true
   fi
 
+  # Some agent-runtime images ship Python and ffmpeg but intentionally omit
+  # pip. Dependency provisioning must not depend on ffmpeg also being absent.
+  if ! python3 -m pip --version >/dev/null 2>&1; then
+    apt-get update -qq
+    apt-get install -y -qq python3-pip
+  fi
+
   # 2. OpenMontage + third-party deps into the persistent volume (idempotent).
   #    Reuse the wheel the OpenMontage image exported, or install from the repo.
   mkdir -p "$SITE_PACKAGES"
@@ -50,12 +57,12 @@ provision() {
   if ! python3 -c "import yaml, pydantic, jsonschema, requests" >/dev/null 2>&1; then
     WHEEL="$(find /exchange/openmontage-wheel "$REPO" -maxdepth 2 -name 'openmontage-*.whl' 2>/dev/null | head -1 || true)"
     if [[ -n "$WHEEL" ]]; then
-      python3 -m pip install --target "$SITE_PACKAGES" --break-system-packages "$WHEEL" >/dev/null 2>&1 || true
+      python3 -m pip install --target "$SITE_PACKAGES" --break-system-packages "$WHEEL"
     else
-      python3 -m pip install --target "$SITE_PACKAGES" --break-system-packages "$REPO" >/dev/null 2>&1 || true
+      python3 -m pip install --target "$SITE_PACKAGES" --break-system-packages "$REPO"
     fi
     python3 -m pip install --target "$SITE_PACKAGES" --break-system-packages \
-      youtube-transcript-api scenedetect opencv-python-headless faster-whisper >/dev/null 2>&1 || true
+      youtube-transcript-api scenedetect opencv-python-headless faster-whisper
   fi
 
   # 3. remotion-composer node_modules (915M). Prefer the host repo copy; a
