@@ -27,6 +27,7 @@ set -euo pipefail
 RUNTIME_DIR="${OPENMONTAGE_RUNTIME_DIR:-/var/lib/openmontage-runtime}"
 SITE_PACKAGES="$RUNTIME_DIR/site-packages"
 REPO="${OPENMONTAGE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+PYPI_INDEX_URL="${OPENMONTAGE_PYPI_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple}"
 export PYTHONPATH="${SITE_PACKAGES}${PYTHONPATH:+:$PYTHONPATH}"
 export PATH="$RUNTIME_DIR/bin:$PATH"
 
@@ -57,11 +58,14 @@ provision() {
   if ! python3 -c "import yaml, pydantic, jsonschema, requests" >/dev/null 2>&1; then
     WHEEL="$(find /exchange/openmontage-wheel "$REPO" -maxdepth 2 -name 'openmontage-*.whl' 2>/dev/null | head -1 || true)"
     if [[ -n "$WHEEL" ]]; then
-      python3 -m pip install --target "$SITE_PACKAGES" --break-system-packages "$WHEEL"
+      python3 -m pip install --index-url "$PYPI_INDEX_URL" \
+        --target "$SITE_PACKAGES" --break-system-packages "$WHEEL"
     else
-      python3 -m pip install --target "$SITE_PACKAGES" --break-system-packages "$REPO"
+      python3 -m pip install --index-url "$PYPI_INDEX_URL" \
+        --target "$SITE_PACKAGES" --break-system-packages "$REPO"
     fi
-    python3 -m pip install --target "$SITE_PACKAGES" --break-system-packages \
+    python3 -m pip install --index-url "$PYPI_INDEX_URL" \
+      --target "$SITE_PACKAGES" --break-system-packages \
       youtube-transcript-api scenedetect opencv-python-headless faster-whisper
   fi
 
