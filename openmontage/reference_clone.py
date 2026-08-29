@@ -75,12 +75,10 @@ def _brief_path(project_dir: Path) -> Path:
 def _exports_block(project_id: str) -> dict[str, Any]:
     """Describe (and materialize) the on-demand file-server export surface.
 
-    When the file-server exporter is configured (docker/CI deployment) the workspace
-    agent cannot read the container project directory, so project files are mirrored
-    into the shared exchange. We mirror the analysis set with a small margin (whole
-    artifacts/keyframes/scenes/transcript, leaving media uncopied) so the agent can
-    fetch it immediately. Local (non-docker) runs leave this disabled and return
-    container paths directly.
+    When the file-server exporter is configured (docker/CI deployment) project files
+    are mirrored into the shared exchange for CI DSH consumers. Remote clients must
+    use the authenticated ``read_project_file`` MCP tool for text analysis files;
+    returned host paths are not local filesystem paths.
     """
     exporter = ProjectFileExporter()
     if not exporter.enabled:
@@ -98,11 +96,11 @@ def _exports_block(project_id: str) -> dict[str, Any]:
         "project_root_host_path": root["host_path"],
         "mirrored_files": mirrored,
         "instructions": (
-            "List the prepared project files with list_project_files(project_id); mirror the "
-            "analysis set (already available) or a single file with sync_project_exports / "
-            "export_project_file. Reference the file by its file_path/host_path "
-            "(/exchange/openmontage/<id>/...) so the DSH GUI can open it; the http url is "
-            "only for your own curl on the CI host and is NOT reachable from the user's browser."
+            "List the prepared project files with list_project_files(project_id). For JSON/"
+            "Markdown analysis, call read_project_file(project_id, relative_path) through "
+            "the authenticated MCP channel; do not use a local Read tool on /exchange or "
+            "the CI-only http URL. Use sync_project_exports / export_project_file only for "
+            "CI DSH shared-mount or media delivery workflows."
         ),
     }
 
@@ -266,7 +264,7 @@ class ReferenceCloneService:
             "exports": _exports_block(resolved_project_id),
             "agent_instructions": [
                 "Read skills/meta/video-reference-analyst.md and inspect the extracted keyframes. If the client timed out before this response arrived, call reference_clone_status(project_id) first and continue only when it reports prepared.",
-                "After status=prepared, call list_project_files(project_id) and sync_project_exports(project_id) (or export_project_file) before reading any /exchange/openmontage/<project_id>/... path; use only the returned file_path/host_path and never guess an exchange filename.",
+                "After status=prepared, call list_project_files(project_id), then read JSON/Markdown with read_project_file(project_id, relative_path) through MCP. Do not use a local Read tool on /exchange/openmontage/<project_id>/... or the CI-only file-server URL.",
                 "Present a five-aspect reference analysis and 2-3 differentiated concepts; do not make a carbon copy.",
                 "Run the selected pipeline stage by stage and honor every manifest approval gate.",
                 "Before submitting a Job, follow preflight.job_submission; workflow is the pipeline name, not a stage such as compose.",

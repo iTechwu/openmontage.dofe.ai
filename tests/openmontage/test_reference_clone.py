@@ -152,7 +152,7 @@ def test_prepare_reuses_completed_project_on_retry(monkeypatch, tmp_path):
     assert second["project_id"] == first["project_id"]
     assert second["reused_existing_project"] is True
     assert any("reference_clone_status" in item for item in second["agent_instructions"])
-    assert any("sync_project_exports" in item for item in second["agent_instructions"])
+    assert any("read_project_file" in item for item in second["agent_instructions"])
 
 
 def test_read_project_file_returns_bounded_text(tmp_path):

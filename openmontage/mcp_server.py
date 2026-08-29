@@ -242,10 +242,8 @@ def create_server(
     def export_project_file(project_id: str, relative_path: str, include_media: bool = False) -> dict[str, Any]:
         """Mirror one project file (or a whole directory) into the shared file-server.
 
-        Returns the DSH-readable ``host_path``/``file_path`` (``/exchange/...``) as the
-        reference to show — the DSH backend streams it to the browser from the shared
-        mount. The ``url`` (``http://127.0.0.1:18090/...``) is only for the agent's own
-        fetch on the CI host and is NOT reachable from the user's browser. Copying is on
+        Returns CI shared-mount references. Remote clients should use
+        ``read_project_file`` for text; the loopback URL is CI-internal. Copying is on
         demand and, by default, skips large media files; pass ``include_media=true`` to
         mirror a media file (e.g. the reference video).
         """

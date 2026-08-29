@@ -228,10 +228,9 @@ class ProjectFileExporter:
         mirrors only the small analysis outputs. Set ``include_media=True`` to mirror
         media files too (e.g. the reference video when the video is the deliverable).
 
-        ``host_path``/``file_path`` (``/exchange/...``) is the reference the DSH GUI can
-        open — the DSH backend reads the shared mount and streams it to the browser.
-        ``url`` is only for the agent's own fetch on the CI host (127.0.0.1 reaches the
-        file-server there); it is NOT reachable from the user's browser.
+        ``host_path``/``file_path`` (``/exchange/...``) is only a CI DSH shared-mount
+        reference. Remote clients should use ``read_project_file`` for text; the
+        loopback ``url`` is CI-internal.
         """
         self._require_enabled()
         project_dir = _project_dir(self.projects_root, project_id)
