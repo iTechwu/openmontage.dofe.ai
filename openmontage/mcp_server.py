@@ -4,9 +4,19 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from openmontage.contracts import JobCreateRequest
+from pydantic import Field, StrictInt
+
+from openmontage.contracts import (
+    ClientRequestId,
+    JobBrief,
+    JobBudget,
+    JobCreateRequest,
+    JobInput,
+    JobOutput,
+    WorkflowName,
+)
 from openmontage.exchange import ProjectFileExporter
 from openmontage.reference_clone import ReferenceCloneService, capability_summary
 
@@ -100,22 +110,49 @@ def create_server(
         return ReferenceCloneService().status(project_id)
 
     @server.tool()
-    def submit_video_job(request: JobCreateRequest, ctx: Context) -> dict[str, Any]:
+    def submit_video_job(
+        clientRequestId: ClientRequestId,
+        workflow: Annotated[
+            WorkflowName,
+            Field(
+                description=(
+                    "Pipeline manifest name from pipeline_defs; stage names such as compose "
+                    "are invalid."
+                )
+            ),
+        ],
+        input: JobInput,
+        brief: JobBrief,
+        output: JobOutput,
+        budget: JobBudget,
+        ctx: Context,
+        schemaVersion: Annotated[StrictInt, Field(ge=1, le=1)] = 1,
+    ) -> dict[str, Any]:
         """Create a video Job.
 
         contract:
-          request.workflow: a pipeline name (e.g. "animation"), never a stage (compose is
+          Pass every field directly as a tool argument. Do not wrap them in request or arguments.
+          workflow: a pipeline name (e.g. "animation"), never a stage (compose is
             a stage, not a workflow).
-          request.input: use the TEXT branch — {"type":"text","inlineText":"<creative
+          input: use the TEXT branch — {"type":"text","inlineText":"<creative
             brief / concept>"}. Do NOT use the ARTIFACT branch {"type":"artifact",
             "artifactId":"..."} to reference a prepared project: a project id (clone-...)
             is not an artifact and is rejected at submission. artifactId is only for a real
             file already uploaded through the artifact bridge.
-          request.brief/{title,durationSeconds,audience}, request.output/{container,resolution,
-            fps}, request.budget/{maxAmount,currency}, request.clientRequestId (idempotency key).
+          brief/{title,durationSeconds,audience}, output/{container,resolution,fps},
+            budget/{maxAmount,currency}, clientRequestId (idempotency key).
         """
         require_async_credential(ctx)
         attribution = resolve_attribution(ctx.headers)
+        request = JobCreateRequest(
+            schema_version=schemaVersion,
+            client_request_id=clientRequestId,
+            workflow=workflow,
+            input=input,
+            brief=brief,
+            output=output,
+            budget=budget,
+        )
         return jobs().create_job(request, attribution).to_wire()
 
     @server.tool()

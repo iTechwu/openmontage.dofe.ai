@@ -372,7 +372,7 @@ async def test_mcp_job_tools_do_not_expose_trusted_attribution_as_model_input(tm
         create_server(job_service=service, attribution_resolver=resolve_for_test)
     ) as client:
         tools = await client.list_tools()
-        created = await client.call_tool("submit_video_job", {"request": _request()})
+        created = await client.call_tool("submit_video_job", _request())
         artifacts = await client.call_tool(
             "list_video_artifacts",
             {"job_id": created.structured_content["jobId"]},
@@ -391,10 +391,7 @@ async def test_mcp_job_tools_do_not_expose_trusted_attribution_as_model_input(tm
     serialized_schema = json.dumps(submit_schema)
     assert "workspaceId" not in serialized_schema
     assert "employeeId" not in serialized_schema
-    request_schema = submit_schema["properties"]["request"]
-    if "$ref" in request_schema:
-        request_schema = submit_schema["$defs"][request_schema["$ref"].rsplit("/", 1)[-1]]
-    assert set(request_schema["required"]) == {
+    assert set(submit_schema["required"]) == {
         "clientRequestId",
         "workflow",
         "input",
@@ -402,7 +399,7 @@ async def test_mcp_job_tools_do_not_expose_trusted_attribution_as_model_input(tm
         "output",
         "budget",
     }
-    assert set(request_schema["properties"]) == {
+    assert set(submit_schema["properties"]) == {
         "schemaVersion",
         "clientRequestId",
         "workflow",
@@ -411,19 +408,18 @@ async def test_mcp_job_tools_do_not_expose_trusted_attribution_as_model_input(tm
         "output",
         "budget",
     }
-    assert "stage names such as compose are invalid" in request_schema["properties"]["workflow"][
+    assert "stage names such as compose are invalid" in submit_schema["properties"]["workflow"][
         "description"
     ]
-    assert request_schema["additionalProperties"] is False
-    assert "discriminator" in request_schema["properties"]["input"]
-    assert "oneOf" in request_schema["properties"]["input"]
+    assert "discriminator" in submit_schema["properties"]["input"]
+    assert "oneOf" in submit_schema["properties"]["input"]
     nested_refs = {
-        request_schema["properties"][name]["$ref"].rsplit("/", 1)[-1]
+        submit_schema["properties"][name]["$ref"].rsplit("/", 1)[-1]
         for name in ("brief", "output", "budget")
     }
     input_refs = {
         item["$ref"].rsplit("/", 1)[-1]
-        for item in request_schema["properties"]["input"]["oneOf"]
+        for item in submit_schema["properties"]["input"]["oneOf"]
     }
     for definition_name in nested_refs | input_refs:
         assert submit_schema["$defs"][definition_name]["additionalProperties"] is False
@@ -445,7 +441,7 @@ async def test_mcp_cancel_replays_the_same_sequence_fenced_command(tmp_path: Pat
     async with Client(
         create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
     ) as client:
-        created = await client.call_tool("submit_video_job", {"request": _request()})
+        created = await client.call_tool("submit_video_job", _request())
         job_id = created.structured_content["jobId"]
         command = {
             "job_id": job_id,
@@ -473,7 +469,7 @@ async def test_mcp_job_creation_rejects_unknown_workflow_with_actionable_error(
     ) as client:
         result = await client.call_tool(
             "submit_video_job",
-            {"request": {**_request(), "workflow": "compose"}},
+            {**_request(), "workflow": "compose"},
         )
 
     assert result.is_error is True
@@ -505,7 +501,7 @@ async def test_mcp_job_creation_reports_invalid_manifest_without_internal_detail
     async with Client(
         create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
     ) as client:
-        result = await client.call_tool("submit_video_job", {"request": _request()})
+        result = await client.call_tool("submit_video_job", _request())
 
     assert result.is_error is True
     assert "Workflow 'framework-smoke' is unavailable" in result.content[0].text
@@ -543,7 +539,7 @@ async def test_mcp_job_creation_rejects_invalid_request_contracts(
     ) as client:
         result = await client.call_tool(
             "submit_video_job",
-            {"request": {**_request(), field: value}},
+            {**_request(), field: value},
         )
 
     assert result.is_error is True
