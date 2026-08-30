@@ -25,8 +25,8 @@ exchange-rate source and timestamp.
 
 Price preflight uses AIRouter's HMAC-authenticated internal quote endpoint. Set
 `DOFE_TENANT_ID` and `INTERNAL_API_SECRET` in the OpenMontage deployment
-environment. The Compose service sends these requests over the shared network
-to `${DOFE_DOCKER_INTERNAL_API_BASE_URL:-http://dofe-models-api:3101}/internal/pricing/quote`;
+environment. The Compose service sends these requests through the public gateway
+at `${DOFE_DOCKER_INTERNAL_API_BASE_URL:-https://ixicai.cn/api}/internal/pricing/quote`;
 secrets are never returned by MCP.
 The quote request uses the exact model ID selected from the current tenant
 catalog. Actual spend is finalized from the provider-reported output-token usage.

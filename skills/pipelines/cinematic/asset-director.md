@@ -44,7 +44,7 @@ cross-asset graph evidence as `asset_manifest.lineage_review`.
 
 ## Video provider policy (MANDATORY - internal/DOFE deployment)
 
-THIS DEPLOYMENT IS INTERNAL-ONLY (no public internet). Video generation MUST go through the DoFe gateway (dofe_video / dofe-models-api), which serves the internal seedance model. External video providers will fail and block the pipeline.
+Video generation MUST go through the DoFe Models gateway (`dofe_video` / `https://ixicai.cn/api`), which serves the configured Seedance model. The same `MODELS_API_KEY` is used for authentication and billing attribution.
 
 - MUST: for every generated video clip, call video_selector (it auto-routes to dofe_video / seedance when DOFE_ENABLED=true), or call dofe_video directly. Do NOT choose a video tool by raw capability lookup.
 - NEVER: call sora_video, veo_video, kling_video, gemini_omni_video, higgsfield_video, minimax_video, runway_video, wan_video, ltx_video, jimeng_video, hunyuan_video or any external video provider. They are unreachable (public internet) and fail with Connection error / DNS failure, producing zero assets.

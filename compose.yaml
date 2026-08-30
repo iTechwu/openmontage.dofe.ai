@@ -29,13 +29,9 @@ x-openmontage-common: &openmontage-common
     OPENMONTAGE_EVENT_ENDPOINT: ${OPENMONTAGE_EVENT_ENDPOINT-http://host.docker.internal:1455/api/internal/openmontage/events}
     OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL: ${OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL:-http://host.docker.internal:1455}
     OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL: ${OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL-http://host.docker.internal:1455}
-    # Keep model traffic on the shared internal Compose network. The explicit
-    # Docker overrides remain available for deployments whose internal service
-    # name differs from the centrally managed default. Override the internal
-    # API separately so a host-only localhost value from .env cannot leak into
-    # the container and point back at OpenMontage itself.
+    # Model traffic and auth-context validation use the shared public gateway.
     DOFE_MODEL_BASE_URL: ${DOFE_DOCKER_MODEL_BASE_URL:-https://ixicai.cn/api}
-    DOFE_INTERNAL_API_BASE_URL: ${DOFE_DOCKER_INTERNAL_API_BASE_URL:-http://dofe-models-api:3101}
+    DOFE_INTERNAL_API_BASE_URL: ${DOFE_DOCKER_INTERNAL_API_BASE_URL:-https://ixicai.cn/api}
     OPENMONTAGE_EVENT_SIGNING_SECRET: ${OPENMONTAGE_EVENT_SIGNING_SECRET:?Set OPENMONTAGE_EVENT_SIGNING_SECRET in .env}
     OPENMONTAGE_EVENT_MAX_ATTEMPTS: ${OPENMONTAGE_EVENT_MAX_ATTEMPTS:-20}
     OPENMONTAGE_EVENT_NOT_FOUND_MAX_ATTEMPTS: ${OPENMONTAGE_EVENT_NOT_FOUND_MAX_ATTEMPTS:-5}
@@ -58,8 +54,7 @@ x-openmontage-common: &openmontage-common
     # The host path is overridable so machines without a shared /data root can
     # point it at a checkout-local directory via .env.
     - ${OPENMONTAGE_EXCHANGE_HOST_DIR:-/data/mcp-exchange}:/data/mcp-exchange
-    # Overlay the container config with the checked-out config.yaml (model gateway
-    # base_url / STT routing) so the container talks to the internal dofe-models-api.
+    # Overlay the container config with the checked-out public model gateway settings.
     - ./config.yaml:/app/config.yaml:ro
   networks:
     - dofe-models
@@ -99,7 +94,7 @@ services:
       OPENMONTAGE_PROJECTS_DIR: /data/projects
       OPENMONTAGE_BACKLOT_CACHE_DIR: /data/cache/backlot
       OPENMONTAGE_BACKLOT_BASE_PATH: ${OPENMONTAGE_BACKLOT_BASE_PATH:-/montage}
-      OPENMONTAGE_BACKLOT_AUTH_URL: ${OPENMONTAGE_BACKLOT_AUTH_URL:-http://dofe-models-api:3101/internal/mcp/auth-context}
+      OPENMONTAGE_BACKLOT_AUTH_URL: ${OPENMONTAGE_BACKLOT_AUTH_URL:-https://ixicai.cn/api/internal/mcp/auth-context}
       OPENMONTAGE_BACKLOT_SECURE_COOKIE: "true"
     volumes:
       - ./projects:/data/projects:ro
