@@ -1,9 +1,9 @@
 # OpenMontage - Global Configuration
 
 llm:
-  provider: dofe                 # unified models.dofe.ai router
+  provider: dofe                 # unified ixicai.cn Models router
   protocol: openai               # openai | openai_response | anthropic | gemini
-  base_url: http://dofe-models-api:3101
+  base_url: https://ixicai.cn/api
   api_key_env: DOFE_MODEL_API_KEY
   model: null                    # select an exact ID from authenticated GET /v1/models
   temperature: 0.7
