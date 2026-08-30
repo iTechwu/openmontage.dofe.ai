@@ -4,7 +4,7 @@ services:
       DOFE_CA_BUNDLE: /run/secrets/dofe-ca.pem
     volumes:
       - type: bind
-        source: ${DOFE_CA_BUNDLE_HOST:?Set this to the PEM root CA that signs model.local.dofe.ai}
+        source: ${DOFE_CA_BUNDLE_HOST:?Set this only when ixicai.cn uses a private CA}
         target: /run/secrets/dofe-ca.pem
         read_only: true
 
@@ -13,6 +13,6 @@ services:
       DOFE_CA_BUNDLE: /run/secrets/dofe-ca.pem
     volumes:
       - type: bind
-        source: ${DOFE_CA_BUNDLE_HOST:?Set this to the PEM root CA that signs model.local.dofe.ai}
+        source: ${DOFE_CA_BUNDLE_HOST:?Set this only when ixicai.cn uses a private CA}
         target: /run/secrets/dofe-ca.pem
         read_only: true

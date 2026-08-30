@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from tools.base_tool import BaseTool
 
-DEFAULT_BASE_URL = "https://model.local.dofe.ai/api"
+DEFAULT_BASE_URL = "https://ixicai.cn/api"
 
 DEFAULT_CONNECT_TIMEOUT = 10
 DEFAULT_READ_TIMEOUT = 30

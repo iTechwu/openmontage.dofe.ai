@@ -18,7 +18,7 @@ Everything you need to know about every provider in OpenMontage — setup instru
 | 6 | **~$0.05/image** | OpenAI | GPT Image 2 images + OpenAI TTS |
 | 7 | **~$0.04/image** | Google Imagen | Imagen 4 images (shares the Google API key) |
 | 8 | **pay-as-you-go** | Kling Official | Official direct Kling video, image, TTS, avatar, and lip-sync API, separate from fal.ai Kling |
-| 9 | **pay-as-you-go** | DoFe.AI Gateway | One key routes image, video, TTS, music, avatar, and speech-to-text work through `model.local.dofe.ai/api` |
+| 9 | **pay-as-you-go** | DoFe.AI Gateway | One key routes image, video, TTS, music, avatar, and speech-to-text work through `ixicai.cn/api` |
 | 10 | **$12/month** | Runway | Gen-4 video — highest quality AI video |
 | 11 | **pay-as-you-go** | HeyGen | Avatar videos, multi-model video gateway |
 | 12 | **pay-as-you-go** | Suno | Full song generation with vocals and lyrics |
@@ -32,7 +32,7 @@ Everything you need to know about every provider in OpenMontage — setup instru
 
 # DOFE.AI UNIFIED MODEL GATEWAY (recommended)
 DOFE_ENABLED=true
-DOFE_MODEL_BASE_URL=https://model.local.dofe.ai/api
+DOFE_MODEL_BASE_URL=https://ixicai.cn/api
 DOFE_MODEL_API_KEY=          # Team-level sk-... key
 # Select only exact IDs returned by authenticated GET /v1/models.
 DOFE_IMAGE_MODEL=
@@ -96,16 +96,16 @@ VIDEO_GEN_LOCAL_MODEL=       # wan2.1-1.3b, wan2.1-14b, hunyuan-1.5, ltx2-local,
 
 ```bash
 DOFE_ENABLED=true
-DOFE_MODEL_BASE_URL=https://model.local.dofe.ai/api
+DOFE_MODEL_BASE_URL=https://ixicai.cn/api
 DOFE_MODEL_API_KEY=sk-your-key
-# Query GET https://model.local.dofe.ai/api/v1/models first.
+# Query GET https://ixicai.cn/api/v1/models first.
 DOFE_IMAGE_MODEL=
 DOFE_VIDEO_MODEL=
 DOFE_TTS_MODEL=
 DOFE_MUSIC_MODEL=
 DOFE_AVATAR_MODEL=
 DOFE_STT_MODEL=
-DOFE_INTERNAL_API_BASE_URL=https://model.local.dofe.ai
+DOFE_INTERNAL_API_BASE_URL=https://ixicai.cn/api
 DOFE_TENANT_ID=your-tenant-uuid
 INTERNAL_API_SECRET=your-internal-service-secret
 ```

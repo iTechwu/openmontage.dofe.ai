@@ -82,10 +82,10 @@ def test_gateway_config_prefers_canonical_model_variables(monkeypatch):
     monkeypatch.setenv("DOFE_API_KEY", "legacy-key")
     monkeypatch.setenv("DOFE_MODEL_API_KEY", "canonical-key")
     monkeypatch.setenv("DOFE_BASE_URL", "https://legacy.example/api")
-    monkeypatch.setenv("DOFE_MODEL_BASE_URL", "https://model.local.dofe.ai/api/")
+    monkeypatch.setenv("DOFE_MODEL_BASE_URL", "https://ixicai.cn/api/")
 
     assert dofe_config.dofe_api_key() == "canonical-key"
-    assert dofe_config.dofe_base_url() == "https://model.local.dofe.ai/api"
+    assert dofe_config.dofe_base_url() == "https://ixicai.cn/api"
 
 
 def test_gateway_config_accepts_legacy_aliases(monkeypatch):

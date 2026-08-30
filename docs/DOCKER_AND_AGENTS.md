@@ -5,9 +5,8 @@ service. The CLI and MCP server return the same project and analysis contract;
 Codex or Claude then follows the repository's pipeline instructions and approval
 gates to produce the new video.
 
-All model-backed stages are fail-closed to the DoFe Airouter. Host processes use
-`https://model.local.dofe.ai/api`; Compose services use the shared-network
-address `${DOFE_DOCKER_MODEL_BASE_URL:-http://dofe-models-api:3101}`. Before choosing a
+All model-backed stages are fail-closed to the DoFe Airouter. Host and Compose
+processes use the public `https://ixicai.cn/api` gateway. Before choosing a
 model, OpenMontage performs an authenticated `GET /v1/models` against that
 effective base URL and accepts only an exact returned ID. Direct vendor model
 fallbacks and guessed defaults are disabled when `DOFE_ENABLED=true`.
@@ -125,19 +124,13 @@ export OPENMONTAGE_AGENT_MODEL_ID="<exact-id-from-catalog>"
 # in .env and is loaded into each service via the env_file directive.
 #
 # Host shell — load .env first, then the host-reachable endpoint (needs the
-# model.local.dofe.ai CA + name resolution):
+# ixicai.cn public TLS + DNS):
 #   set -a; . ./.env; set +a
-#   curl -H "Authorization: Bearer $DOFE_MODEL_API_KEY" "${DOFE_MODEL_BASE_URL:-https://model.local.dofe.ai/api}/v1/models"
+#   curl -H "Authorization: Bearer $DOFE_MODEL_API_KEY" "${DOFE_MODEL_BASE_URL:-https://ixicai.cn/api}/v1/models"
 #
-# Container-internal — dofe-models-api:3101 is Compose DNS on the shared dofe-models network,
-# so it is NOT reachable from the host. Run curl INSIDE a service. The whole curl
-# is single-quoted so the HOST shell does not expand $DOFE_MODEL_API_KEY (which
-# the host may not have loaded); the container's login shell expands it from the
-# already-injected container env. Read $DOFE_MODEL_BASE_URL — that is the var
-# compose.yaml injects into the container (resolved from the host's
-# $DOFE_DOCKER_MODEL_BASE_URL, default http://dofe-models-api:3101); the host-only
-# $DOFE_DOCKER_MODEL_BASE_URL is NOT in the container env:
-#   docker compose exec openmontage-mcp sh -lc 'curl -fsS -H "Authorization: Bearer $DOFE_MODEL_API_KEY" "${DOFE_MODEL_BASE_URL:-http://dofe-models-api:3101}/v1/models"'
+# Container-internal — the same public gateway is used; no local Models DNS
+# alias or host-gateway entry is required:
+#   docker compose exec openmontage-mcp sh -lc 'curl -fsS -H "Authorization: Bearer $DOFE_MODEL_API_KEY" "${DOFE_MODEL_BASE_URL:-https://ixicai.cn/api}/v1/models"'
 openmontage worker run --once --json
 openmontage worker run --interval 2 --json
 ```

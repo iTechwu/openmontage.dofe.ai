@@ -120,7 +120,7 @@ class DofeSpeechToText(BaseTool):
     ]
     side_effects = [
         "uploads local audio to dofe-transcode through the AIRouter internal API",
-        "paid transcription via model.local.dofe.ai/api",
+        "paid transcription via ixicai.cn/api",
         "writes transcript JSON",
     ]
     user_visible_verification = ["Review transcript text against the source audio"]

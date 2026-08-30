@@ -34,7 +34,7 @@ x-openmontage-common: &openmontage-common
     # name differs from the centrally managed default. Override the internal
     # API separately so a host-only localhost value from .env cannot leak into
     # the container and point back at OpenMontage itself.
-    DOFE_MODEL_BASE_URL: ${DOFE_DOCKER_MODEL_BASE_URL:-http://dofe-models-api:3101}
+    DOFE_MODEL_BASE_URL: ${DOFE_DOCKER_MODEL_BASE_URL:-https://ixicai.cn/api}
     DOFE_INTERNAL_API_BASE_URL: ${DOFE_DOCKER_INTERNAL_API_BASE_URL:-http://dofe-models-api:3101}
     OPENMONTAGE_EVENT_SIGNING_SECRET: ${OPENMONTAGE_EVENT_SIGNING_SECRET:?Set OPENMONTAGE_EVENT_SIGNING_SECRET in .env}
     OPENMONTAGE_EVENT_MAX_ATTEMPTS: ${OPENMONTAGE_EVENT_MAX_ATTEMPTS:-20}

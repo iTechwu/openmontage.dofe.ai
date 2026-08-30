@@ -232,9 +232,9 @@ This repo is built for agentic operation. If you're an OpenClaw-style agent, her
 
 # Unified DoFe.AI model gateway (recommended):
 DOFE_ENABLED=true
-DOFE_MODEL_BASE_URL=https://model.local.dofe.ai/api
+DOFE_MODEL_BASE_URL=https://ixicai.cn/api
 DOFE_MODEL_API_KEY=your-key
-# First query GET https://model.local.dofe.ai/api/v1/models with this key,
+# First query GET https://ixicai.cn/api/v1/models with this key,
 # then set DOFE_*_MODEL only to exact IDs returned by that response.
 DOFE_IMAGE_MODEL=
 DOFE_VIDEO_MODEL=
@@ -242,7 +242,7 @@ DOFE_TTS_MODEL=
 DOFE_MUSIC_MODEL=
 DOFE_AVATAR_MODEL=
 DOFE_STT_MODEL=
-DOFE_INTERNAL_API_BASE_URL=https://model.local.dofe.ai
+DOFE_INTERNAL_API_BASE_URL=https://ixicai.cn/api
 DOFE_TENANT_ID=your-tenant-uuid
 INTERNAL_API_SECRET=your-internal-service-secret
 

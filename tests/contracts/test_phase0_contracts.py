@@ -256,7 +256,7 @@ class TestConfig:
     def test_load_defaults(self):
         config = OpenMontageConfig()
         assert config.llm.provider == "dofe"
-        assert config.llm.base_url == "https://model.local.dofe.ai/api"
+        assert config.llm.base_url == "https://ixicai.cn/api"
         assert config.llm.model is None
         assert config.llm.api_key_env == "DOFE_MODEL_API_KEY"
         assert config.budget.mode.value == "warn"

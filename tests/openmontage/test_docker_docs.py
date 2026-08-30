@@ -76,7 +76,7 @@ def test_container_model_query_reads_compose_injected_var() -> None:
         "DOFE_DOCKER_MODEL_BASE_URL is host-only and is not injected into the "
         "container; reading it there always hits the default"
     )
-    assert "http://dofe-models-api:3101" in body
+    assert "https://ixicai.cn/api" in body
 
 
 def test_host_model_query_documents_env_loading() -> None:
@@ -84,7 +84,7 @@ def test_host_model_query_documents_env_loading() -> None:
     is actually present in the host shell that expands it."""
     assert "set -a; . ./.env; set +a" in _DOC
     # The host curl still reaches a host-reachable endpoint.
-    assert "${DOFE_MODEL_BASE_URL:-https://model.local.dofe.ai/api}/v1/models" in _DOC
+    assert "${DOFE_MODEL_BASE_URL:-https://ixicai.cn/api}/v1/models" in _DOC
 
 
 def test_codex_version_pin_is_the_single_source() -> None:
