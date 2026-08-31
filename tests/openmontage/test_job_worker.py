@@ -24,6 +24,7 @@ from openmontage.contracts import (
 )
 from openmontage.job_service import JobLeaseError, JobService
 from openmontage.job_worker import JobWorker
+from openmontage.mcp_gateway_auth import gateway_attribution
 from openmontage.model_credential_bridge import ModelCredentialBridgeError
 from openmontage.pipeline_executor import (
     PipelineExecutionCancelled,
@@ -48,6 +49,21 @@ def _attribution() -> JobAttribution:
         source_invocation_id="invocation-worker",
         trace_id="trace-worker",
     )
+
+
+def _gateway_attribution(monkeypatch: pytest.MonkeyPatch) -> JobAttribution:
+    monkeypatch.setenv("OPENMONTAGE_MCP_GATEWAY_SECRET", "gateway-secret")
+    attribution = gateway_attribution({
+        "Authorization": "Bearer sk-models-user",
+        "X-Dofe-Mcp-Gateway-Secret": "gateway-secret",
+        "X-Dofe-Auth-Verified": "models-api-key-v1",
+        "X-Dofe-Api-Key-Id": "key-worker",
+        "X-Dofe-Tenant-Id": "tenant-worker",
+        "X-Dofe-Sso-Team-Id": "team-worker",
+        "X-Request-Id": "request-worker",
+    })
+    assert attribution is not None
+    return attribution
 
 
 def _request(*, request_id: str, workflow: str = "animated-explainer") -> JobCreateRequest:
@@ -302,9 +318,15 @@ def test_worker_atomically_prefers_cancel_before_approval_wait(tmp_path: Path) -
     assert restored.stages[0].status == StageStatus.CANCELLED
 
 
-def test_worker_fetches_and_scopes_a_delegated_model_credential_per_stage(tmp_path: Path) -> None:
+def test_worker_fetches_and_scopes_a_delegated_model_credential_per_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = JobService(tmp_path / "jobs.sqlite3")
-    job = service.create_job(_request(request_id="delegated-stage"), _attribution())
+    job = service.create_job(
+        _request(request_id="delegated-stage"),
+        _gateway_attribution(monkeypatch),
+    )
     executor = FakeExecutor(["completed"])
     credentials = FakeModelCredentialBridge()
 
@@ -325,14 +347,38 @@ def test_worker_fetches_and_scopes_a_delegated_model_credential_per_stage(tmp_pa
     assert executor.credentials[0].pipeline_stage == "research"
 
 
-def test_worker_skips_model_credential_for_credential_free_executor(tmp_path: Path) -> None:
+def test_worker_rejects_gateway_job_without_per_job_credential_bridge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(
+        _request(request_id="gateway-without-credential"),
+        _gateway_attribution(monkeypatch),
+    )
+    executor = FakeExecutor(["completed"])
+
+    result = _worker(service, executor, tmp_path / "projects").run_once(now=NOW)
+
+    restored = service.get_job(job.job_id)
+    assert result is not None and result.outcome == "job_failed"
+    assert restored.status == JobStatus.FAILED
+    assert executor.assignments == []
+    event = service.list_events(job.job_id)[-1]
+    assert event.payload["error"]["code"] == "OPENMONTAGE_MODEL_CREDENTIAL_UNAVAILABLE"
+
+
+def test_worker_skips_model_credential_for_credential_free_executor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = JobService(tmp_path / "jobs.sqlite3")
     job = service.create_job(
         _request(
             request_id="credential-free-stage",
             workflow="deterministic-video-smoke",
         ),
-        _attribution(),
+        _gateway_attribution(monkeypatch),
     )
 
     class CredentialFreeExecutor(FakeExecutor):
@@ -362,16 +408,11 @@ def test_worker_skips_model_credential_for_credential_free_executor(tmp_path: Pa
                 assignment_path=assignment.project_dir / "assignment.json",
             )
 
-    class UnexpectedCredentialBridge:
-        def issue(self, **_kwargs):
-            raise AssertionError("credential-free executor must not request a credential")
-
     executor = CredentialFreeExecutor([])
     result = _worker(
         service,
         executor,
         tmp_path / "projects",
-        model_credential_bridge=UnexpectedCredentialBridge(),
     ).run_once(now=NOW)
 
     assert result is not None and result.outcome == "stage_completed"

@@ -12,6 +12,7 @@ from typing import Any
 from openmontage.contracts import JobAttribution
 
 GATEWAY_MARKER = "models-api-key-v1"
+GATEWAY_RUNTIME_ID = "mcp-gateway"
 
 
 def gateway_attempted(headers: Mapping[str, str] | None) -> bool:
@@ -54,7 +55,7 @@ def gateway_attribution(headers: Mapping[str, str] | None) -> JobAttribution | N
     return JobAttribution(
         workspace_id=f"tenant:{tenant_id}",
         employee_id=f"mcp-key:{api_key_id}",
-        runtime_id="mcp-gateway",
+        runtime_id=GATEWAY_RUNTIME_ID,
         root_task_id=f"mcp:{api_key_id}",
         conversation_id=request_id,
         source_invocation_id=request_id,

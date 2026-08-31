@@ -66,12 +66,14 @@ def create_server(
         return attribution_resolver(headers)
 
     def require_async_credential(ctx: Context) -> None:
-        """Do not enqueue a job that would later fall back to a service-wide key."""
+        """Require per-Job credentials for authenticated public Gateway submissions."""
         from openmontage.mcp_gateway_auth import gateway_attribution
 
-        if gateway_attribution(ctx.headers) is not None:
+        if gateway_attribution(ctx.headers) is not None and not os.environ.get(
+            "OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL", ""
+        ).strip():
             raise RuntimeError(
-                "公网 MCP 视频作业暂不可用：短期 Models 运行凭据接入后开放"
+                "公网 MCP 视频作业不可用：未配置按 Job 短期 Models 运行凭据服务"
             )
 
     @server.tool()

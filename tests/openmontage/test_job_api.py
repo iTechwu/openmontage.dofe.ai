@@ -433,6 +433,61 @@ async def test_mcp_job_tools_do_not_expose_trusted_attribution_as_model_input(tm
 
 
 @pytest.mark.asyncio
+async def test_mcp_submit_accepts_authenticated_gateway_attribution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp import Client
+
+    service = JobService(tmp_path / "jobs.sqlite3")
+    monkeypatch.setattr(
+        "openmontage.mcp_gateway_auth.gateway_attribution",
+        lambda _headers: _attribution(),
+    )
+    monkeypatch.setenv(
+        "OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL",
+        "http://agentspace-web:1455",
+    )
+
+    async with Client(
+        create_server(
+            job_service=service,
+            attribution_resolver=lambda _headers: _attribution(),
+        )
+    ) as client:
+        result = await client.call_tool("submit_video_job", _request())
+
+    assert result.is_error is False
+    assert result.structured_content["status"] == "QUEUED"
+
+
+@pytest.mark.asyncio
+async def test_mcp_submit_rejects_gateway_job_without_short_lived_credential_bridge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp import Client
+
+    service = JobService(tmp_path / "jobs.sqlite3")
+    monkeypatch.setattr(
+        "openmontage.mcp_gateway_auth.gateway_attribution",
+        lambda _headers: _attribution(),
+    )
+    monkeypatch.delenv("OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL", raising=False)
+
+    async with Client(
+        create_server(
+            job_service=service,
+            attribution_resolver=lambda _headers: _attribution(),
+        )
+    ) as client:
+        result = await client.call_tool("submit_video_job", _request())
+
+    assert result.is_error is True
+    assert "未配置按 Job 短期 Models 运行凭据服务" in result.content[0].text
+
+
+@pytest.mark.asyncio
 async def test_mcp_cancel_replays_the_same_sequence_fenced_command(tmp_path: Path) -> None:
     from mcp import Client
 
