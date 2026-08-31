@@ -49,6 +49,17 @@ class DofeRoutingError(RuntimeError):
     """Raised when strict Airouter routing is enabled but unavailable."""
 
 
+_MODEL_API_CAPABILITIES = {
+    "analysis",
+    "avatar",
+    "image_generation",
+    "music_generation",
+    "tts",
+    "video_generation",
+}
+_MODEL_API_RUNTIMES = {"api", "hybrid"}
+
+
 def _env_bool(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in _TRUTHY
 
@@ -67,6 +78,36 @@ def is_dofe_enabled() -> bool:
     """True when the ``DOFE_ENABLED`` master switch is on."""
 
     return _env_bool("DOFE_ENABLED")
+
+
+def model_api_policy_error(tool: "BaseTool") -> str | None:
+    """Return the DoFe-only policy error for a direct model API tool."""
+
+    if not is_dofe_enabled():
+        return None
+    provider = str(getattr(tool, "provider", ""))
+    if provider in {"dofe", "selector"}:
+        return None
+    capability = str(getattr(tool, "capability", ""))
+    runtime = getattr(getattr(tool, "runtime", ""), "value", getattr(tool, "runtime", ""))
+    tier = getattr(getattr(tool, "tier", ""), "value", getattr(tool, "tier", ""))
+    # Stock-media tools historically share the image/video generation
+    # capability so selectors can consider them, but they do not invoke a
+    # model. Keep those source APIs available under the model-routing policy.
+    if tier == "source":
+        return None
+    if capability not in _MODEL_API_CAPABILITIES or runtime not in _MODEL_API_RUNTIMES:
+        return None
+    return (
+        f"DOFE_ENABLED=true: direct model API tool {getattr(tool, 'name', '')!r} "
+        f"({provider or 'unknown'}) is disabled; use the DoFe Models provider"
+    )
+
+
+def model_api_tool_allowed(tool: "BaseTool") -> bool:
+    """Whether a tool may be discovered under the current model API policy."""
+
+    return model_api_policy_error(tool) is None
 
 
 def dofe_api_key() -> str | None:

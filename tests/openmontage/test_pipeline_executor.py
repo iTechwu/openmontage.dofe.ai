@@ -42,7 +42,7 @@ pathlib.Path(sys.argv[1]).write_text(prompt, encoding="utf-8")
 if len(sys.argv) > 2:
     pathlib.Path(sys.argv[2]).write_text(json.dumps({
         key: os.environ.get(key)
-        for key in ["DOFE_MODEL_API_KEY", "DOFE_MODEL_BASE_URL", "DOFE_DELEGATION_ID", "DOFE_EXTERNAL_JOB_ID", "DOFE_PIPELINE_STAGE", "OPENAI_BASE_URL", "OPENMONTAGE_SERVICE_TOKEN", "OPENMONTAGE_EVENT_SIGNING_SECRET", "FAL_KEY"]
+        for key in ["DOFE_MODEL_API_KEY", "DOFE_MODEL_BASE_URL", "DOFE_DELEGATION_ID", "DOFE_EXTERNAL_JOB_ID", "DOFE_PIPELINE_STAGE", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENMONTAGE_SERVICE_TOKEN", "OPENMONTAGE_EVENT_SIGNING_SECRET", "FAL_KEY"]
     }), encoding="utf-8")
 if len(sys.argv) > 4:
     pathlib.Path(sys.argv[3]).write_text(sys.argv[4], encoding="utf-8")
@@ -195,6 +195,114 @@ def test_executor_writes_assignment_invokes_real_argv_and_reads_checkpoint(
         "total_units": 3,
     }
     assert "Execute exactly one OpenMontage pipeline stage" in prompt_capture.read_text()
+
+
+def test_executor_uses_configured_model_key_without_job_credential(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "configured-model-key")
+    monkeypatch.setenv("DOFE_MODEL_BASE_URL", "https://ixicai.cn/api")
+    monkeypatch.setenv("OPENAI_API_KEY", "unrelated-openai-key")
+    job, projects_dir, _ = _job(tmp_path)
+    environment_capture = tmp_path / "environment.json"
+    assignment = StageAssignment.from_job(
+        job,
+        stage="research",
+        stage_attempt=1,
+        projects_dir=projects_dir,
+    )
+    executor = AgentCommandPipelineExecutor(
+        _codex_command(
+            tmp_path,
+            sys.executable,
+            "-c",
+            WRITE_CHECKPOINT_SCRIPT,
+            str(tmp_path / "prompt.txt"),
+            str(environment_capture),
+        ),
+        timeout_seconds=5,
+    )
+
+    executor.execute(assignment)
+
+    environment = json.loads(environment_capture.read_text())
+    assert environment["DOFE_MODEL_API_KEY"] == "configured-model-key"
+    assert environment["OPENAI_API_KEY"] == "configured-model-key"
+    assert environment["DOFE_MODEL_BASE_URL"] == "https://ixicai.cn/api"
+    assert environment["OPENAI_BASE_URL"] == "https://ixicai.cn/api/v1"
+    assert environment["DOFE_DELEGATION_ID"] is None
+
+
+def test_executor_does_not_fallback_to_openai_key_for_dofe_gateway(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DOFE_MODEL_BASE_URL", "https://ixicai.cn/api")
+    monkeypatch.delenv("DOFE_MODEL_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "unrelated-openai-key")
+    job, projects_dir, _ = _job(tmp_path)
+    assignment = StageAssignment.from_job(
+        job,
+        stage="research",
+        stage_attempt=1,
+        projects_dir=projects_dir,
+    )
+    executor = AgentCommandPipelineExecutor(
+        _codex_command(
+            tmp_path,
+            sys.executable,
+            "-c",
+            WRITE_CHECKPOINT_SCRIPT,
+            str(tmp_path / "prompt.txt"),
+        ),
+        timeout_seconds=5,
+    )
+
+    with pytest.raises(PipelineExecutionError, match="DOFE_MODEL_API_KEY is required"):
+        executor.execute(assignment)
+
+
+def test_executor_redacts_configured_model_key_from_self_contained_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DOFE_MODEL_API_KEY", "bare-configured-model-secret")
+    monkeypatch.setenv("DOFE_MODEL_BASE_URL", "https://ixicai.cn/api")
+    job, projects_dir, _ = _job(tmp_path)
+    diagnostic_script = r"""
+import os
+import sys
+
+sys.stderr.write("self-contained provider failure\n")
+sys.stderr.write(os.environ["DOFE_MODEL_API_KEY"] + "\n")
+sys.exit(7)
+"""
+    executor = AgentCommandPipelineExecutor(
+        _codex_command(tmp_path, sys.executable, "-c", diagnostic_script),
+        timeout_seconds=5,
+    )
+
+    with pytest.raises(PipelineExecutionError) as error_info:
+        executor.execute(
+            StageAssignment.from_job(
+                job,
+                stage="research",
+                stage_attempt=1,
+                projects_dir=projects_dir,
+            ),
+        )
+
+    log_path = (
+        projects_dir
+        / job.job_id
+        / ".openmontage"
+        / "executor"
+        / "research-attempt-1.json"
+    )
+    assert "bare-configured-model-secret" not in str(error_info.value)
+    assert "bare-configured-model-secret" not in log_path.read_text(encoding="utf-8")
+    assert "self-contained provider failure" in str(error_info.value)
 
 
 def test_executor_rejects_checkpoint_changes_outside_assigned_stage(tmp_path: Path) -> None:

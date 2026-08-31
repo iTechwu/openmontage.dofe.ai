@@ -11,6 +11,7 @@ from starlette.testclient import TestClient
 from openmontage.contracts import JobAttribution, PublishedArtifact
 from openmontage.job_api import TrustedAttributionResolver
 from openmontage.job_service import JobService
+from openmontage.mcp_gateway_auth import gateway_attribution
 from openmontage.mcp_server import build_http_app, create_server
 
 
@@ -433,58 +434,46 @@ async def test_mcp_job_tools_do_not_expose_trusted_attribution_as_model_input(tm
 
 
 @pytest.mark.asyncio
-async def test_mcp_submit_accepts_authenticated_gateway_attribution(
+async def test_mcp_submit_accepts_authenticated_gateway_without_job_credential_bridge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from mcp import Client
 
     service = JobService(tmp_path / "jobs.sqlite3")
-    monkeypatch.setattr(
-        "openmontage.mcp_gateway_auth.gateway_attribution",
-        lambda _headers: _attribution(),
-    )
-    monkeypatch.setenv(
-        "OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL",
-        "http://agentspace-web:1455",
-    )
+    monkeypatch.setenv("OPENMONTAGE_MCP_GATEWAY_SECRET", "gateway-secret")
+    monkeypatch.delenv("OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL", raising=False)
+    caller_model_key = "sk-models-user-must-not-persist"
+    attribution = gateway_attribution({
+        "Authorization": f"Bearer {caller_model_key}",
+        "X-Dofe-Mcp-Gateway-Secret": "gateway-secret",
+        "X-Dofe-Auth-Verified": "models-api-key-v1",
+        "X-Dofe-Api-Key-Id": "key-submit",
+        "X-Dofe-Tenant-Id": "tenant-submit",
+        "X-Dofe-Sso-Team-Id": "team-submit",
+        "X-Request-Id": "request-submit",
+    })
+    assert attribution is not None
 
     async with Client(
         create_server(
             job_service=service,
-            attribution_resolver=lambda _headers: _attribution(),
+            attribution_resolver=lambda _headers: attribution,
         )
     ) as client:
         result = await client.call_tool("submit_video_job", _request())
 
     assert result.is_error is False
     assert result.structured_content["status"] == "QUEUED"
-
-
-@pytest.mark.asyncio
-async def test_mcp_submit_rejects_gateway_job_without_short_lived_credential_bridge(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from mcp import Client
-
-    service = JobService(tmp_path / "jobs.sqlite3")
-    monkeypatch.setattr(
-        "openmontage.mcp_gateway_auth.gateway_attribution",
-        lambda _headers: _attribution(),
+    job_id = result.structured_content["jobId"]
+    snapshot = service.get_job(job_id)
+    assert snapshot.attribution == attribution
+    assert caller_model_key not in snapshot.model_dump_json()
+    assert all(
+        caller_model_key not in event.model_dump_json()
+        for event in service.list_events(job_id)
     )
-    monkeypatch.delenv("OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL", raising=False)
-
-    async with Client(
-        create_server(
-            job_service=service,
-            attribution_resolver=lambda _headers: _attribution(),
-        )
-    ) as client:
-        result = await client.call_tool("submit_video_job", _request())
-
-    assert result.is_error is True
-    assert "未配置按 Job 短期 Models 运行凭据服务" in result.content[0].text
+    assert caller_model_key.encode() not in service.database_path.read_bytes()
 
 
 @pytest.mark.asyncio

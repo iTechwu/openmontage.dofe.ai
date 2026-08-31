@@ -318,15 +318,9 @@ def test_worker_atomically_prefers_cancel_before_approval_wait(tmp_path: Path) -
     assert restored.stages[0].status == StageStatus.CANCELLED
 
 
-def test_worker_fetches_and_scopes_a_delegated_model_credential_per_stage(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_worker_fetches_and_scopes_a_delegated_model_credential_per_stage(tmp_path: Path) -> None:
     service = JobService(tmp_path / "jobs.sqlite3")
-    job = service.create_job(
-        _request(request_id="delegated-stage"),
-        _gateway_attribution(monkeypatch),
-    )
+    job = service.create_job(_request(request_id="delegated-stage"), _attribution())
     executor = FakeExecutor(["completed"])
     credentials = FakeModelCredentialBridge()
 
@@ -347,7 +341,7 @@ def test_worker_fetches_and_scopes_a_delegated_model_credential_per_stage(
     assert executor.credentials[0].pipeline_stage == "research"
 
 
-def test_worker_rejects_gateway_job_without_per_job_credential_bridge(
+def test_worker_executes_gateway_job_without_per_job_credential_bridge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -358,27 +352,31 @@ def test_worker_rejects_gateway_job_without_per_job_credential_bridge(
     )
     executor = FakeExecutor(["completed"])
 
-    result = _worker(service, executor, tmp_path / "projects").run_once(now=NOW)
+    class UnexpectedCredentialBridge:
+        def issue(self, **_kwargs):
+            raise AssertionError("Gateway jobs must use the configured service model key")
 
-    restored = service.get_job(job.job_id)
-    assert result is not None and result.outcome == "job_failed"
-    assert restored.status == JobStatus.FAILED
-    assert executor.assignments == []
-    event = service.list_events(job.job_id)[-1]
-    assert event.payload["error"]["code"] == "OPENMONTAGE_MODEL_CREDENTIAL_UNAVAILABLE"
+    result = _worker(
+        service,
+        executor,
+        tmp_path / "projects",
+        model_credential_bridge=UnexpectedCredentialBridge(),
+    ).run_once(now=NOW)
+
+    assert result is not None and result.outcome == "stage_completed"
+    assert service.get_job(job.job_id).status == JobStatus.RUNNING
+    assert len(executor.assignments) == 1
+    assert executor.credentials == [None]
 
 
-def test_worker_skips_model_credential_for_credential_free_executor(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_worker_skips_model_credential_for_credential_free_executor(tmp_path: Path) -> None:
     service = JobService(tmp_path / "jobs.sqlite3")
     job = service.create_job(
         _request(
             request_id="credential-free-stage",
             workflow="deterministic-video-smoke",
         ),
-        _gateway_attribution(monkeypatch),
+        _attribution(),
     )
 
     class CredentialFreeExecutor(FakeExecutor):
@@ -408,11 +406,16 @@ def test_worker_skips_model_credential_for_credential_free_executor(
                 assignment_path=assignment.project_dir / "assignment.json",
             )
 
+    class UnexpectedCredentialBridge:
+        def issue(self, **_kwargs):
+            raise AssertionError("credential-free executor must not request a credential")
+
     executor = CredentialFreeExecutor([])
     result = _worker(
         service,
         executor,
         tmp_path / "projects",
+        model_credential_bridge=UnexpectedCredentialBridge(),
     ).run_once(now=NOW)
 
     assert result is not None and result.outcome == "stage_completed"

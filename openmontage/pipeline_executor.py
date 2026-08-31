@@ -231,7 +231,15 @@ class AgentCommandPipelineExecutor:
         credential: DelegatedModelCredential | None = None,
         cancellation_requested: Callable[[], bool] | None = None,
     ) -> PipelineExecutionResult:
-        sensitive_values = (credential.api_key,) if credential is not None else ()
+        configured_model_key = os.environ.get("DOFE_MODEL_API_KEY", "").strip()
+        sensitive_values = tuple(
+            value
+            for value in (
+                credential.api_key if credential is not None else "",
+                configured_model_key,
+            )
+            if value
+        )
         assignment.project_dir.mkdir(parents=True, exist_ok=True)
         assignment_dir = assignment.project_dir / ".openmontage" / "assignments"
         assignment_dir.mkdir(parents=True, exist_ok=True)
@@ -263,6 +271,21 @@ class AgentCommandPipelineExecutor:
                 # credentials instead of a delegated escrowed credential.
                 configured_command = command
                 standalone_base = os.environ.get("DOFE_MODEL_BASE_URL", "").strip().rstrip("/")
+                if standalone_base and not configured_model_key:
+                    raise PipelineExecutionError(
+                        "DOFE_MODEL_API_KEY is required for the configured DoFe Models gateway"
+                    )
+                if (
+                    _is_codex_exec_command(command)
+                    and configured_model_key
+                    and not standalone_base
+                    and not os.environ.get("OPENAI_BASE_URL", "").strip()
+                ):
+                    raise PipelineExecutionError(
+                        "DOFE_MODEL_BASE_URL (or OPENAI_BASE_URL) is required when "
+                        "DOFE_MODEL_API_KEY is set; the Codex executor must not send the "
+                        "DoFe key to the default OpenAI endpoint"
+                    )
                 if standalone_base and _is_codex_exec_command(command):
                     standalone_model = os.environ.get("OPENMONTAGE_AGENT_MODEL_ID", "").strip() or None
                     configured_command = _configure_agent_command_for_delegation(
@@ -279,10 +302,11 @@ class AgentCommandPipelineExecutor:
                     for key, value in os.environ.items()
                     if key not in _CONTROL_PLANE_SECRET_ENV and not _SECRET_ENV_SUFFIX.search(key)
                 }
-                gateway_base = standalone_base or os.environ.get("DOFE_MODEL_BASE_URL", "").strip().rstrip("/")
-                standalone_env["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY", os.environ.get("DOFE_MODEL_API_KEY", ""))
+                gateway_base = standalone_base
+                standalone_env["DOFE_ENABLED"] = "true"
+                standalone_env["OPENAI_API_KEY"] = configured_model_key
                 standalone_env["OPENAI_BASE_URL"] = f"{gateway_base}/v1" if gateway_base else os.environ.get("OPENAI_BASE_URL", "")
-                standalone_env["DOFE_MODEL_API_KEY"] = os.environ.get("DOFE_MODEL_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
+                standalone_env["DOFE_MODEL_API_KEY"] = configured_model_key
                 standalone_env["DOFE_MODEL_BASE_URL"] = gateway_base
                 completed = self._run(
                     configured_command,
@@ -669,6 +693,8 @@ def _stage_prompt(assignment: StageAssignment, assignment_path: Path) -> str:
             "`skills/meta/checkpoint-protocol.md` before acting.",
             skill_instruction,
             "Work only inside the assignment project directory and use the repository tool registry.",
+            "Use only DoFe Models tools for remote model APIs. Never call a provider-specific "
+            "cloud model API directly; local deterministic media processing remains allowed.",
             "Write an `in_progress` checkpoint before consequential work and refresh factual partial "
             "progress where available.",
             "Finish by writing exactly one valid checkpoint status: `completed`, `awaiting_human`, "

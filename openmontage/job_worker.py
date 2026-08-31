@@ -397,18 +397,10 @@ class JobWorker:
             assignment,
         )
         if (
-            requires_credential
-            and latest.attribution.runtime_id == GATEWAY_RUNTIME_ID
-            and self.model_credential_bridge is None
+            self.model_credential_bridge is not None
+            and requires_credential
+            and latest.attribution.runtime_id != GATEWAY_RUNTIME_ID
         ):
-            return self._terminal_failure(
-                heartbeat,
-                stage=stage.code,
-                code="OPENMONTAGE_MODEL_CREDENTIAL_UNAVAILABLE",
-                message="Per-Job model credential service is not configured",
-                now=now,
-            )
-        if self.model_credential_bridge is not None and requires_credential:
             try:
                 credential = self.model_credential_bridge.issue(
                     job_id=latest.job_id,
