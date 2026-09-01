@@ -103,6 +103,35 @@ def test_image_selector_switch_on_picks_dofe(monkeypatch, isolated_tool_registry
     assert result.data["selected_tool"] == "dofe_image"
 
 
+def test_image_selector_preflight_does_not_execute_provider(monkeypatch, isolated_tool_registry):
+    monkeypatch.setenv("DOFE_ENABLED", "true")
+    monkeypatch.setenv("DOFE_API_KEY", "test-key")
+    monkeypatch.setenv("DOFE_IMAGE_MODEL", "catalog-image")
+    monkeypatch.setattr(
+        "tools.dofe.status.DofeClient.list_models",
+        lambda _self: [{"id": "catalog-image"}],
+    )
+    isolated_tool_registry.discover("tools")
+
+    def fake_preflight(self, inputs, *, live=False):
+        assert live is True
+        assert inputs["operation"] == "preflight"
+        return {"status": "passed", "errors": [], "warnings": []}
+
+    def fail_execute(_self, _inputs):
+        raise AssertionError("image selector preflight must not execute generation")
+
+    monkeypatch.setattr(DofeImage, "preflight", fake_preflight)
+    monkeypatch.setattr(DofeImage, "execute", fail_execute)
+
+    result = isolated_tool_registry.get("image_selector").execute(
+        {"operation": "preflight", "prompt": "a thing"}
+    )
+    assert result.success
+    assert result.data["status"] == "passed"
+    assert result.data["selected_tool"] == "dofe_image"
+
+
 def test_image_selector_switch_off_runs_original_scoring(monkeypatch, isolated_tool_registry):
     # DOFE_ENABLED unset -> original scoring logic; an explicit preference is honored.
     monkeypatch.delenv("DOFE_ENABLED", raising=False)
