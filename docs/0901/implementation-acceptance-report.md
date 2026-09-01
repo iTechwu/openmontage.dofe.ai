@@ -124,14 +124,14 @@
 | 文件 | 用例数 |
 |---|---|
 | `test_instruction_files.py` | 35 |
-| `test_client_stage_api.py` | 26 |
+| `test_client_stage_api.py` | 30 |
 | `test_media_references.py` | 9 |
 | `test_client_stage_driver.py` | 17 |
 | `test_client_stage_e2e.py` | 1 |
 | `test_client_stage_only.py` | 21 |
-| **合计** | **109** |
+| **合计** | **113** |
 
-全量 `pytest tests/openmontage/`：411 passed，1 skipped，6 failed（既有）。
+全量 `pytest tests/openmontage/`：415 passed，1 skipped，6 failed（既有）。
 
 ## 6. 复审与一致性修复（第二轮）
 
@@ -143,6 +143,8 @@
 - **P2 幂等 key 命名空间不一致**：修正 `submit_client_stage` docstring，明确 begin 走独立 lease 表、update/submit/approve/cancel 共享 command 表。
 
 提交：`69ad6a5`（3 个 P1）、`3e2d05e`（publish_artifact 门禁 + metadata 保留）。
+
+第三轮复审补 P2：服务层 `update/submit_client_stage` 允许空幂等 key（`_command_hash(None)` 返回 None 静默跳过幂等记录）。修复：新增 `_validate_client_idempotency_key`，在 begin/update/submit 三个接口入口统一校验非空字符串、长度 ≤256，抛 `IDEMPOTENCY_CONFLICT`。提交 `0773699`。
 
 ## 7. 已知遗留
 
