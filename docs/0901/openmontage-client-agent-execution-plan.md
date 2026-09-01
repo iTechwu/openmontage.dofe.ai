@@ -539,6 +539,13 @@ submit_client_stage
 - `openmontage/job_worker.py`：第一阶段不删除，只在 CI 禁止启动。
 - 媒体工具：不修改调用协议。
 
+### 15.5 实际新增模块（实现时扩展）
+
+实现过程中，除上述计划模块外，还新增了两个模块以闭合契约与客户端编排：
+
+- `openmontage/media_references.py`：校验客户端提交 artifact 中的媒体引用（§7、§12）——必须为项目相对路径、禁止绝对路径 / `..` 遍历 / NUL 字节 / 符号链接越界；`completed`/`awaiting_human` 提交必须引用存在的文件；同字典内的 `sha256` 与 CI 文件实际哈希一致。
+- `openmontage/client_stage_driver.py`：客户端侧 stage 驱动（§4、§9），串接 begin → 读指令（含 provenance）→ 读前置 artifact → handler → submit。属于客户端适配层，不在 CI 容器内运行。
+
 ## 16. 测试
 
 ### 16.1 文件读取
@@ -626,3 +633,29 @@ CI 媒体执行层
 ```
 
 > OpenMontage 保留完整 Pipeline、Job、审批、checkpoint 和 CI 媒体生产能力；客户端 Agent 只接替原 runtime Agent 的认知和编排职责。客户端每次通过 `read_openmontage_file` 实时读取 CI 上的 Markdown、YAML 和 JSON，不做本地缓存；现有 Gateway 工具调用方式保持不变；所有图片、音频、视频、合成和渲染文件始终在 CI 完成和保存。
+
+## 20. 实现状态（2026-09-01）
+
+五个阶段已全部实现、测试、经子代理审查并修复后验收。详见
+`docs/0901/implementation-acceptance-report.md` 的完整验收报告。
+
+| 阶段 | 交付 | 提交 | 测试 |
+|---|---|---|---|
+| 一：只读指令接口 | `read_openmontage_file` + `openmontage/instruction_files.py` | `3c8c1f9` | 35 用例 |
+| 二：客户端 Stage 接口 | `begin/update/submit_client_stage` + `media_references.py` | `5b3572f` | 34 用例 |
+| 三：客户端适配 | `openmontage/client_stage_driver.py` | `ef81385` | 16 用例 |
+| 四：媒体观察和 compose | E2E 端到端（fake Gateway） | `26a7a34` | 1 用例 |
+| 五：CI-only 上线 | `OPENMONTAGE_CLIENT_STAGE_ONLY` 门禁 | `c0d016a` | 20 用例 |
+
+新增错误码契约（客户端按码分支）：
+
+```text
+INSTRUCTION_FILE_NOT_FOUND / INSTRUCTION_FILE_UNAVAILABLE
+UNSUPPORTED_FILE_TYPE / PATH_OUTSIDE_REPOSITORY / FILE_TOO_LARGE / INVALID_PATH
+STAGE_ALREADY_OWNED / STAGE_LEASE_INVALID / STAGE_LEASE_EXPIRED / STAGE_ATTEMPT_MISMATCH
+STAGE_STATE_INVALID / HUMAN_APPROVAL_REQUIRED / IDEMPOTENCY_CONFLICT
+ARTIFACT_SCHEMA_INVALID / MEDIA_REFERENCE_INVALID / CHECKPOINT_WRITE_FAILED / JOB_CANCELLED
+```
+
+新增事件类型（§14）：`openmontage.client_stage.started / .progressed /
+.checkpointed / .awaiting_approval / .completed / .failed`。
