@@ -18,6 +18,7 @@ from openmontage.contracts import (
     WorkflowName,
 )
 from openmontage.exchange import ProjectFileExporter
+from openmontage.instruction_files import read_instruction_file
 from openmontage.reference_clone import ReferenceCloneService, capability_summary
 
 try:
@@ -280,6 +281,21 @@ def create_server(
     def read_project_file(project_id: str, relative_path: str, max_bytes: int = 2_000_000) -> dict[str, Any]:
         """Read a bounded UTF-8 analysis file through the authenticated MCP channel."""
         return ProjectFileExporter().read_text(project_id, relative_path, max_bytes=max_bytes)
+
+    @server.tool()
+    def read_openmontage_file(path: str, max_bytes: int = 2_000_000) -> dict[str, Any]:
+        """Read an OpenMontage instruction file (Markdown/YAML/JSON) from CI.
+
+        Reads the live CI repository on every call — no client-side caching and
+        no logical skill-ID mapping. Only ``.md``/``.yaml``/``.yml``/``.json``
+        files under the allowed instruction roots (``AGENT_GUIDE.md``,
+        ``pipeline_defs/``, ``skills/``, ``.agents/skills/``, ``schemas/``,
+        ``styles/``, ``remotion-composer/public/``, ``docs/``) are served; the
+        response includes the actual server path, size, mtime, a SHA-256
+        content hash, and the repository revision for instruction provenance.
+        Project artifacts and checkpoints belong to ``read_project_file``.
+        """
+        return read_instruction_file(path, max_bytes=max_bytes)
 
     @server.tool()
     def sync_project_exports(project_id: str) -> dict[str, Any]:
