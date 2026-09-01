@@ -154,3 +154,88 @@ def test_tool_not_declared_for_stage_is_rejected(gateway: ToolGateway) -> None:
             lease_token="lease-1", idempotency_key="compose-1",
         )
     assert exc.value.code == "TOOL_NOT_ALLOWED"
+
+
+class _CapturingTool(BaseTool):
+    """Tool that records the inputs handed to execute()."""
+
+    name = "video_selector"
+    capability = "video_generation"
+    provider = "selector"
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "operation": {
+                "type": "string",
+                "enum": ["text_to_video", "image_to_video", "reference_to_video", "rank", "preflight"],
+                "default": "text_to_video",
+            },
+            "output_path": {"type": "string"},
+        },
+    }
+    received: dict | None = None
+
+    def execute(self, inputs: dict) -> ToolResult:
+        type(self).received = dict(inputs)
+        target = Path(inputs["output_path"])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"fake-media")
+        return ToolResult(success=True, data={"output_path": str(target)}, artifacts=[str(target)])
+
+
+class _SingleToolRegistry:
+    def __init__(self, tool: BaseTool) -> None:
+        self.tool = tool
+
+    def ensure_discovered(self) -> None:
+        return None
+
+    def get(self, name: str):
+        return self.tool
+
+
+def _gateway_with(tool: BaseTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ToolGateway:
+    monkeypatch.setattr("openmontage.tool_gateway.registry", _SingleToolRegistry(tool))
+    return ToolGateway(_FakeService(tmp_path / "projects"))
+
+
+def test_generate_operation_not_injected_when_tool_enum_rejects_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tool = _CapturingTool()
+    gateway = _gateway_with(tool, tmp_path, monkeypatch)
+    _CapturingTool.received = None
+    result = gateway.invoke(
+        tool_name="video_selector", operation="generate",
+        inputs={"output_path": "assets/video/one.mp4"},
+        job_id="job-1", stage="assets", stage_attempt=1,
+        lease_token="lease-1", idempotency_key="video-1",
+    )
+    assert result["success"] is True
+    assert _CapturingTool.received is not None
+    # "generate" must NOT leak into a tool whose operation enum rejects it.
+    assert "operation" not in _CapturingTool.received
+
+
+def test_generate_operation_injected_when_tool_enum_accepts_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tool = _CapturingTool()
+    tool.input_schema = {
+        "type": "object",
+        "properties": {
+            "operation": {"type": "string", "enum": ["generate", "rank"], "default": "generate"},
+            "output_path": {"type": "string"},
+        },
+    }
+    gateway = _gateway_with(tool, tmp_path, monkeypatch)
+    _CapturingTool.received = None
+    result = gateway.invoke(
+        tool_name="video_selector", operation="generate",
+        inputs={"output_path": "assets/video/one.mp4"},
+        job_id="job-1", stage="assets", stage_attempt=1,
+        lease_token="lease-1", idempotency_key="video-2",
+    )
+    assert result["success"] is True
+    assert _CapturingTool.received is not None
+    assert _CapturingTool.received.get("operation") == "generate"

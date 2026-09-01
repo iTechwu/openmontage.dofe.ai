@@ -104,7 +104,7 @@ def create_server(
     @server.tool()
     def invoke_openmontage_tool(
         tool_name: str,
-        operation: str,
+        operation: Literal["catalog", "generate", "preflight", "rank", "progress"],
         inputs: dict[str, Any],
         ctx: Context,
         job_id: str = "",
@@ -113,7 +113,15 @@ def create_server(
         lease_token: str = "",
         idempotency_key: str = "",
     ) -> dict[str, Any]:
-        """Execute one fixed logical CI tool through the server ToolRegistry."""
+        """Execute one fixed logical CI tool through the server ToolRegistry.
+
+        ``operation`` is the gateway lifecycle: ``catalog`` lists the exposed
+        tools and their input schemas, ``generate`` runs the tool, ``preflight``
+        validates the selected provider without generating, ``rank`` returns
+        scored provider rankings, and ``progress`` reports progress. Tool-
+        specific operations (e.g. video_selector's text_to_video / image_to_video
+        / reference_to_video) go inside ``inputs``, not here.
+        """
         from openmontage.job_api import require_same_workspace
         from openmontage.tool_gateway import ToolGatewayError
 

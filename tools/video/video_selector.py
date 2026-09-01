@@ -79,6 +79,13 @@ class VideoSelector(BaseTool):
                     "preflight",
                 ],
                 "default": "text_to_video",
+                "description": (
+                    "Video generation mode. 'text_to_video' / 'image_to_video' / "
+                    "'reference_to_video' produce a clip from the corresponding "
+                    "source; 'rank' returns scored provider rankings without "
+                    "generating; 'preflight' validates the selected provider's "
+                    "live contract without generating."
+                ),
             },
             "target_operation": {
                 "type": "string",

@@ -197,7 +197,23 @@ class ToolGateway:
 
         effective_inputs = dict(inputs)
         if operation in {"rank", "preflight", "generate"}:
-            effective_inputs.setdefault("operation", operation)
+            # Only inject the lifecycle operation when the tool's own
+            # ``operation`` field accepts that value. Some tools use
+            # ``operation`` for a different semantic — video_selector
+            # (text_to_video / image_to_video / reference_to_video),
+            # video_compose (compose / render / …), hyperframes_compose
+            # (render / lint / validate / …) — none of which accept
+            # "generate". When the tool declares no enum (or accepts the
+            # value), inject so the selectors still receive rank/preflight/
+            # generate as before.
+            op_enum = (
+                getattr(tool, "input_schema", {})
+                .get("properties", {})
+                .get("operation", {})
+                .get("enum")
+            )
+            if op_enum is None or operation in op_enum:
+                effective_inputs.setdefault("operation", operation)
         if operation == "generate" and tool_name in _OUTPUT_REQUIRED and not any(
             key in effective_inputs for key in ("output_path", "output_dir", "export_dir")
         ):
