@@ -760,6 +760,7 @@ class JobService:
         lease_token: str | None = None,
         lease_now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=False)

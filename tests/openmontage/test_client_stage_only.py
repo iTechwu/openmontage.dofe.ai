@@ -11,6 +11,7 @@ from openmontage.contracts import (
     JobAttribution,
     JobCreateRequest,
     JobStatus,
+    PublishedArtifact,
     StageStatus,
 )
 from openmontage.job_service import JobService, client_stage_only_enabled
@@ -221,6 +222,20 @@ def test_all_legacy_mutation_entry_points_refuse_in_client_stage_only_mode(
         lambda: service.complete_job(job.job_id),
         lambda: service.complete_job_or_confirm_cancel(
             job.job_id, artifact=None, lease_token="t",
+        ),
+        lambda: service.publish_artifact(
+            job.job_id,
+            PublishedArtifact(
+                job_id=job.job_id,
+                employee_artifact_id="eart-1",
+                employee_id="employee-1",
+                role="final_video",
+                file_name="final.mp4",
+                media_type="video/mp4",
+                size_bytes=5,
+                sha256="a" * 64,
+                published_at="2026-09-01T00:00:00Z",
+            ),
         ),
     ]
 

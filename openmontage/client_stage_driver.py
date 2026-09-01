@@ -316,6 +316,10 @@ class ClientStageDriver:
                     lease_token=lease.lease_token,
                     idempotency_key=f"{idempotency_key}:submit",
                     artifacts=prior.get("artifacts", {}),
+                    # Preserve the handler's original metadata (decision
+                    # summary, cost snapshot, partial_progress); the server
+                    # re-derives stage_attempt / provenance / media_references.
+                    metadata=prior.get("metadata"),
                     instruction_provenance=instructions.provenance,
                 )
                 return {
