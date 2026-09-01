@@ -166,6 +166,25 @@ def _reject_legacy_mutation_in_client_stage_only() -> None:
         )
 
 
+def _validate_client_idempotency_key(idempotency_key: str) -> None:
+    """Require a non-empty string idempotency key ≤256 chars (plan §8.1).
+
+    A missing/empty key makes ``_command_hash`` return ``None``, which silently
+    skips the idempotency record and lets a retry duplicate a checkpoint write
+    or a state advance. Reject it with a stable ``IDEMPOTENCY_CONFLICT`` code
+    instead of failing open. The MCP tool layer already guards this; this is
+    the service-layer gate so a direct call cannot bypass it.
+    """
+    if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+        raise ClientStageError(
+            "IDEMPOTENCY_CONFLICT", "idempotency_key must be a non-empty string"
+        )
+    if len(idempotency_key) > 256:
+        raise ClientStageError(
+            "IDEMPOTENCY_CONFLICT", "idempotency_key must be at most 256 characters"
+        )
+
+
 def _parse_lease_expiry(raw: str | None) -> datetime | None:
     """Parse a stored lease expiry, tolerating legacy/naive and corrupt values.
 
@@ -1236,10 +1255,7 @@ class JobService:
         returns the original response; different arguments are rejected with
         ``IDEMPOTENCY_CONFLICT``.
         """
-        if not idempotency_key or not idempotency_key.strip():
-            raise ClientStageError(
-                "IDEMPOTENCY_CONFLICT", "idempotency_key must be non-empty"
-            )
+        _validate_client_idempotency_key(idempotency_key)
         duration = self._client_lease_duration(lease_duration)
         request_hash = hashlib.sha256(
             _canonical_json(
@@ -1419,6 +1435,7 @@ class JobService:
         ``client_stage.progressed`` event. Replays of the same
         ``idempotency_key`` return the original snapshot.
         """
+        _validate_client_idempotency_key(idempotency_key)
         if total_units <= 0:
             raise ClientStageError("STAGE_STATE_INVALID", "total_units must be greater than zero")
         if completed_units < 0 or completed_units > total_units:
@@ -1583,6 +1600,7 @@ class JobService:
         read); when supplied it is verified against the live CI repository
         before any state change, but it is not itself a hard gate.
         """
+        _validate_client_idempotency_key(idempotency_key)
         allowed_statuses = {"completed", "awaiting_human", "failed", "in_progress"}
         if status not in allowed_statuses:
             raise ClientStageError(

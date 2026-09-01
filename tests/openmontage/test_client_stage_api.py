@@ -724,3 +724,35 @@ def test_submit_archives_checkpoint_when_cancelled_during_write(
         )
     )
     assert len(history) == 1
+
+
+@pytest.mark.parametrize("bad_key", [None, "", "   ", "x" * 257])
+def test_client_stage_endpoints_reject_invalid_idempotency_key(
+    tmp_path: Path, bad_key,
+) -> None:
+    """Service-layer gate: begin/update/submit reject an empty/oversized
+    idempotency key instead of silently skipping the idempotency record."""
+    service = _service(tmp_path)
+    job = _job(service)
+
+    with pytest.raises(ClientStageError) as exc_info:
+        service.begin_client_stage(job.job_id, "research", idempotency_key=bad_key)
+    assert exc_info.value.code == "IDEMPOTENCY_CONFLICT"
+
+    lease = service.begin_client_stage(job.job_id, "research", idempotency_key="ok")
+
+    with pytest.raises(ClientStageError) as exc_info:
+        service.update_client_stage_progress(
+            job.job_id, "research", stage_attempt=lease.stage_attempt,
+            completed_units=1, total_units=1, label_code="x",
+            lease_token=lease.lease_token, idempotency_key=bad_key,
+        )
+    assert exc_info.value.code == "IDEMPOTENCY_CONFLICT"
+
+    with pytest.raises(ClientStageError) as exc_info:
+        service.submit_client_stage(
+            job.job_id, "research", stage_attempt=lease.stage_attempt,
+            status="in_progress", lease_token=lease.lease_token,
+            idempotency_key=bad_key,
+        )
+    assert exc_info.value.code == "IDEMPOTENCY_CONFLICT"
