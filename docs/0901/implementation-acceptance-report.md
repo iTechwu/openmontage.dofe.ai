@@ -124,18 +124,29 @@
 | 文件 | 用例数 |
 |---|---|
 | `test_instruction_files.py` | 35 |
-| `test_client_stage_api.py` | 25 |
+| `test_client_stage_api.py` | 26 |
 | `test_media_references.py` | 9 |
-| `test_client_stage_driver.py` | 16 |
+| `test_client_stage_driver.py` | 17 |
 | `test_client_stage_e2e.py` | 1 |
-| `test_client_stage_only.py` | 20 |
-| **合计** | **106** |
+| `test_client_stage_only.py` | 21 |
+| **合计** | **109** |
 
-全量 `pytest tests/openmontage/`：408 passed，1 skipped，6 failed（既有）。
+全量 `pytest tests/openmontage/`：411 passed，1 skipped，6 failed（既有）。
 
-## 6. 已知遗留（与本改动无关）
+## 6. 复审与一致性修复（第二轮）
 
-以下 6 个失败在改动前的干净工作树上同样失败，反映既有环境/契约差异，未在本次范围内处理：
+首轮验收提交后，复审指出 3 个 P1 + 1 个 P2，均已修复并复测：
+
+- **P1-1 审批恢复重复执行 handler**（重复付费生成）：`ClientStageDriver.drive_stage` 在审批恢复（`approval_required` 且已 `APPROVED`）时复用 `awaiting_human` checkpoint 的 artifacts 直接提交 `completed`，不再重跑 handler；新增 `_read_stage_checkpoint`。
+- **P1-2 CI-only 门禁可被旧接口绕过**：新增 `_reject_legacy_mutation_in_client_stage_only` 统一门禁，覆盖**全部** legacy mutation 入口（heartbeat/release/start/complete/progress/approval/fail/confirm/complete_job 的 `_or_confirm_cancel` 与非 lease 变体 + `publish_artifact`）。
+- **P1/P2 取消与 checkpoint 写入竞态**：`submit_client_stage` 取消分支调用 `_archive_stage_checkpoint`，把事务外刚写入的 checkpoint 移到 `history/`，避免 CANCELLED Job 残留 `in_progress`/`completed` checkpoint。
+- **P2 幂等 key 命名空间不一致**：修正 `submit_client_stage` docstring，明确 begin 走独立 lease 表、update/submit/approve/cancel 共享 command 表。
+
+提交：`69ad6a5`（3 个 P1）、`3e2d05e`（publish_artifact 门禁 + metadata 保留）。
+
+## 7. 已知遗留
+
+**6 个既有失败**（与本改动无关，在改动前的干净工作树上同样失败）：
 
 - `test_docker_job_bridge.py::test_compose_ships_no_in_container_job_worker` — 断言 `"worker" not in compose_text` 匹配到 compose 注释中的 "worker" 字样。
 - `test_event_outbox.py::test_publisher_from_environment_requires_a_complete_bridge_configuration`
@@ -144,7 +155,9 @@
 - `test_job_worker.py::test_worker_pauses_at_approval_and_resumes_with_latest_job_snapshot`
 - `test_reference_clone.py::test_prepare_creates_agent_ready_airouter_project`
 
-## 7. 部署注意事项
+**一个架构后续项（非本次范围）**：客户端 Stage API 目前没有把最终视频发布为 durable `PublishedArtifact` 的入口——E2E 的 publish 阶段产出 `publish_log` checkpoint，`list_video_artifacts` 对客户端驱动 Job 返回空。`publish_artifact` 现已被 client-stage-only 门禁（作为 legacy mutation），因此最终视频 artifact 发布需要一条独立的客户端发布路径（可在后续阶段补充）。
+
+## 8. 部署注意事项
 
 - MCP-only 部署默认启用 `OPENMONTAGE_CLIENT_STAGE_ONLY=true`（compose 默认）。若要在容器内跑 worker，需显式 `OPENMONTAGE_CLIENT_STAGE_ONLY=false`。
 - 上线前确认（§13）：DSH Worker 已停止、无 worker 容器、`OPENMONTAGE_AGENT_EXECUTOR_JSON` 未设置、无 dsh-agent-run 依赖、无 DeepSeek Harness executor。
