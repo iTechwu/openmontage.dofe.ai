@@ -72,6 +72,14 @@ class JobEventType(str, Enum):
     JOB_FAILED = "openmontage.job.failed"
     JOB_CANCEL_REQUESTED = "openmontage.job.cancel_requested"
     JOB_CANCELLED = "openmontage.job.cancelled"
+    # Client-driven stage execution (plan §14): the client Agent owns the
+    # cognitive work of each stage and reports lifecycle through these events.
+    CLIENT_STAGE_STARTED = "openmontage.client_stage.started"
+    CLIENT_STAGE_PROGRESSED = "openmontage.client_stage.progressed"
+    CLIENT_STAGE_CHECKPOINTED = "openmontage.client_stage.checkpointed"
+    CLIENT_STAGE_AWAITING_APPROVAL = "openmontage.client_stage.awaiting_approval"
+    CLIENT_STAGE_COMPLETED = "openmontage.client_stage.completed"
+    CLIENT_STAGE_FAILED = "openmontage.client_stage.failed"
 
 
 class JobAttribution(WireModel):

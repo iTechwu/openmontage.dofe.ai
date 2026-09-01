@@ -221,6 +221,119 @@ def create_server(
         ).to_wire()
 
     @server.tool()
+    def begin_client_stage(
+        job_id: str,
+        stage: str,
+        idempotency_key: str,
+        ctx: Context,
+        expected_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        """Begin exclusive client-side execution of one pipeline stage.
+
+        The client Agent drives one stage at a time: begin (lease + attempt),
+        read instructions with ``read_openmontage_file``, do the cognitive
+        work, call Gateway tools as usual, report progress with
+        ``update_client_stage_progress``, then finish with
+        ``submit_client_stage``. Returns an opaque ``leaseToken``,
+        ``stageAttempt``, ``leaseExpiresAt`` and the latest Job snapshot.
+        Replays of the same ``idempotency_key`` return the original result;
+        a second live owner is rejected with ``STAGE_ALREADY_OWNED``.
+        """
+        from openmontage.job_api import require_same_workspace
+
+        attribution = resolve_attribution(ctx.headers)
+        snapshot = jobs().get_job(job_id)
+        require_same_workspace(snapshot, attribution)
+        if not idempotency_key.strip():
+            raise ValueError("idempotency_key must be non-empty")
+        return jobs().begin_client_stage(
+            job_id,
+            stage,
+            idempotency_key=idempotency_key,
+            expected_sequence=expected_sequence,
+        ).to_wire()
+
+    @server.tool()
+    def update_client_stage_progress(
+        job_id: str,
+        stage: str,
+        stage_attempt: int,
+        completed_units: int,
+        total_units: int,
+        label_code: str,
+        lease_token: str,
+        idempotency_key: str,
+        ctx: Context,
+    ) -> dict[str, Any]:
+        """Report progress for a running client stage and renew its lease.
+
+        Requires the ``leaseToken`` and ``stageAttempt`` returned by
+        ``begin_client_stage``. Repeated calls with the same
+        ``idempotency_key`` are safe replays.
+        """
+        from openmontage.job_api import require_same_workspace
+
+        attribution = resolve_attribution(ctx.headers)
+        snapshot = jobs().get_job(job_id)
+        require_same_workspace(snapshot, attribution)
+        if not idempotency_key.strip():
+            raise ValueError("idempotency_key must be non-empty")
+        return jobs().update_client_stage_progress(
+            job_id,
+            stage,
+            stage_attempt=stage_attempt,
+            completed_units=completed_units,
+            total_units=total_units,
+            label_code=label_code,
+            lease_token=lease_token,
+            idempotency_key=idempotency_key,
+        ).to_wire()
+
+    @server.tool()
+    def submit_client_stage(
+        job_id: str,
+        stage: str,
+        stage_attempt: int,
+        status: str,
+        lease_token: str,
+        idempotency_key: str,
+        ctx: Context,
+        artifacts: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        instruction_provenance: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        """Submit a client stage's artifacts, checkpoint and status atomically.
+
+        ``status`` is one of ``completed`` / ``awaiting_human`` / ``failed`` /
+        ``in_progress``. The server validates the lease, artifact and
+        checkpoint schemas, approval rules and media references; writes the
+        standard checkpoint under the CI project directory; records the Job
+        event; and advances the Job. ``instruction_provenance`` is a list of
+        ``{"path", "content_hash"}`` entries from ``read_openmontage_file``
+        proving which instructions the client followed. Gated stages must be
+        submitted as ``awaiting_human`` and completed only after
+        ``approve_video_stage`` approves them.
+        """
+        from openmontage.job_api import require_same_workspace
+
+        attribution = resolve_attribution(ctx.headers)
+        snapshot = jobs().get_job(job_id)
+        require_same_workspace(snapshot, attribution)
+        if not idempotency_key.strip():
+            raise ValueError("idempotency_key must be non-empty")
+        return jobs().submit_client_stage(
+            job_id,
+            stage,
+            stage_attempt=stage_attempt,
+            status=status,
+            lease_token=lease_token,
+            idempotency_key=idempotency_key,
+            artifacts=artifacts,
+            metadata=metadata,
+            instruction_provenance=instruction_provenance,
+        ).to_wire()
+
+    @server.tool()
     def list_video_job_events(
         job_id: str,
         ctx: Context,
