@@ -30,7 +30,7 @@ from lib.pipeline_loader import get_stage_skill, load_pipeline_readonly
 from lib.paths import REPO_ROOT
 
 from openmontage.job_service import ClientStageLease, JobService
-from openmontage.contracts import JobStatus, StageStatus
+from openmontage.contracts import ApprovalStatus, JobStatus, StageStatus
 
 # Standard instructions every stage reads live (plan §9).
 STANDARD_INSTRUCTION_FILES = (
@@ -229,6 +229,20 @@ class ClientStageDriver:
             # here only affects what the handler can inspect, not correctness.
             return None
 
+    def _read_stage_checkpoint(self, job_id: str, stage: str) -> dict[str, Any] | None:
+        """Read this stage's own checkpoint (if any) from the CI project.
+
+        Used for approval recovery: after ``approve_video_stage`` a gated stage
+        already has its ``awaiting_human`` checkpoint (with the artifacts the
+        client produced); the driver reuses them instead of re-running the
+        handler.
+        """
+        try:
+            result = self._read_project_file(job_id, f"checkpoint_{stage}.json")
+            return json.loads(result["content"])
+        except Exception:
+            return None
+
     # --- stage loop -----------------------------------------------------------
 
     def drive_stage(
@@ -280,6 +294,39 @@ class ClientStageDriver:
 
         snapshot = lease.snapshot
         pipeline = snapshot.workflow.name
+        stage_snap = next((s for s in snapshot.stages if s.code == stage), None)
+
+        # Approval recovery (plan §8.3, §10): a gated stage whose approval was
+        # just granted already has its artifacts checkpointed as awaiting_human.
+        # Reuse them and submit completed WITHOUT re-running the handler —
+        # re-running it would repeat paid Gateway calls (image/video/TTS).
+        if (
+            stage_snap is not None
+            and stage_snap.approval_required
+            and stage_snap.approval_status == ApprovalStatus.APPROVED
+        ):
+            prior = self._read_stage_checkpoint(job_id, stage)
+            if prior is not None and prior.get("status") == "awaiting_human":
+                instructions = self.read_stage_instructions(pipeline, stage)
+                result = self.service.submit_client_stage(
+                    job_id,
+                    stage,
+                    stage_attempt=lease.stage_attempt,
+                    status="completed",
+                    lease_token=lease.lease_token,
+                    idempotency_key=f"{idempotency_key}:submit",
+                    artifacts=prior.get("artifacts", {}),
+                    instruction_provenance=instructions.provenance,
+                )
+                return {
+                    "stage": stage,
+                    "status": "completed",
+                    "waiting_approval": False,
+                    "snapshot": result.to_wire(),
+                    "replayed": False,
+                    "reused_artifact": True,
+                }
+
         instructions = self.read_stage_instructions(pipeline, stage)
         predecessor = self.read_predecessor_artifact(job_id, stage)
 

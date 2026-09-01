@@ -684,3 +684,43 @@ def test_mcp_server_exposes_client_stage_tools() -> None:
         "update_client_stage_progress",
         "submit_client_stage",
     } <= tool_names
+
+
+def test_submit_archives_checkpoint_when_cancelled_during_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancel racing the checkpoint write must not leave an in_progress/
+    completed checkpoint for a CANCELLED Job (review P1)."""
+    service = _service(tmp_path)
+    job = _job(service)
+    lease = _begin(service, job.job_id, "research")
+
+    import lib.checkpoint as checkpoint_module
+
+    real_write_checkpoint = checkpoint_module.write_checkpoint
+
+    def write_then_cancel(*args, **kwargs):
+        result = real_write_checkpoint(*args, **kwargs)
+        # A concurrent client cancels the Job right after the checkpoint hits
+        # disk but before submit reloads state inside the transaction.
+        service.request_cancel(job.job_id, idempotency_key="cancel-1")
+        return result
+
+    monkeypatch.setattr(checkpoint_module, "write_checkpoint", write_then_cancel)
+
+    snapshot = service.submit_client_stage(
+        job.job_id, "research",
+        stage_attempt=lease.stage_attempt, status="in_progress",
+        lease_token=lease.lease_token, idempotency_key="s-1",
+    )
+    assert snapshot.status == JobStatus.CANCELLED
+
+    # The just-written checkpoint was archived, not left behind.
+    checkpoint_path = tmp_path / "projects" / job.job_id / "checkpoint_research.json"
+    assert not checkpoint_path.exists()
+    history = list(
+        (tmp_path / "projects" / job.job_id / "history").glob(
+            "checkpoint_research_cancelled_*.json"
+        )
+    )
+    assert len(history) == 1

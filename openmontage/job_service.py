@@ -149,6 +149,23 @@ def client_stage_only_enabled() -> bool:
     }
 
 
+def _reject_legacy_mutation_in_client_stage_only() -> None:
+    """Fence off the legacy Worker mutation surface in client-stage-only mode.
+
+    ``claim_job`` returns ``None`` instead (that is the Worker's "no work"
+    signal, not an error); every other legacy mutation — heartbeat, release,
+    start/complete, progress, approval, fail, confirm — raises, so a stale
+    Worker or a direct service call cannot advance a Job outside the client
+    Stage API.
+    """
+    if client_stage_only_enabled():
+        raise JobStateError(
+            "client-stage-only mode is enabled; Jobs are advanced exclusively by "
+            "the client Stage API (begin/update/submit_client_stage), not the "
+            "legacy Worker"
+        )
+
+
 def _parse_lease_expiry(raw: str | None) -> datetime | None:
     """Parse a stored lease expiry, tolerating legacy/naive and corrupt values.
 
@@ -609,6 +626,7 @@ class JobService:
         lease_duration: timedelta,
         now: datetime | None = None,
     ) -> JobLease:
+        _reject_legacy_mutation_in_client_stage_only()
         if lease_duration <= timedelta(0):
             raise JobLeaseError("lease_duration must be greater than zero")
         with self._connect() as connection:
@@ -650,6 +668,7 @@ class JobService:
         reset_attempts: bool = False,
         now: datetime | None = None,
     ) -> None:
+        _reject_legacy_mutation_in_client_stage_only()
         _, retry_at = _resolve_release_retry(
             now=now, retry_at=retry_at, retry_delay=retry_delay
         )
@@ -685,6 +704,7 @@ class JobService:
         reset_attempts: bool = False,
         now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         _, retry_at = _resolve_release_retry(
             now=now, retry_at=retry_at, retry_delay=retry_delay
         )
@@ -943,15 +963,7 @@ class JobService:
         lease_token: str | None = None,
         lease_now: datetime | None = None,
     ) -> JobSnapshot:
-        if client_stage_only_enabled():
-            # Depth-in-defence on top of claim_job (plan §13): these legacy
-            # Worker settle methods accept an optional lease, so refuse them
-            # outright in client-stage-only mode even if a stale caller has no
-            # token. The client path is begin/update/submit_client_stage.
-            raise JobStateError(
-                "client-stage-only mode is enabled; stages are advanced by the "
-                "client Stage API, not the legacy Worker"
-            )
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now)
@@ -966,6 +978,7 @@ class JobService:
         lease_token: str,
         now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             effective_now = _normalize_now(now)
@@ -992,11 +1005,7 @@ class JobService:
         lease_token: str | None = None,
         lease_now: datetime | None = None,
     ) -> JobSnapshot:
-        if client_stage_only_enabled():
-            raise JobStateError(
-                "client-stage-only mode is enabled; stages are advanced by the "
-                "client Stage API, not the legacy Worker"
-            )
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=False)
@@ -1011,6 +1020,7 @@ class JobService:
         lease_token: str,
         now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             effective_now = _normalize_now(now)
@@ -1045,6 +1055,7 @@ class JobService:
         lease_token: str | None = None,
         lease_now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         if total_units <= 0:
             raise JobStateError("total_units must be greater than zero")
         if completed_units < 0 or completed_units > total_units:
@@ -1505,6 +1516,35 @@ class JobService:
             )
         return stage_index, stage
 
+    def _archive_stage_checkpoint(self, job_id: str, stage_code: str) -> None:
+        """Move a just-written checkpoint into ``history/`` after a cancel.
+
+        ``submit_client_stage`` writes the checkpoint to disk *before* the
+        state transition (outside the SQLite transaction). If the transition
+        then confirms a cancellation, the on-disk checkpoint no longer matches
+        the CANCELLED Job. Moving it aside to ``history/`` keeps the project
+        directory consistent instead of leaving an ``in_progress``/``completed``
+        checkpoint for a Job that is CANCELLED.
+        """
+        path = self.projects_dir / job_id / f"checkpoint_{stage_code}.json"
+        if not path.exists():
+            return
+        try:
+            import shutil
+
+            history_dir = path.parent / "history"
+            history_dir.mkdir(parents=True, exist_ok=True)
+            target = history_dir / (
+                f"checkpoint_{stage_code}_cancelled_{path.stat().st_mtime_ns}.json"
+            )
+            shutil.move(str(path), str(target))
+        except OSError:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Could not archive cancelled checkpoint %s", path
+            )
+
     def submit_client_stage(
         self,
         job_id: str,
@@ -1529,9 +1569,15 @@ class JobService:
         and releases (or, for ``in_progress``, renews) the lease. Returns the
         latest Job snapshot. Idempotent on ``idempotency_key``.
 
-        ``idempotency_key`` must be unique per Job across all operations
-        (begin/update/submit/approve/cancel), not just per stage — reuse across
-        stages or operations returns ``IDEMPOTENCY_CONFLICT``.
+        ``idempotency_key`` must be unique per Job *within the submit/update/
+        approve/cancel namespace* (these share the ``openmontage_job_command``
+        table keyed by ``(job_id, idempotency_key)``) — reuse within that
+        namespace with different arguments returns ``IDEMPOTENCY_CONFLICT``.
+        ``begin_client_stage`` uses a separate lease table keyed by
+        ``(job_id, stage, idempotency_key)``, so a begin key never collides
+        with a submit key; still, a distinct key per operation is the cleanest
+        contract (the client driver suffixes ``:begin`` / ``:submit`` for this
+        reason).
         ``instruction_provenance`` is advisory audit metadata (what the client
         read); when supplied it is verified against the live CI repository
         before any state change, but it is not itself a hard gate.
@@ -1663,6 +1709,11 @@ class JobService:
                 self._release_client_lease(
                     connection, job_id, stage_code, lease_token, now=effective_now
                 )
+                # The checkpoint was written to disk before this transaction.
+                # The Job is now CANCELLED; archive the just-written checkpoint
+                # so on-disk state cannot claim a stage advanced that the Job
+                # no longer reflects (review P1: cancel/checkpoint race).
+                self._archive_stage_checkpoint(job_id, stage_code)
                 self._record_command_result(connection, snapshot, idempotency_key, command_hash)
                 return snapshot
 
@@ -1767,6 +1818,7 @@ class JobService:
         lease_token: str | None = None,
         lease_now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=False)
@@ -1787,6 +1839,7 @@ class JobService:
         lease_token: str,
         now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             effective_now = _normalize_now(now)
@@ -1890,6 +1943,7 @@ class JobService:
         lease_token: str | None = None,
         lease_now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         self._validate_job_failure(code, message)
 
         with self._connect() as connection:
@@ -1914,6 +1968,7 @@ class JobService:
         lease_token: str,
         now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         self._validate_job_failure(code, message)
         with self._connect() as connection:
             self._begin_write(connection)
@@ -1986,6 +2041,7 @@ class JobService:
         lease_token: str | None = None,
         lease_now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=False)
@@ -1999,6 +2055,7 @@ class JobService:
         lease_token: str | None = None,
         lease_now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=False)
@@ -2013,6 +2070,7 @@ class JobService:
         lease_token: str,
         now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             effective_now = _normalize_now(now)

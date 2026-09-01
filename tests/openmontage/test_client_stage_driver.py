@@ -399,3 +399,47 @@ def test_resolve_current_stage_advances_after_completion(tmp_path: Path) -> None
     assert driver.resolve_current_stage(job.job_id) == "research"
     driver.drive_stage(job.job_id, "research", _research_handler)
     assert driver.resolve_current_stage(job.job_id) == "proposal"
+
+
+def test_approval_recovery_reuses_checkpoint_without_rerunning_handler(
+    tmp_path: Path,
+) -> None:
+    """Gated stage: after approval, the driver reuses the awaiting_human
+    checkpoint artifacts and does NOT re-run the handler (no duplicate paid
+    Gateway calls)."""
+    service = _service(tmp_path)
+    job = service.create_job(_request(), _attribution())
+    driver = _driver(service)
+
+    # Complete the ungated research stage first.
+    driver.drive_stage(job.job_id, "research", _research_handler)
+
+    calls: list[str] = []
+
+    def proposal_handler(ctx: StageContext):
+        calls.append("ran")
+        return "awaiting_human", {"proposal_packet": _proposal_packet()}, None
+
+    # First drive: the handler runs once and gates.
+    out1 = driver.drive_stage(job.job_id, "proposal", proposal_handler, idempotency_key="p1")
+    assert out1["waiting_approval"] is True
+    assert calls == ["ran"]
+
+    # Approve, then drive again with a fresh key.
+    snapshot = service.get_job(job.job_id)
+    service.resolve_stage_approval(
+        job.job_id, "proposal", approved=True,
+        expected_sequence=snapshot.last_sequence, idempotency_key="approve-1",
+    )
+    out2 = driver.drive_stage(job.job_id, "proposal", proposal_handler, idempotency_key="p2")
+
+    assert out2["status"] == "completed"
+    assert out2.get("reused_artifact") is True
+    assert calls == ["ran"]  # handler was NOT re-run
+
+    # The completed checkpoint carries the same artifacts the gate submitted.
+    checkpoint = json.loads(
+        (tmp_path / "projects" / job.job_id / "checkpoint_proposal.json").read_text("utf-8")
+    )
+    assert checkpoint["status"] == "completed"
+    assert checkpoint["artifacts"]["proposal_packet"]["selected_concept"]["concept_id"] == "c0"

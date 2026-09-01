@@ -182,3 +182,51 @@ def test_legacy_settle_methods_refuse_in_client_stage_only_mode(
         service.start_stage(job.job_id, "research")
     with pytest.raises(Exception, match="client-stage-only"):
         service.complete_stage(job.job_id, "research")
+
+
+def test_all_legacy_mutation_entry_points_refuse_in_client_stage_only_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every legacy Worker mutation entry point is fenced off, not just
+    claim_job/start_stage/complete_stage (review P1)."""
+    monkeypatch.delenv("OPENMONTAGE_AGENT_EXECUTOR_JSON", raising=False)
+    monkeypatch.setenv("OPENMONTAGE_CLIENT_STAGE_ONLY", "true")
+    service = _service(tmp_path)
+    job = service.create_job(_request(), _attribution())
+
+    mutations = [
+        lambda: service.heartbeat_lease(
+            __import__("openmontage.job_service", fromlist=["JobLease"]).JobLease(
+                job_id=job.job_id, worker_id="w", lease_token="t",
+                expires_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+                attempt=1, snapshot=service.get_job(job.job_id),
+            ), lease_duration=timedelta(minutes=1),
+        ),
+        lambda: service.release_lease(job.job_id, lease_token="t"),
+        lambda: service.release_lease_or_confirm_cancel(job.job_id, lease_token="t"),
+        lambda: service.start_stage_or_confirm_cancel(job.job_id, "research", lease_token="t"),
+        lambda: service.complete_stage_or_confirm_cancel(job.job_id, "research", lease_token="t"),
+        lambda: service.update_stage_progress(
+            job.job_id, "research", completed_units=1, total_units=1, label_code="x",
+        ),
+        lambda: service.request_stage_approval(job.job_id, "research", reason="r"),
+        lambda: service.request_stage_approval_or_confirm_cancel(
+            job.job_id, "research", reason="r", lease_token="t",
+        ),
+        lambda: service.fail_job(job.job_id, code="c", message="m", retryable=False),
+        lambda: service.fail_job_or_confirm_cancel(
+            job.job_id, code="c", message="m", retryable=False, lease_token="t",
+        ),
+        lambda: service.confirm_cancel(job.job_id),
+        lambda: service.complete_job(job.job_id),
+        lambda: service.complete_job_or_confirm_cancel(
+            job.job_id, artifact=None, lease_token="t",
+        ),
+    ]
+
+    for mutation in mutations:
+        with pytest.raises(Exception, match="client-stage-only"):
+            mutation()
+
+    # The Job was not advanced by any of the fenced mutations.
+    assert service.get_job(job.job_id).status == JobStatus.QUEUED
