@@ -408,7 +408,7 @@ compose:
 
 ## 10. 阶段职责
 
-| 阶段 | 客户端 Agent | CI |
+| 阶段 | 客户端 Agent 职责 | CI 职责 |
 |---|---|---|
 | research | Web Search/Fetch、内容和技术研究、趋势、数据、受众分析；生成 `research_brief` | 保存 checkpoint，不生成媒体 |
 | proposal | capabilities/preflight、方案、provider/runtime/音频/预算比较；生成 `proposal_packet`、`decision_log` | 保存 artifact，进入审批 |
@@ -626,4 +626,3 @@ CI 媒体执行层
 ```
 
 > OpenMontage 保留完整 Pipeline、Job、审批、checkpoint 和 CI 媒体生产能力；客户端 Agent 只接替原 runtime Agent 的认知和编排职责。客户端每次通过 `read_openmontage_file` 实时读取 CI 上的 Markdown、YAML 和 JSON，不做本地缓存；现有 Gateway 工具调用方式保持不变；所有图片、音频、视频、合成和渲染文件始终在 CI 完成和保存。
-
