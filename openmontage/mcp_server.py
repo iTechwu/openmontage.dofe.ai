@@ -58,6 +58,11 @@ def create_server(
             job_service = default_job_service()
         return job_service
 
+    def tool_gateway() -> Any:
+        from openmontage.tool_gateway import ToolGateway
+
+        return ToolGateway(jobs())
+
     def resolve_attribution(headers: Mapping[str, str] | None) -> Any:
         nonlocal attribution_resolver
         if attribution_resolver is None:
@@ -95,6 +100,40 @@ def create_server(
     def openmontage_capabilities() -> dict[str, Any]:
         """Return the compact provider and composition preflight summary."""
         return capability_summary()
+
+    @server.tool()
+    def invoke_openmontage_tool(
+        tool_name: str,
+        operation: str,
+        inputs: dict[str, Any],
+        ctx: Context,
+        job_id: str = "",
+        stage: str = "",
+        stage_attempt: int | None = None,
+        lease_token: str = "",
+        idempotency_key: str = "",
+    ) -> dict[str, Any]:
+        """Execute one fixed logical CI tool through the server ToolRegistry."""
+        from openmontage.job_api import require_same_workspace
+        from openmontage.tool_gateway import ToolGatewayError
+
+        try:
+            attribution = resolve_attribution(ctx.headers)
+            if operation == "catalog":
+                return tool_gateway().invoke(tool_name=tool_name, operation=operation, inputs=inputs)
+            snapshot = jobs().get_job(job_id)
+            require_same_workspace(snapshot, attribution)
+            return tool_gateway().invoke(
+                tool_name=tool_name, operation=operation, inputs=inputs, job_id=job_id,
+                stage=stage, stage_attempt=stage_attempt, lease_token=lease_token,
+                idempotency_key=idempotency_key,
+            )
+        except ToolGatewayError as exc:
+            return {
+                "success": False,
+                "status": "failed",
+                "error": {"code": exc.code, "category": exc.category, "message": exc.message},
+            }
 
     @server.tool()
     def reference_clone_status(project_id: str) -> dict[str, Any]:

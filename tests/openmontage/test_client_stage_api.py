@@ -683,6 +683,7 @@ def test_mcp_server_exposes_client_stage_tools() -> None:
         "begin_client_stage",
         "update_client_stage_progress",
         "submit_client_stage",
+        "invoke_openmontage_tool",
     } <= tool_names
 
 

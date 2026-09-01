@@ -86,6 +86,29 @@ class StageContext:
     instructions: InstructionBundle
     predecessor: dict[str, Any] | None
 
+    def call_tool(
+        self,
+        tool_name: str,
+        inputs: dict[str, Any],
+        *,
+        idempotency_key: str,
+        operation: str = "generate",
+    ) -> Any:
+        """Call the unified Gateway while automatically binding this stage lease."""
+        caller = getattr(self.gateway, "call_tool", None)
+        if not callable(caller):
+            raise RuntimeError("Stage gateway does not implement call_tool()")
+        return caller(
+            tool_name,
+            inputs,
+            job_id=self.job_id,
+            stage=self.stage,
+            stage_attempt=self.lease.stage_attempt,
+            lease_token=self.lease.lease_token,
+            idempotency_key=idempotency_key,
+            operation=operation,
+        )
+
 
 # A handler returns the submission the driver should send: the stage status
 # plus the artifacts / metadata. Gated stages return "awaiting_human"; the
