@@ -128,6 +128,27 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def client_stage_only_enabled() -> bool:
+    """Whether CI is in client-stage-only mode (plan §13).
+
+    When set, the legacy Worker must not claim or advance Jobs: every stage is
+    driven by the client Agent through ``begin/update/submit_client_stage``.
+    A Job stays ``QUEUED`` after creation until the client begins its first
+    stage.
+
+    Parsing is allow-list and fail-closed: any value other than ``1``/``true``/
+    ``yes``/``on`` (case-insensitive, trimmed) — including unset, empty, ``0``,
+    or a typo — disables the mode. An accidental unknown value therefore cannot
+    leave a deployment half-locked.
+    """
+    return os.environ.get("OPENMONTAGE_CLIENT_STAGE_ONLY", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _parse_lease_expiry(raw: str | None) -> datetime | None:
     """Parse a stored lease expiry, tolerating legacy/naive and corrupt values.
 
@@ -489,6 +510,11 @@ class JobService:
         lease_duration: timedelta,
         now: datetime | None = None,
     ) -> JobLease | None:
+        if client_stage_only_enabled():
+            # CI-only mode (plan §13): the legacy Worker is disabled. Report no
+            # claimable work so run_once stays idle and never advances a stage
+            # that the client Stage API owns.
+            return None
         normalized_worker_id = worker_id.strip()
         if not normalized_worker_id or len(normalized_worker_id) > 256:
             raise JobLeaseError("worker_id must be between 1 and 256 characters")
@@ -917,6 +943,15 @@ class JobService:
         lease_token: str | None = None,
         lease_now: datetime | None = None,
     ) -> JobSnapshot:
+        if client_stage_only_enabled():
+            # Depth-in-defence on top of claim_job (plan §13): these legacy
+            # Worker settle methods accept an optional lease, so refuse them
+            # outright in client-stage-only mode even if a stale caller has no
+            # token. The client path is begin/update/submit_client_stage.
+            raise JobStateError(
+                "client-stage-only mode is enabled; stages are advanced by the "
+                "client Stage API, not the legacy Worker"
+            )
         with self._connect() as connection:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now)
@@ -957,6 +992,11 @@ class JobService:
         lease_token: str | None = None,
         lease_now: datetime | None = None,
     ) -> JobSnapshot:
+        if client_stage_only_enabled():
+            raise JobStateError(
+                "client-stage-only mode is enabled; stages are advanced by the "
+                "client Stage API, not the legacy Worker"
+            )
         with self._connect() as connection:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=False)

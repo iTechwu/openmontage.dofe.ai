@@ -26,6 +26,11 @@ x-openmontage-common: &openmontage-common
     # host-published 8765 port cannot be used as an unauthenticated bypass.
     OPENMONTAGE_MCP_GATEWAY_SECRET: ${OPENMONTAGE_MCP_GATEWAY_SECRET:?Set OPENMONTAGE_MCP_GATEWAY_SECRET in .env}
     OPENMONTAGE_MCP_GATEWAY_ONLY: ${OPENMONTAGE_MCP_GATEWAY_ONLY:-true}
+    # Client-stage-only mode (plan §13): the legacy Worker is disabled — every
+    # pipeline stage is advanced by the client Agent through the client Stage
+    # API (begin/update/submit_client_stage), never by claim_job. A Job stays
+    # QUEUED after creation until the client begins its first stage.
+    OPENMONTAGE_CLIENT_STAGE_ONLY: ${OPENMONTAGE_CLIENT_STAGE_ONLY:-true}
     OPENMONTAGE_EVENT_ENDPOINT: ${OPENMONTAGE_EVENT_ENDPOINT-http://host.docker.internal:1455/api/internal/openmontage/events}
     OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL: ${OPENMONTAGE_ARTIFACT_BRIDGE_BASE_URL:-http://host.docker.internal:1455}
     OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL: ${OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL-http://host.docker.internal:1455}

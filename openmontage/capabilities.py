@@ -12,6 +12,7 @@ from openmontage.contracts import (
     WorkflowDefinition,
 )
 from openmontage.pipeline_executor import delegated_executor_availability
+from openmontage.job_service import client_stage_only_enabled
 
 
 def job_submission_capability() -> dict[str, Any]:
@@ -49,6 +50,7 @@ def job_submission_capability() -> dict[str, Any]:
         "workflow_field_is_pipeline": True,
         "workflow_stage_warning": "compose is a stage, not a workflow; use a pipeline name",
         "delegated_execution": delegated_executor_availability(),
+        "client_stage_only": client_stage_only_enabled(),
         "supported_workflows": supported_workflows,
         "unavailable_workflows": unavailable_workflows,
         "request_schema": request_schema,
