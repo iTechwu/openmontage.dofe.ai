@@ -122,6 +122,46 @@ def create_job_routes(
         except Exception as exc:
             return _error_response(exc)
 
+    async def list_jobs(request: Request) -> JSONResponse:
+        try:
+            attribution = attribution_resolver(request.headers)
+            raw_limit = request.query_params.get("limit", "50")
+            limit = int(raw_limit)
+            if limit < 1 or limit > 100:
+                raise ValueError("limit must be between 1 and 100")
+            items = service.list_jobs(attribution.workspace_id, limit=limit)
+            return JSONResponse({"items": [item.to_wire() for item in items], "limit": limit})
+        except Exception as exc:
+            return _error_response(exc)
+
+    async def overview(request: Request) -> JSONResponse:
+        try:
+            attribution = attribution_resolver(request.headers)
+            items = service.list_jobs(attribution.workspace_id, limit=100)
+            by_status: dict[str, int] = {}
+            artifact_count = 0
+            awaiting_approval = 0
+            for item in items:
+                status = str(item.status.value)
+                by_status[status] = by_status.get(status, 0) + 1
+                artifact_count += len(item.artifacts)
+                if status == "WAITING_APPROVAL":
+                    awaiting_approval += 1
+            return JSONResponse({
+                "workspaceId": attribution.workspace_id,
+                "totals": {"jobs": len(items), "artifacts": artifact_count},
+                "statusCounts": by_status,
+                "awaitingApproval": awaiting_approval,
+                "recentJobs": [
+                    {"jobId": item.job_id, "status": item.status.value,
+                     "workflow": item.workflow.name, "currentStage": item.current_stage,
+                     "createdAt": item.created_at.isoformat(), "updatedAt": item.updated_at.isoformat()}
+                    for item in items[:10]
+                ],
+            })
+        except Exception as exc:
+            return _error_response(exc)
+
     async def list_events(request: Request) -> JSONResponse:
         try:
             attribution = attribution_resolver(request.headers)
@@ -199,6 +239,8 @@ def create_job_routes(
             return _error_response(exc)
 
     return [
+        Route("/api/v1/overview", overview, methods=["GET"]),
+        Route("/api/v1/jobs", list_jobs, methods=["GET"]),
         Route("/api/v1/jobs", create_job, methods=["POST"]),
         Route("/api/v1/jobs/{job_id}", get_job, methods=["GET"]),
         Route("/api/v1/jobs/{job_id}/events", list_events, methods=["GET"]),

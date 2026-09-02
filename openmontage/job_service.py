@@ -539,6 +539,24 @@ class JobService:
         with self._connect() as connection:
             return self._load_job(connection, job_id)
 
+    def list_jobs(self, workspace_id: str, *, limit: int = 50) -> list[JobSnapshot]:
+        """List durable jobs for one authenticated workspace, newest first."""
+        if not workspace_id:
+            raise ValueError("workspace_id is required")
+        bounded = min(100, max(1, int(limit)))
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT snapshot_json
+                FROM openmontage_job
+                WHERE workspace_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (workspace_id, bounded),
+            ).fetchall()
+        return [JobSnapshot.model_validate_json(row["snapshot_json"]) for row in rows]
+
     def claim_job(
         self,
         *,
