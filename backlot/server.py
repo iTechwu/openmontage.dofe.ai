@@ -73,7 +73,7 @@ class ModelsAuthUnavailable(RuntimeError):
     """Raised when the internal Models authentication service is unavailable."""
 
 
-def _validate_models_api_key(api_key: str, auth_url: str) -> bool:
+def _validate_models_api_key(api_key: str, auth_url: str) -> str | None:
     import requests
 
     try:
@@ -85,9 +85,9 @@ def _validate_models_api_key(api_key: str, auth_url: str) -> bool:
     except requests.RequestException as exc:
         raise ModelsAuthUnavailable("Models authentication is unavailable") from exc
     if response.status_code == 200:
-        return True
+        return response.headers.get("X-Dofe-Tenant-Id", "unknown").strip() or "unknown"
     if response.status_code in {401, 403}:
-        return False
+        return None
     raise ModelsAuthUnavailable("Models authentication returned an unexpected response")
 
 
@@ -228,13 +228,13 @@ def create_app() -> FastAPI:
         "OPENMONTAGE_BACKLOT_SECURE_COOKIE", "true"
     ).lower() not in {"0", "false", "no"}
     session_ttl = 12 * 60 * 60
-    sessions: dict[str, float] = {}
+    sessions: dict[str, tuple[float, str]] = {}
 
     def session_is_valid(token: str | None) -> bool:
         if not token:
             return False
         now = time.monotonic()
-        expires_at = sessions.get(token, 0)
+        expires_at = sessions.get(token, (0, ""))[0]
         if expires_at <= now:
             sessions.pop(token, None)
             return False
@@ -268,21 +268,24 @@ def create_app() -> FastAPI:
                 payload = await request.json()
             except (json.JSONDecodeError, ValueError):
                 payload = {}
-            api_key = payload.get("apiKey") if isinstance(payload, dict) else None
+            authorization = request.headers.get("authorization", "")
+            api_key = authorization.removeprefix("Bearer ").strip()
+            if not api_key:
+                api_key = payload.get("apiKey") if isinstance(payload, dict) else None
             if not isinstance(api_key, str) or not api_key or len(api_key) > 4096:
                 return JSONResponse({"error": "invalid_api_key"}, status_code=401)
             try:
-                valid = await asyncio.to_thread(_validate_models_api_key, api_key, auth_url)
+                workspace_id = await asyncio.to_thread(_validate_models_api_key, api_key, auth_url)
             except ModelsAuthUnavailable:
                 return JSONResponse({"error": "auth_unavailable"}, status_code=503)
-            if not valid:
+            if not workspace_id:
                 return JSONResponse({"error": "invalid_api_key"}, status_code=401)
             now = time.monotonic()
             for expired_token, expires_at in list(sessions.items()):
-                if expires_at <= now:
+                if expires_at[0] <= now:
                     sessions.pop(expired_token, None)
             token = secrets.token_urlsafe(32)
-            sessions[token] = now + session_ttl
+            sessions[token] = (now + session_ttl, workspace_id)
             response = Response(status_code=204)
             response.set_cookie(
                 "openmontage_backlot_session",
