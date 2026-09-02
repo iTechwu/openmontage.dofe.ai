@@ -231,6 +231,46 @@ class ImageSelector(BaseTool):
                 },
             )
 
+        # Preflight resolves the selected provider and validates its live
+        # contract without submitting a generation request.
+        if inputs.get("operation") == "preflight":
+            try:
+                tool, score = self._select_best_tool(inputs, candidates, task_context)
+            except Exception as exc:
+                from tools.dofe.config import DofeRoutingError
+
+                if isinstance(exc, DofeRoutingError):
+                    return ToolResult(success=False, error=str(exc))
+                raise
+            if tool is None:
+                return ToolResult(
+                    success=True,
+                    data={
+                        "status": "blocked",
+                        "errors": ["No compatible image generation provider available."],
+                        "normalized_task_context": task_context,
+                    },
+                )
+
+            preflight_inputs = dict(inputs)
+            preflight_inputs.pop("preferred_provider", None)
+            preflight_inputs.pop("allowed_providers", None)
+            report = tool.preflight(preflight_inputs, live=True)
+            return ToolResult(
+                success=True,
+                data={
+                    "status": report["status"],
+                    "selected_tool": tool.name,
+                    "selected_provider": tool.provider,
+                    "selection_reason": (
+                        score.explain() if score else f"Selected {tool.provider} ({tool.name})"
+                    ),
+                    "provider_preflight": report,
+                    "normalized_task_context": task_context,
+                    **self._tool_context_payload(tool),
+                },
+            )
+
         # Normal generation — use scored selection
         try:
             tool, score = self._select_best_tool(inputs, candidates, task_context)

@@ -197,6 +197,7 @@ def _build_job_worker(args: argparse.Namespace):
     from openmontage.artifact_bridge import ArtifactBridgeClient
     from openmontage.deterministic_video_executor import DeterministicVideoSmokeExecutor
     from openmontage.job_api import default_job_service
+    from openmontage.job_service import client_stage_only_enabled
     from openmontage.job_worker import JobWorker
     from openmontage.model_credential_bridge import ModelCredentialBridgeClient
     from openmontage.invocation_store import ModelInvocationStore
@@ -204,6 +205,16 @@ def _build_job_worker(args: argparse.Namespace):
         AgentCommandPipelineExecutor,
         delegated_executor_availability,
     )
+
+    # Fail fast at startup, before claiming anything: in client-stage-only mode
+    # the legacy Worker must not run (plan §13 — the client Stage API is the
+    # only path that advances Jobs).
+    if client_stage_only_enabled():
+        raise RuntimeError(
+            "openmontage worker cannot start: OPENMONTAGE_CLIENT_STAGE_ONLY is set; "
+            "Jobs are advanced exclusively by the client Stage API "
+            "(begin/update/submit_client_stage)."
+        )
 
     worker_id = os.environ.get("OPENMONTAGE_WORKER_ID", "").strip()
     if not worker_id:

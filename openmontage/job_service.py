@@ -54,6 +54,20 @@ class JobLeaseError(RuntimeError):
     """Raised when a Worker lease is invalid, expired, or no longer owned."""
 
 
+class ClientStageError(RuntimeError):
+    """Raised when a client-driven stage call violates the stage contract.
+
+    Carries a stable machine-readable ``code`` (e.g. ``STAGE_ALREADY_OWNED``,
+    ``IDEMPOTENCY_CONFLICT``, ``ARTIFACT_SCHEMA_INVALID``). The code is embedded
+    in the message because the MCP SDK serializes tool exceptions as plain
+    text — ``str(error)`` must contain the code for the client to branch on it.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+
+
 class OutboxLeaseError(RuntimeError):
     """Raised when an event delivery lease is no longer owned."""
 
@@ -68,8 +82,107 @@ class JobLease:
     snapshot: JobSnapshot
 
 
+@dataclass(frozen=True)
+class ClientStageLease:
+    """Opaque lease returned by ``begin_client_stage`` (plan §6.1).
+
+    The ``lease_token`` proves exclusive ownership of one (Job, stage) attempt
+    to ``update_client_stage_progress`` / ``submit_client_stage``; it is never
+    written to Job events. ``snapshot`` is the Job state at begin time so the
+    client can plan the stage without an extra round trip.
+    """
+
+    job_id: str
+    stage: str
+    stage_attempt: int
+    lease_token: str
+    expires_at: datetime
+    snapshot: JobSnapshot
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "jobId": self.job_id,
+            "stage": self.stage,
+            "stageAttempt": self.stage_attempt,
+            "leaseToken": self.lease_token,
+            "leaseExpiresAt": self.expires_at.isoformat().replace("+00:00", "Z"),
+            "lastSequence": self.snapshot.last_sequence,
+            "job": self.snapshot.to_wire(),
+        }
+
+    @classmethod
+    def from_wire(cls, data: dict[str, Any]) -> "ClientStageLease":
+        expires_raw = data["leaseExpiresAt"]
+        expires = datetime.fromisoformat(expires_raw.replace("Z", "+00:00"))
+        return cls(
+            job_id=data["jobId"],
+            stage=data["stage"],
+            stage_attempt=int(data["stageAttempt"]),
+            lease_token=data["leaseToken"],
+            expires_at=expires,
+            snapshot=JobSnapshot.model_validate(data["job"]),
+        )
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def client_stage_only_enabled() -> bool:
+    """Whether CI is in client-stage-only mode (plan §13).
+
+    When set, the legacy Worker must not claim or advance Jobs: every stage is
+    driven by the client Agent through ``begin/update/submit_client_stage``.
+    A Job stays ``QUEUED`` after creation until the client begins its first
+    stage.
+
+    Parsing is allow-list and fail-closed: any value other than ``1``/``true``/
+    ``yes``/``on`` (case-insensitive, trimmed) — including unset, empty, ``0``,
+    or a typo — disables the mode. An accidental unknown value therefore cannot
+    leave a deployment half-locked.
+    """
+    return os.environ.get("OPENMONTAGE_CLIENT_STAGE_ONLY", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _reject_legacy_mutation_in_client_stage_only() -> None:
+    """Fence off the legacy Worker mutation surface in client-stage-only mode.
+
+    ``claim_job`` returns ``None`` instead (that is the Worker's "no work"
+    signal, not an error); every other legacy mutation — heartbeat, release,
+    start/complete, progress, approval, fail, confirm — raises, so a stale
+    Worker or a direct service call cannot advance a Job outside the client
+    Stage API.
+    """
+    if client_stage_only_enabled():
+        raise JobStateError(
+            "client-stage-only mode is enabled; Jobs are advanced exclusively by "
+            "the client Stage API (begin/update/submit_client_stage), not the "
+            "legacy Worker"
+        )
+
+
+def _validate_client_idempotency_key(idempotency_key: str) -> None:
+    """Require a non-empty string idempotency key ≤256 chars (plan §8.1).
+
+    A missing/empty key makes ``_command_hash`` return ``None``, which silently
+    skips the idempotency record and lets a retry duplicate a checkpoint write
+    or a state advance. Reject it with a stable ``IDEMPOTENCY_CONFLICT`` code
+    instead of failing open. The MCP tool layer already guards this; this is
+    the service-layer gate so a direct call cannot bypass it.
+    """
+    if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+        raise ClientStageError(
+            "IDEMPOTENCY_CONFLICT", "idempotency_key must be a non-empty string"
+        )
+    if len(idempotency_key) > 256:
+        raise ClientStageError(
+            "IDEMPOTENCY_CONFLICT", "idempotency_key must be at most 256 characters"
+        )
 
 
 def _parse_lease_expiry(raw: str | None) -> datetime | None:
@@ -206,9 +319,13 @@ def _validate_artifact_input(request: JobCreateRequest) -> None:
 
 
 class JobService:
-    def __init__(self, database_path: str | Path):
+    def __init__(self, database_path: str | Path, *, projects_dir: str | Path | None = None):
         self.database_path = Path(database_path)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        # Root under which client-stage checkpoints and project workspaces are
+        # written (projects/<job_id>/...). Defaults to the canonical projects
+        # root; tests pass a tmp directory.
+        self.projects_dir = Path(projects_dir).expanduser().resolve() if projects_dir is not None else PROJECTS_DIR
         self._initialize_schema()
 
     def _connect(self) -> sqlite3.Connection:
@@ -278,6 +395,24 @@ class JobService:
 
                 CREATE INDEX IF NOT EXISTS idx_openmontage_job_execution_claim
                     ON openmontage_job_execution(lease_expires_at, next_attempt_at);
+
+                CREATE TABLE IF NOT EXISTS openmontage_client_stage_lease (
+                    job_id TEXT NOT NULL REFERENCES openmontage_job(job_id) ON DELETE CASCADE,
+                    stage TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    stage_attempt INTEGER NOT NULL,
+                    lease_token TEXT NOT NULL,
+                    response_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (job_id, stage, idempotency_key)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_openmontage_client_stage_lease_active
+                    ON openmontage_client_stage_lease(job_id, stage, status);
                 """
             )
             columns = {
@@ -411,6 +546,11 @@ class JobService:
         lease_duration: timedelta,
         now: datetime | None = None,
     ) -> JobLease | None:
+        if client_stage_only_enabled():
+            # CI-only mode (plan §13): the legacy Worker is disabled. Report no
+            # claimable work so run_once stays idle and never advances a stage
+            # that the client Stage API owns.
+            return None
         normalized_worker_id = worker_id.strip()
         if not normalized_worker_id or len(normalized_worker_id) > 256:
             raise JobLeaseError("worker_id must be between 1 and 256 characters")
@@ -505,6 +645,7 @@ class JobService:
         lease_duration: timedelta,
         now: datetime | None = None,
     ) -> JobLease:
+        _reject_legacy_mutation_in_client_stage_only()
         if lease_duration <= timedelta(0):
             raise JobLeaseError("lease_duration must be greater than zero")
         with self._connect() as connection:
@@ -546,6 +687,7 @@ class JobService:
         reset_attempts: bool = False,
         now: datetime | None = None,
     ) -> None:
+        _reject_legacy_mutation_in_client_stage_only()
         _, retry_at = _resolve_release_retry(
             now=now, retry_at=retry_at, retry_delay=retry_delay
         )
@@ -581,6 +723,7 @@ class JobService:
         reset_attempts: bool = False,
         now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         _, retry_at = _resolve_release_retry(
             now=now, retry_at=retry_at, retry_delay=retry_delay
         )
@@ -636,6 +779,7 @@ class JobService:
         lease_token: str | None = None,
         lease_now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=False)
@@ -839,6 +983,7 @@ class JobService:
         lease_token: str | None = None,
         lease_now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now)
@@ -853,6 +998,7 @@ class JobService:
         lease_token: str,
         now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             effective_now = _normalize_now(now)
@@ -879,6 +1025,7 @@ class JobService:
         lease_token: str | None = None,
         lease_now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=False)
@@ -893,6 +1040,7 @@ class JobService:
         lease_token: str,
         now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             effective_now = _normalize_now(now)
@@ -927,6 +1075,7 @@ class JobService:
         lease_token: str | None = None,
         lease_now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         if total_units <= 0:
             raise JobStateError("total_units must be greater than zero")
         if completed_units < 0 or completed_units > total_units:
@@ -953,6 +1102,732 @@ class JobService:
                 {**self._stage_payload(stage), "progress": stage.progress},
             )
 
+    # ------------------------------------------------------------------
+    # Client-driven stage execution (plan §6-§8)
+    #
+    # The client Agent owns the cognitive work of each stage. It begins a
+    # stage (exclusive lease + attempt), reports progress, and submits the
+    # stage result — artifacts, checkpoint and status — in a single business
+    # operation. The server owns validation, checkpoint writing, Job state
+    # transitions and the event log. No Worker/DSH executor is involved.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _client_lease_duration(lease_duration: timedelta | None) -> timedelta:
+        if lease_duration is not None:
+            if lease_duration <= timedelta(0):
+                raise ClientStageError(
+                    "STAGE_LEASE_INVALID", "lease_duration must be greater than zero"
+                )
+            return lease_duration
+        raw = os.environ.get("OPENMONTAGE_CLIENT_STAGE_LEASE_SECONDS", "1800").strip()
+        try:
+            seconds = float(raw)
+        except ValueError:
+            seconds = 1800.0
+        if seconds <= 0:
+            seconds = 1800.0
+        return timedelta(seconds=seconds)
+
+    @staticmethod
+    def _fetch_active_client_lease(
+        connection: sqlite3.Connection,
+        job_id: str,
+        stage: str,
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT idempotency_key, stage_attempt, lease_token, expires_at
+            FROM openmontage_client_stage_lease
+            WHERE job_id = ? AND stage = ? AND status = 'active'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (job_id, stage),
+        ).fetchone()
+
+    @staticmethod
+    def _release_client_lease(
+        connection: sqlite3.Connection,
+        job_id: str,
+        stage: str,
+        lease_token: str,
+        *,
+        now: datetime,
+    ) -> None:
+        connection.execute(
+            """
+            UPDATE openmontage_client_stage_lease
+            SET status = 'released', updated_at = ?
+            WHERE job_id = ? AND stage = ? AND lease_token = ? AND status = 'active'
+            """,
+            (now.isoformat(), job_id, stage, lease_token),
+        )
+
+    @classmethod
+    def _require_client_lease(
+        cls,
+        connection: sqlite3.Connection,
+        job_id: str,
+        stage: str,
+        lease_token: str,
+        stage_attempt: int,
+        now: datetime,
+        *,
+        fencing: bool,
+    ) -> sqlite3.Row:
+        """Require the caller to own the current (Job, stage) lease.
+
+        ``fencing=False`` (progress heartbeats) additionally requires the lease
+        to be unexpired; ``fencing=True`` (submit/settle) only requires the
+        token to be current, mirroring the Worker settlement contract — a lease
+        that lapsed mid-flight may still settle as long as nobody re-began the
+        stage (a re-begin mints a fresh token, which fences the stale one).
+        """
+        now = _normalize_now(now)
+        if not lease_token or not lease_token.strip():
+            raise ClientStageError("STAGE_LEASE_INVALID", "lease_token must be non-empty")
+        row = cls._fetch_active_client_lease(connection, job_id, stage)
+        if row is None:
+            raise ClientStageError(
+                "STAGE_LEASE_INVALID",
+                f"no active client lease for stage {stage!r}; call begin_client_stage first",
+            )
+        if row["lease_token"] != lease_token:
+            raise ClientStageError(
+                "STAGE_LEASE_INVALID",
+                f"client lease token for stage {stage!r} is no longer current",
+            )
+        if int(row["stage_attempt"]) != stage_attempt:
+            raise ClientStageError(
+                "STAGE_ATTEMPT_MISMATCH",
+                f"stage_attempt {stage_attempt} does not match the active lease "
+                f"attempt {int(row['stage_attempt'])}",
+            )
+        if not fencing:
+            expires_at = _parse_lease_expiry(row["expires_at"])
+            if expires_at is None:
+                raise ClientStageError(
+                    "STAGE_LEASE_INVALID", "client lease has no valid expiry"
+                )
+            if expires_at <= now:
+                raise ClientStageError(
+                    "STAGE_LEASE_EXPIRED",
+                    f"client lease for stage {stage!r} has expired; re-begin the stage",
+                )
+        return row
+
+    @staticmethod
+    def _renew_client_lease(
+        connection: sqlite3.Connection,
+        job_id: str,
+        stage: str,
+        lease_token: str,
+        *,
+        expires_at: datetime,
+        now: datetime,
+    ) -> None:
+        connection.execute(
+            """
+            UPDATE openmontage_client_stage_lease
+            SET expires_at = ?, updated_at = ?
+            WHERE job_id = ? AND stage = ? AND lease_token = ? AND status = 'active'
+            """,
+            (expires_at.isoformat(), now.isoformat(), job_id, stage, lease_token),
+        )
+
+    def begin_client_stage(
+        self,
+        job_id: str,
+        stage_code: str,
+        *,
+        idempotency_key: str,
+        expected_sequence: int | None = None,
+        lease_duration: timedelta | None = None,
+        now: datetime | None = None,
+    ) -> ClientStageLease:
+        """Begin exclusive client execution of one stage (plan §6.1).
+
+        Validates the workflow/stage, predecessor completion, Job state,
+        sequence fencing and concurrency, then marks the stage RUNNING, mints
+        an opaque lease, and records the ``client_stage.started`` event.
+        Idempotent on ``idempotency_key``: a replay with identical arguments
+        returns the original response; different arguments are rejected with
+        ``IDEMPOTENCY_CONFLICT``.
+        """
+        _validate_client_idempotency_key(idempotency_key)
+        duration = self._client_lease_duration(lease_duration)
+        request_hash = hashlib.sha256(
+            _canonical_json(
+                {
+                    "command": "begin_client_stage",
+                    "stage": stage_code,
+                    "expectedSequence": expected_sequence,
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+
+        # A cancel confirmation must survive a raise: the with-block rolls back
+        # on exception, so confirm the cancel (persisting CANCELLED) and only
+        # then surface the error once the transaction has committed.
+        cancelled = False
+
+        with self._connect() as connection:
+            self._begin_write(connection)
+            effective_now = _normalize_now(now)
+
+            replay = connection.execute(
+                """
+                SELECT request_hash, response_json
+                FROM openmontage_client_stage_lease
+                WHERE job_id = ? AND stage = ? AND idempotency_key = ?
+                """,
+                (job_id, stage_code, idempotency_key),
+            ).fetchone()
+            if replay is not None:
+                if replay["request_hash"] != request_hash:
+                    raise ClientStageError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "idempotency_key was already used for a different begin_client_stage request",
+                    )
+                return ClientStageLease.from_wire(json.loads(replay["response_json"]))
+
+            snapshot = self._load_job(connection, job_id).model_copy(deep=True)
+            self._require_expected_sequence(snapshot, expected_sequence)
+            if snapshot.status == JobStatus.CANCEL_REQUESTED:
+                self._confirm_cancel_snapshot(connection, snapshot)
+                cancelled = True
+
+            if not cancelled:
+                stage_index, stage = self._stage(snapshot, stage_code)
+
+                active = self._fetch_active_client_lease(connection, job_id, stage_code)
+                if active is not None:
+                    expiry = _parse_lease_expiry(active["expires_at"])
+                    if expiry is not None and expiry > effective_now:
+                        raise ClientStageError(
+                            "STAGE_ALREADY_OWNED",
+                            f"stage {stage!r} already has an active client lease until "
+                            f"{expiry.isoformat()}",
+                        )
+                    # Expired/corrupt lease: supersede it so the stage can resume.
+                    connection.execute(
+                        """
+                        UPDATE openmontage_client_stage_lease
+                        SET status = 'released', updated_at = ?
+                        WHERE job_id = ? AND stage = ? AND status = 'active'
+                        """,
+                        (effective_now.isoformat(), job_id, stage_code),
+                    )
+
+                incomplete = [
+                    predecessor.code
+                    for predecessor in snapshot.stages[:stage_index]
+                    if predecessor.status not in {StageStatus.SUCCEEDED, StageStatus.SKIPPED}
+                ]
+                if incomplete:
+                    raise ClientStageError(
+                        "STAGE_STATE_INVALID",
+                        f"stage {stage_code!r} has incomplete predecessor stages: {incomplete}",
+                    )
+                if snapshot.status == JobStatus.QUEUED:
+                    validate_job_transition(JobStatus.QUEUED, JobStatus.RUNNING)
+                    snapshot.status = JobStatus.RUNNING
+                elif snapshot.status != JobStatus.RUNNING:
+                    raise ClientStageError(
+                        "STAGE_STATE_INVALID",
+                        f"cannot begin a client stage while Job is {snapshot.status}",
+                    )
+                if stage.status == StageStatus.PENDING:
+                    self._validate_stage(stage.status, StageStatus.RUNNING)
+                elif stage.status == StageStatus.RUNNING:
+                    # Resume after a lost/expired lease: same stage, new attempt.
+                    pass
+                else:
+                    raise ClientStageError(
+                        "STAGE_STATE_INVALID",
+                        f"stage {stage_code!r} is {stage.status} and cannot be begun",
+                    )
+
+                stage.status = StageStatus.RUNNING
+                stage.attempt += 1
+                stage.started_at = effective_now
+                stage.completed_at = None
+                snapshot.current_stage = stage_code
+
+                expires_at = effective_now + duration
+                lease_token = f"om_clease_{uuid4().hex}"
+                snapshot = self._persist_event(
+                    connection,
+                    snapshot,
+                    JobEventType.CLIENT_STAGE_STARTED,
+                    {
+                        **self._stage_payload(stage),
+                        "leaseExpiresAt": expires_at.isoformat().replace("+00:00", "Z"),
+                    },
+                )
+
+                lease = ClientStageLease(
+                    job_id=job_id,
+                    stage=stage_code,
+                    stage_attempt=stage.attempt,
+                    lease_token=lease_token,
+                    expires_at=expires_at,
+                    snapshot=snapshot,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO openmontage_client_stage_lease (
+                        job_id, stage, idempotency_key, request_hash, stage_attempt,
+                        lease_token, response_json, status, expires_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+                    """,
+                    (
+                        job_id,
+                        stage_code,
+                        idempotency_key,
+                        request_hash,
+                        stage.attempt,
+                        lease_token,
+                        _canonical_json(lease.to_wire()),
+                        expires_at.isoformat(),
+                        effective_now.isoformat(),
+                        effective_now.isoformat(),
+                    ),
+                )
+
+        # A cancelled Job cannot begin a stage: the cancel confirmation has
+        # committed above; surface the error only now that the transaction is
+        # closed so it is not rolled back.
+        if cancelled:
+            raise ClientStageError("JOB_CANCELLED", f"Job {job_id} has been cancelled")
+
+        # Project workspace on disk (checkpoint home + Backlot marker). This
+        # is filesystem I/O, kept outside the SQLite write transaction.
+        from lib.checkpoint import init_project
+
+        init_project(
+            job_id,
+            title=str(snapshot.request.brief.get("title") or job_id),
+            pipeline_type=snapshot.workflow.name,
+            pipeline_dir=self.projects_dir,
+        )
+        return lease
+
+    def update_client_stage_progress(
+        self,
+        job_id: str,
+        stage_code: str,
+        *,
+        stage_attempt: int,
+        completed_units: int,
+        total_units: int,
+        label_code: str,
+        lease_token: str,
+        idempotency_key: str,
+        lease_duration: timedelta | None = None,
+        now: datetime | None = None,
+    ) -> JobSnapshot:
+        """Report client progress for a running stage and renew the lease.
+
+        Validates the lease (token + attempt + expiry), updates the stage
+        progress payload, renews the lease, and records the
+        ``client_stage.progressed`` event. Replays of the same
+        ``idempotency_key`` return the original snapshot.
+        """
+        _validate_client_idempotency_key(idempotency_key)
+        if total_units <= 0:
+            raise ClientStageError("STAGE_STATE_INVALID", "total_units must be greater than zero")
+        if completed_units < 0 or completed_units > total_units:
+            raise ClientStageError(
+                "STAGE_STATE_INVALID", "completed_units must be between zero and total_units"
+            )
+        if not label_code.strip():
+            raise ClientStageError("STAGE_STATE_INVALID", "label_code must not be empty")
+        duration = self._client_lease_duration(lease_duration)
+
+        with self._connect() as connection:
+            self._begin_write(connection)
+            effective_now = _normalize_now(now)
+            command_hash = self._command_hash(
+                idempotency_key,
+                {
+                    "command": "update_client_stage_progress",
+                    "stage": stage_code,
+                    "stageAttempt": stage_attempt,
+                    "completedUnits": completed_units,
+                    "totalUnits": total_units,
+                    "labelCode": label_code,
+                },
+            )
+            replay = self._read_client_command_result(connection, job_id, idempotency_key, command_hash)
+            if replay is not None:
+                return replay
+            self._require_client_lease(
+                connection, job_id, stage_code, lease_token, stage_attempt,
+                effective_now, fencing=False,
+            )
+            self._renew_client_lease(
+                connection, job_id, stage_code, lease_token,
+                expires_at=effective_now + duration, now=effective_now,
+            )
+            snapshot = self._load_job(connection, job_id).model_copy(deep=True)
+            _, stage = self._stage(snapshot, stage_code)
+            if stage.status != StageStatus.RUNNING:
+                raise ClientStageError(
+                    "STAGE_STATE_INVALID", f"stage {stage_code!r} is not running"
+                )
+            stage.progress = {
+                "completedUnits": completed_units,
+                "totalUnits": total_units,
+                "labelCode": label_code,
+            }
+            snapshot = self._persist_event(
+                connection,
+                snapshot,
+                JobEventType.CLIENT_STAGE_PROGRESSED,
+                {**self._stage_payload(stage), "progress": stage.progress},
+            )
+            self._record_command_result(connection, snapshot, idempotency_key, command_hash)
+            return snapshot
+
+    @staticmethod
+    def _validate_client_submit_stage(
+        snapshot: JobSnapshot,
+        stage_code: str,
+        stage_attempt: int,
+        status: str,
+    ) -> tuple[int, StageSnapshot]:
+        """Shared validation for a client stage submission.
+
+        Returns the (index, stage) of the target stage. Raises
+        ``ClientStageError`` on a non-running stage, an attempt mismatch, or an
+        approval-rule violation. Does NOT handle ``CANCEL_REQUESTED`` — the
+        caller confirms the cancel first.
+        """
+        stage_index, stage = JobService._stage(snapshot, stage_code)
+        if stage.status != StageStatus.RUNNING:
+            raise ClientStageError(
+                "STAGE_STATE_INVALID",
+                f"stage {stage_code!r} is {stage.status}, not RUNNING",
+            )
+        if stage.attempt != stage_attempt:
+            raise ClientStageError(
+                "STAGE_ATTEMPT_MISMATCH",
+                f"stage_attempt {stage_attempt} does not match the current "
+                f"stage attempt {stage.attempt}",
+            )
+        if (
+            status == "completed"
+            and stage.approval_required
+            and stage.approval_status != ApprovalStatus.APPROVED
+        ):
+            raise ClientStageError(
+                "HUMAN_APPROVAL_REQUIRED",
+                f"stage {stage_code!r} requires human approval: submit "
+                "awaiting_human first and wait for approve_video_stage",
+            )
+        if status == "awaiting_human" and not stage.approval_required:
+            raise ClientStageError(
+                "STAGE_STATE_INVALID",
+                f"stage {stage_code!r} does not require human approval",
+            )
+        return stage_index, stage
+
+    def _archive_stage_checkpoint(self, job_id: str, stage_code: str) -> None:
+        """Move a just-written checkpoint into ``history/`` after a cancel.
+
+        ``submit_client_stage`` writes the checkpoint to disk *before* the
+        state transition (outside the SQLite transaction). If the transition
+        then confirms a cancellation, the on-disk checkpoint no longer matches
+        the CANCELLED Job. Moving it aside to ``history/`` keeps the project
+        directory consistent instead of leaving an ``in_progress``/``completed``
+        checkpoint for a Job that is CANCELLED.
+        """
+        path = self.projects_dir / job_id / f"checkpoint_{stage_code}.json"
+        if not path.exists():
+            return
+        try:
+            import shutil
+
+            history_dir = path.parent / "history"
+            history_dir.mkdir(parents=True, exist_ok=True)
+            target = history_dir / (
+                f"checkpoint_{stage_code}_cancelled_{path.stat().st_mtime_ns}.json"
+            )
+            shutil.move(str(path), str(target))
+        except OSError:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Could not archive cancelled checkpoint %s", path
+            )
+
+    def submit_client_stage(
+        self,
+        job_id: str,
+        stage_code: str,
+        *,
+        stage_attempt: int,
+        status: str,
+        lease_token: str,
+        idempotency_key: str,
+        artifacts: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        instruction_provenance: Any = None,
+        lease_duration: timedelta | None = None,
+        now: datetime | None = None,
+    ) -> JobSnapshot:
+        """Submit the result of a client-driven stage in one business operation.
+
+        Validates lease/stage/attempt, artifact and checkpoint schemas,
+        predecessor and approval rules, media references and instruction
+        provenance; writes the standard checkpoint under
+        ``projects/<job_id>/``; records the Job event; advances the Job state;
+        and releases (or, for ``in_progress``, renews) the lease. Returns the
+        latest Job snapshot. Idempotent on ``idempotency_key``.
+
+        ``idempotency_key`` must be unique per Job *within the submit/update/
+        approve/cancel namespace* (these share the ``openmontage_job_command``
+        table keyed by ``(job_id, idempotency_key)``) — reuse within that
+        namespace with different arguments returns ``IDEMPOTENCY_CONFLICT``.
+        ``begin_client_stage`` uses a separate lease table keyed by
+        ``(job_id, stage, idempotency_key)``, so a begin key never collides
+        with a submit key; still, a distinct key per operation is the cleanest
+        contract (the client driver suffixes ``:begin`` / ``:submit`` for this
+        reason).
+        ``instruction_provenance`` is advisory audit metadata (what the client
+        read); when supplied it is verified against the live CI repository
+        before any state change, but it is not itself a hard gate.
+        """
+        _validate_client_idempotency_key(idempotency_key)
+        allowed_statuses = {"completed", "awaiting_human", "failed", "in_progress"}
+        if status not in allowed_statuses:
+            raise ClientStageError(
+                "STAGE_STATE_INVALID",
+                f"status must be one of {sorted(allowed_statuses)}, got {status!r}",
+            )
+        if artifacts is not None and not isinstance(artifacts, dict):
+            raise ClientStageError("ARTIFACT_SCHEMA_INVALID", "artifacts must be an object")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ClientStageError("ARTIFACT_SCHEMA_INVALID", "metadata must be an object")
+        artifacts = artifacts or {}
+        duration = self._client_lease_duration(lease_duration)
+
+        command_hash = self._command_hash(
+            idempotency_key,
+            {
+                "command": "submit_client_stage",
+                "stage": stage_code,
+                "stageAttempt": stage_attempt,
+                "status": status,
+                "artifacts": artifacts,
+                "metadata": metadata,
+                "instructionProvenance": instruction_provenance,
+            },
+        )
+
+        # Idempotency replay is checked first, before any disk write, so a
+        # retry never re-writes a checkpoint or re-archives it.
+        with self._connect() as connection:
+            replay = self._read_client_command_result(
+                connection, job_id, idempotency_key, command_hash
+            )
+        if replay is not None:
+            return replay
+
+        # Instruction provenance is verified against the live CI repository
+        # before any state changes (plan §14: events record what the client
+        # actually read).
+        provenance_entries: list[dict[str, str]] = []
+        if instruction_provenance is not None:
+            from openmontage.instruction_files import (
+                InstructionFileError,
+                verify_instruction_provenance,
+            )
+
+            try:
+                provenance_entries = verify_instruction_provenance(instruction_provenance)
+            except InstructionFileError as exc:
+                raise ClientStageError(exc.code, f"instruction provenance rejected: {exc}") from exc
+
+        # Media references are validated against the CI project directory;
+        # completed/awaiting submissions must reference files that exist.
+        from openmontage.media_references import (
+            MediaReferenceError,
+            validate_media_references,
+        )
+
+        require_exists = status in {"completed", "awaiting_human"}
+        try:
+            media_paths = validate_media_references(
+                artifacts, self.projects_dir / job_id, require_exists=require_exists
+            )
+        except MediaReferenceError as exc:
+            raise ClientStageError("MEDIA_REFERENCE_INVALID", str(exc)) from exc
+
+        # Lease ownership is the first gate: without a current lease the client
+        # must not write anything. It is checked read-only here, before the
+        # checkpoint write, and re-checked inside the write transaction below.
+        effective_now = _normalize_now(now)
+        with self._connect() as connection:
+            self._require_client_lease(
+                connection, job_id, stage_code, lease_token, stage_attempt,
+                effective_now, fencing=True,
+            )
+
+        # Stage / approval validation and the checkpoint write happen outside
+        # the SQLite write transaction. The disk checkpoint must never be
+        # written while holding ``BEGIN IMMEDIATE`` (slow filesystem I/O), and
+        # must not be rolled back by a later state-transition failure: if the
+        # transition fails after the checkpoint is written, the Job stays
+        # RUNNING in SQLite (authoritative) and a re-begin reconciles by
+        # archiving the superseded checkpoint (plan §8.3).
+        snapshot = self.get_job(job_id)
+        if snapshot.status != JobStatus.CANCEL_REQUESTED:
+            _, stage = self._validate_client_submit_stage(
+                snapshot, stage_code, stage_attempt, status
+            )
+            from lib.checkpoint import CheckpointValidationError, write_checkpoint
+
+            checkpoint_metadata = {
+                **(metadata or {}),
+                "stage_attempt": stage_attempt,
+                "instruction_provenance": provenance_entries,
+                "media_references": media_paths,
+            }
+            try:
+                write_checkpoint(
+                    self.projects_dir,
+                    job_id,
+                    stage_code,
+                    status,
+                    artifacts,
+                    pipeline_type=snapshot.workflow.name,
+                    human_approval_required=stage.approval_required,
+                    human_approved=stage.approval_status == ApprovalStatus.APPROVED,
+                    error=(metadata or {}).get("error") if status == "failed" else None,
+                    metadata=checkpoint_metadata,
+                )
+            except CheckpointValidationError as exc:
+                raise ClientStageError("ARTIFACT_SCHEMA_INVALID", str(exc)) from exc
+            except OSError as exc:
+                raise ClientStageError(
+                    "CHECKPOINT_WRITE_FAILED", f"checkpoint could not be written: {exc}"
+                ) from exc
+
+        with self._connect() as connection:
+            self._begin_write(connection)
+            self._require_client_lease(
+                connection, job_id, stage_code, lease_token, stage_attempt,
+                effective_now, fencing=True,
+            )
+            snapshot = self._load_job(connection, job_id).model_copy(deep=True)
+            if snapshot.status == JobStatus.CANCEL_REQUESTED:
+                snapshot = self._confirm_cancel_snapshot(connection, snapshot)
+                self._release_client_lease(
+                    connection, job_id, stage_code, lease_token, now=effective_now
+                )
+                # The checkpoint was written to disk before this transaction.
+                # The Job is now CANCELLED; archive the just-written checkpoint
+                # so on-disk state cannot claim a stage advanced that the Job
+                # no longer reflects (review P1: cancel/checkpoint race).
+                self._archive_stage_checkpoint(job_id, stage_code)
+                self._record_command_result(connection, snapshot, idempotency_key, command_hash)
+                return snapshot
+
+            # Re-validate inside the transaction against the freshly loaded
+            # snapshot; the lease guarantees no concurrent owner, so this is
+            # defense-in-depth against a state change between the checkpoint
+            # write and the transition.
+            _, stage = self._validate_client_submit_stage(
+                snapshot, stage_code, stage_attempt, status
+            )
+
+            def stage_event_payload() -> dict[str, Any]:
+                # Built lazily at persist time so the payload reflects the
+                # stage status after the transition, not before it.
+                return {
+                    **self._stage_payload(stage),
+                    "instructionProvenance": provenance_entries,
+                }
+
+            if status == "in_progress":
+                # Heartbeat: keep the stage RUNNING, renew the lease, record
+                # the checkpoint write so a reconnecting client can resume
+                # from metadata.partial_progress.
+                self._renew_client_lease(
+                    connection, job_id, stage_code, lease_token,
+                    expires_at=effective_now + duration, now=effective_now,
+                )
+                payload = stage_event_payload()
+                if isinstance((metadata or {}).get("partial_progress"), dict):
+                    payload["progress"] = (metadata or {})["partial_progress"]
+                snapshot = self._persist_event(
+                    connection, snapshot, JobEventType.CLIENT_STAGE_CHECKPOINTED, payload
+                )
+            elif status == "completed":
+                self._validate_stage(stage.status, StageStatus.SUCCEEDED)
+                stage.status = StageStatus.SUCCEEDED
+                stage.completed_at = effective_now
+                snapshot.current_stage = None
+                snapshot = self._persist_event(
+                    connection, snapshot, JobEventType.CLIENT_STAGE_COMPLETED, stage_event_payload()
+                )
+                self._release_client_lease(
+                    connection, job_id, stage_code, lease_token, now=effective_now
+                )
+                if all(
+                    item.status in {StageStatus.SUCCEEDED, StageStatus.SKIPPED}
+                    for item in snapshot.stages
+                ):
+                    snapshot = self._complete_job_snapshot(connection, snapshot)
+            elif status == "awaiting_human":
+                self._validate_stage(stage.status, StageStatus.WAITING_APPROVAL)
+                try:
+                    validate_job_transition(snapshot.status, JobStatus.WAITING_APPROVAL)
+                except ValueError as exc:
+                    raise ClientStageError("STAGE_STATE_INVALID", str(exc)) from exc
+                stage.status = StageStatus.WAITING_APPROVAL
+                stage.approval_status = ApprovalStatus.PENDING
+                snapshot.status = JobStatus.WAITING_APPROVAL
+                snapshot.current_stage = None
+                snapshot = self._persist_event(
+                    connection,
+                    snapshot,
+                    JobEventType.CLIENT_STAGE_AWAITING_APPROVAL,
+                    stage_event_payload(),
+                )
+                self._release_client_lease(
+                    connection, job_id, stage_code, lease_token, now=effective_now
+                )
+            else:  # failed
+                error_message = str((metadata or {}).get("error") or "client stage failed")
+                error_code = str(
+                    (metadata or {}).get("error_code") or "OPENMONTAGE_CLIENT_STAGE_FAILED"
+                )
+                self._validate_stage(stage.status, StageStatus.FAILED)
+                stage.status = StageStatus.FAILED
+                stage.completed_at = effective_now
+                failed_payload = stage_event_payload()
+                failed_payload["error"] = {"code": error_code, "message": error_message[:500]}
+                snapshot = self._persist_event(
+                    connection, snapshot, JobEventType.CLIENT_STAGE_FAILED, failed_payload
+                )
+                snapshot = self._fail_job_snapshot(
+                    connection,
+                    snapshot,
+                    code=error_code,
+                    message=error_message,
+                    retryable=bool((metadata or {}).get("retryable", False)),
+                )
+                self._release_client_lease(
+                    connection, job_id, stage_code, lease_token, now=effective_now
+                )
+
+            self._record_command_result(connection, snapshot, idempotency_key, command_hash)
+            return snapshot
+
     def request_stage_approval(
         self,
         job_id: str,
@@ -962,6 +1837,7 @@ class JobService:
         lease_token: str | None = None,
         lease_now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=False)
@@ -982,6 +1858,7 @@ class JobService:
         lease_token: str,
         now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             effective_now = _normalize_now(now)
@@ -1085,6 +1962,7 @@ class JobService:
         lease_token: str | None = None,
         lease_now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         self._validate_job_failure(code, message)
 
         with self._connect() as connection:
@@ -1109,6 +1987,7 @@ class JobService:
         lease_token: str,
         now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         self._validate_job_failure(code, message)
         with self._connect() as connection:
             self._begin_write(connection)
@@ -1181,6 +2060,7 @@ class JobService:
         lease_token: str | None = None,
         lease_now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=False)
@@ -1194,6 +2074,7 @@ class JobService:
         lease_token: str | None = None,
         lease_now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             self._require_lease_if_present(connection, job_id, lease_token, lease_now, fencing=False)
@@ -1208,6 +2089,7 @@ class JobService:
         lease_token: str,
         now: datetime | None = None,
     ) -> JobSnapshot:
+        _reject_legacy_mutation_in_client_stage_only()
         with self._connect() as connection:
             self._begin_write(connection)
             effective_now = _normalize_now(now)
@@ -1633,6 +2515,21 @@ class JobService:
                 "idempotency_key was already used for a different Job command"
             )
         return JobSnapshot.model_validate_json(row["snapshot_json"])
+
+    def _read_client_command_result(
+        self,
+        connection: sqlite3.Connection,
+        job_id: str,
+        idempotency_key: str | None,
+        command_hash: str | None,
+    ) -> JobSnapshot | None:
+        """Read a prior client-stage command result, translating the generic
+        idempotency conflict into the client-stage ``IDEMPOTENCY_CONFLICT``
+        code the client Agent branches on."""
+        try:
+            return self._read_command_result(connection, job_id, idempotency_key, command_hash)
+        except JobConflictError as exc:
+            raise ClientStageError("IDEMPOTENCY_CONFLICT", str(exc)) from exc
 
     @staticmethod
     def _record_command_result(

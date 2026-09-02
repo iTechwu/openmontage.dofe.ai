@@ -168,6 +168,12 @@ def _instrument_execute(fn: Callable) -> Callable:
 
     @functools.wraps(fn)
     def wrapper(self, inputs: Any, *args: Any, **kwargs: Any):
+        from tools.dofe.config import model_api_policy_error
+
+        policy_error = model_api_policy_error(self)
+        if policy_error is not None:
+            return ToolResult(success=False, error=policy_error)
+
         # Event layer is fully optional: if it can't import, run untouched.
         try:
             from lib.events import emit_event, infer_project_dir
@@ -460,6 +466,21 @@ class BaseTool(ABC):
         approve a creative prompt, or decide whether a continuity deviation is
         acceptable; those remain agent/reviewer responsibilities.
         """
+        from tools.dofe.config import model_api_policy_error
+
+        policy_error = model_api_policy_error(self)
+        if policy_error is not None:
+            return {
+                "status": "blocked",
+                "verification_level": "declared_tool_contract",
+                "tool": self.name,
+                "provider": self.provider,
+                "tool_version": self.version,
+                "tool_status": self.get_status().value,
+                "errors": [{"path": "policy", "message": policy_error}],
+                "warnings": [],
+            }
+
         from jsonschema import Draft202012Validator
 
         schema = self.input_schema or {"type": "object"}

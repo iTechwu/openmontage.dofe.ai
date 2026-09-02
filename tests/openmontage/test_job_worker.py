@@ -24,6 +24,7 @@ from openmontage.contracts import (
 )
 from openmontage.job_service import JobLeaseError, JobService
 from openmontage.job_worker import JobWorker
+from openmontage.mcp_gateway_auth import gateway_attribution
 from openmontage.model_credential_bridge import ModelCredentialBridgeError
 from openmontage.pipeline_executor import (
     PipelineExecutionCancelled,
@@ -48,6 +49,21 @@ def _attribution() -> JobAttribution:
         source_invocation_id="invocation-worker",
         trace_id="trace-worker",
     )
+
+
+def _gateway_attribution(monkeypatch: pytest.MonkeyPatch) -> JobAttribution:
+    monkeypatch.setenv("OPENMONTAGE_MCP_GATEWAY_SECRET", "gateway-secret")
+    attribution = gateway_attribution({
+        "Authorization": "Bearer sk-models-user",
+        "X-Dofe-Mcp-Gateway-Secret": "gateway-secret",
+        "X-Dofe-Auth-Verified": "models-api-key-v1",
+        "X-Dofe-Api-Key-Id": "key-worker",
+        "X-Dofe-Tenant-Id": "tenant-worker",
+        "X-Dofe-Sso-Team-Id": "team-worker",
+        "X-Request-Id": "request-worker",
+    })
+    assert attribution is not None
+    return attribution
 
 
 def _request(*, request_id: str, workflow: str = "animated-explainer") -> JobCreateRequest:
@@ -323,6 +339,34 @@ def test_worker_fetches_and_scopes_a_delegated_model_credential_per_stage(tmp_pa
     }]
     assert executor.credentials[0] is not None
     assert executor.credentials[0].pipeline_stage == "research"
+
+
+def test_worker_executes_gateway_job_without_per_job_credential_bridge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = JobService(tmp_path / "jobs.sqlite3")
+    job = service.create_job(
+        _request(request_id="gateway-without-credential"),
+        _gateway_attribution(monkeypatch),
+    )
+    executor = FakeExecutor(["completed"])
+
+    class UnexpectedCredentialBridge:
+        def issue(self, **_kwargs):
+            raise AssertionError("Gateway jobs must use the configured service model key")
+
+    result = _worker(
+        service,
+        executor,
+        tmp_path / "projects",
+        model_credential_bridge=UnexpectedCredentialBridge(),
+    ).run_once(now=NOW)
+
+    assert result is not None and result.outcome == "stage_completed"
+    assert service.get_job(job.job_id).status == JobStatus.RUNNING
+    assert len(executor.assignments) == 1
+    assert executor.credentials == [None]
 
 
 def test_worker_skips_model_credential_for_credential_free_executor(tmp_path: Path) -> None:

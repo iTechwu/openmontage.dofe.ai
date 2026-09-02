@@ -18,6 +18,7 @@ from openmontage.contracts import (
     WorkflowName,
 )
 from openmontage.exchange import ProjectFileExporter
+from openmontage.instruction_files import read_instruction_file
 from openmontage.reference_clone import ReferenceCloneService, capability_summary
 
 try:
@@ -57,6 +58,11 @@ def create_server(
             job_service = default_job_service()
         return job_service
 
+    def tool_gateway() -> Any:
+        from openmontage.tool_gateway import ToolGateway
+
+        return ToolGateway(jobs())
+
     def resolve_attribution(headers: Mapping[str, str] | None) -> Any:
         nonlocal attribution_resolver
         if attribution_resolver is None:
@@ -64,15 +70,6 @@ def create_server(
 
             attribution_resolver = default_attribution_resolver()
         return attribution_resolver(headers)
-
-    def require_async_credential(ctx: Context) -> None:
-        """Do not enqueue a job that would later fall back to a service-wide key."""
-        from openmontage.mcp_gateway_auth import gateway_attribution
-
-        if gateway_attribution(ctx.headers) is not None:
-            raise RuntimeError(
-                "公网 MCP 视频作业暂不可用：短期 Models 运行凭据接入后开放"
-            )
 
     @server.tool()
     def prepare_reference_clone(
@@ -103,6 +100,48 @@ def create_server(
     def openmontage_capabilities() -> dict[str, Any]:
         """Return the compact provider and composition preflight summary."""
         return capability_summary()
+
+    @server.tool()
+    def invoke_openmontage_tool(
+        tool_name: str,
+        operation: Literal["catalog", "generate", "preflight", "rank", "progress"],
+        inputs: dict[str, Any],
+        ctx: Context,
+        job_id: str = "",
+        stage: str = "",
+        stage_attempt: int | None = None,
+        lease_token: str = "",
+        idempotency_key: str = "",
+    ) -> dict[str, Any]:
+        """Execute one fixed logical CI tool through the server ToolRegistry.
+
+        ``operation`` is the gateway lifecycle: ``catalog`` lists the exposed
+        tools and their input schemas, ``generate`` runs the tool, ``preflight``
+        validates the selected provider without generating, ``rank`` returns
+        scored provider rankings, and ``progress`` reports progress. Tool-
+        specific operations (e.g. video_selector's text_to_video / image_to_video
+        / reference_to_video) go inside ``inputs``, not here.
+        """
+        from openmontage.job_api import require_same_workspace
+        from openmontage.tool_gateway import ToolGatewayError
+
+        try:
+            attribution = resolve_attribution(ctx.headers)
+            if operation == "catalog":
+                return tool_gateway().invoke(tool_name=tool_name, operation=operation, inputs=inputs)
+            snapshot = jobs().get_job(job_id)
+            require_same_workspace(snapshot, attribution)
+            return tool_gateway().invoke(
+                tool_name=tool_name, operation=operation, inputs=inputs, job_id=job_id,
+                stage=stage, stage_attempt=stage_attempt, lease_token=lease_token,
+                idempotency_key=idempotency_key,
+            )
+        except ToolGatewayError as exc:
+            return {
+                "success": False,
+                "status": "failed",
+                "error": {"code": exc.code, "category": exc.category, "message": exc.message},
+            }
 
     @server.tool()
     def reference_clone_status(project_id: str) -> dict[str, Any]:
@@ -142,7 +181,6 @@ def create_server(
           brief/{title,durationSeconds,audience}, output/{container,resolution,fps},
             budget/{maxAmount,currency}, clientRequestId (idempotency key).
         """
-        require_async_credential(ctx)
         attribution = resolve_attribution(ctx.headers)
         request = JobCreateRequest(
             schema_version=schemaVersion,
@@ -230,6 +268,119 @@ def create_server(
         ).to_wire()
 
     @server.tool()
+    def begin_client_stage(
+        job_id: str,
+        stage: str,
+        idempotency_key: str,
+        ctx: Context,
+        expected_sequence: int | None = None,
+    ) -> dict[str, Any]:
+        """Begin exclusive client-side execution of one pipeline stage.
+
+        The client Agent drives one stage at a time: begin (lease + attempt),
+        read instructions with ``read_openmontage_file``, do the cognitive
+        work, call Gateway tools as usual, report progress with
+        ``update_client_stage_progress``, then finish with
+        ``submit_client_stage``. Returns an opaque ``leaseToken``,
+        ``stageAttempt``, ``leaseExpiresAt`` and the latest Job snapshot.
+        Replays of the same ``idempotency_key`` return the original result;
+        a second live owner is rejected with ``STAGE_ALREADY_OWNED``.
+        """
+        from openmontage.job_api import require_same_workspace
+
+        attribution = resolve_attribution(ctx.headers)
+        snapshot = jobs().get_job(job_id)
+        require_same_workspace(snapshot, attribution)
+        if not idempotency_key.strip():
+            raise ValueError("idempotency_key must be non-empty")
+        return jobs().begin_client_stage(
+            job_id,
+            stage,
+            idempotency_key=idempotency_key,
+            expected_sequence=expected_sequence,
+        ).to_wire()
+
+    @server.tool()
+    def update_client_stage_progress(
+        job_id: str,
+        stage: str,
+        stage_attempt: int,
+        completed_units: int,
+        total_units: int,
+        label_code: str,
+        lease_token: str,
+        idempotency_key: str,
+        ctx: Context,
+    ) -> dict[str, Any]:
+        """Report progress for a running client stage and renew its lease.
+
+        Requires the ``leaseToken`` and ``stageAttempt`` returned by
+        ``begin_client_stage``. Repeated calls with the same
+        ``idempotency_key`` are safe replays.
+        """
+        from openmontage.job_api import require_same_workspace
+
+        attribution = resolve_attribution(ctx.headers)
+        snapshot = jobs().get_job(job_id)
+        require_same_workspace(snapshot, attribution)
+        if not idempotency_key.strip():
+            raise ValueError("idempotency_key must be non-empty")
+        return jobs().update_client_stage_progress(
+            job_id,
+            stage,
+            stage_attempt=stage_attempt,
+            completed_units=completed_units,
+            total_units=total_units,
+            label_code=label_code,
+            lease_token=lease_token,
+            idempotency_key=idempotency_key,
+        ).to_wire()
+
+    @server.tool()
+    def submit_client_stage(
+        job_id: str,
+        stage: str,
+        stage_attempt: int,
+        status: str,
+        lease_token: str,
+        idempotency_key: str,
+        ctx: Context,
+        artifacts: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        instruction_provenance: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        """Submit a client stage's artifacts, checkpoint and status atomically.
+
+        ``status`` is one of ``completed`` / ``awaiting_human`` / ``failed`` /
+        ``in_progress``. The server validates the lease, artifact and
+        checkpoint schemas, approval rules and media references; writes the
+        standard checkpoint under the CI project directory; records the Job
+        event; and advances the Job. ``instruction_provenance`` is a list of
+        ``{"path", "content_hash"}`` entries from ``read_openmontage_file``
+        proving which instructions the client followed. Gated stages must be
+        submitted as ``awaiting_human`` and completed only after
+        ``approve_video_stage`` approves them.
+        """
+        from openmontage.job_api import require_same_workspace
+
+        attribution = resolve_attribution(ctx.headers)
+        snapshot = jobs().get_job(job_id)
+        require_same_workspace(snapshot, attribution)
+        if not idempotency_key.strip():
+            raise ValueError("idempotency_key must be non-empty")
+        return jobs().submit_client_stage(
+            job_id,
+            stage,
+            stage_attempt=stage_attempt,
+            status=status,
+            lease_token=lease_token,
+            idempotency_key=idempotency_key,
+            artifacts=artifacts,
+            metadata=metadata,
+            instruction_provenance=instruction_provenance,
+        ).to_wire()
+
+    @server.tool()
     def list_video_job_events(
         job_id: str,
         ctx: Context,
@@ -290,6 +441,21 @@ def create_server(
     def read_project_file(project_id: str, relative_path: str, max_bytes: int = 2_000_000) -> dict[str, Any]:
         """Read a bounded UTF-8 analysis file through the authenticated MCP channel."""
         return ProjectFileExporter().read_text(project_id, relative_path, max_bytes=max_bytes)
+
+    @server.tool()
+    def read_openmontage_file(path: str, max_bytes: int = 2_000_000) -> dict[str, Any]:
+        """Read an OpenMontage instruction file (Markdown/YAML/JSON) from CI.
+
+        Reads the live CI repository on every call — no client-side caching and
+        no logical skill-ID mapping. Only ``.md``/``.yaml``/``.yml``/``.json``
+        files under the allowed instruction roots (``AGENT_GUIDE.md``,
+        ``pipeline_defs/``, ``skills/``, ``.agents/skills/``, ``schemas/``,
+        ``styles/``, ``remotion-composer/public/``, ``docs/``) are served; the
+        response includes the actual server path, size, mtime, a SHA-256
+        content hash, and the repository revision for instruction provenance.
+        Project artifacts and checkpoints belong to ``read_project_file``.
+        """
+        return read_instruction_file(path, max_bytes=max_bytes)
 
     @server.tool()
     def sync_project_exports(project_id: str) -> dict[str, Any]:

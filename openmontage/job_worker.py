@@ -27,6 +27,7 @@ from openmontage.contracts import (
     StageStatus,
 )
 from openmontage.job_service import JobLease, JobLeaseError, JobService, _summarize_error
+from openmontage.mcp_gateway_auth import GATEWAY_RUNTIME_ID
 from openmontage.model_credential_bridge import (
     ModelCredentialBridgeClient,
     ModelCredentialBridgeError,
@@ -395,7 +396,11 @@ class JobWorker:
             self.executor,
             assignment,
         )
-        if self.model_credential_bridge is not None and requires_credential:
+        if (
+            self.model_credential_bridge is not None
+            and requires_credential
+            and latest.attribution.runtime_id != GATEWAY_RUNTIME_ID
+        ):
             try:
                 credential = self.model_credential_bridge.issue(
                     job_id=latest.job_id,

@@ -15,6 +15,12 @@ from typing import Any, Optional
 from tools.base_tool import BaseTool, ToolStatus, ToolTier, ToolStability
 
 
+def _tool_visible(tool: BaseTool) -> bool:
+    from tools.dofe.config import model_api_tool_allowed
+
+    return model_api_tool_allowed(tool)
+
+
 # Unicode punctuation that breaks on Windows cp1252 stdout. Map each to an
 # ASCII equivalent. This only touches strings rendered by registry helpers
 # that an agent is likely to print to the user at preflight — not docstrings,
@@ -86,7 +92,8 @@ class ToolRegistry:
                 continue
             tool = cls()
             self.register(tool)
-            registered.append(tool.name)
+            if _tool_visible(tool):
+                registered.append(tool.name)
         return registered
 
     @staticmethod
@@ -165,27 +172,37 @@ class ToolRegistry:
         """
         if name not in self._tools:
             self.ensure_discovered()
-        return self._tools.get(name)
+        tool = self._tools.get(name)
+        return tool if tool is not None and _tool_visible(tool) else None
 
     def list_all(self) -> list[str]:
         """List all registered tool names."""
-        return list(self._tools.keys())
+        return [name for name, tool in self._tools.items() if _tool_visible(tool)]
 
     def get_by_tier(self, tier: ToolTier) -> list[BaseTool]:
         """Get all tools in a given tier."""
-        return [t for t in self._tools.values() if t.tier == tier]
+        return [t for t in self._tools.values() if t.tier == tier and _tool_visible(t)]
 
     def get_by_capability(self, capability: str) -> list[BaseTool]:
         """Get all tools registered for a top-level capability family."""
-        return [t for t in self._tools.values() if t.capability == capability]
+        return [
+            t for t in self._tools.values()
+            if t.capability == capability and _tool_visible(t)
+        ]
 
     def get_by_provider(self, provider: str) -> list[BaseTool]:
         """Get all tools backed by a specific provider."""
-        return [t for t in self._tools.values() if t.provider == provider]
+        return [
+            t for t in self._tools.values()
+            if t.provider == provider and _tool_visible(t)
+        ]
 
     def get_by_status(self, status: ToolStatus) -> list[BaseTool]:
         """Get all tools with a given status."""
-        return [t for t in self._tools.values() if t.get_status() == status]
+        return [
+            t for t in self._tools.values()
+            if _tool_visible(t) and t.get_status() == status
+        ]
 
     def get_available(self) -> list[BaseTool]:
         """Get all tools that are currently available."""
@@ -197,13 +214,16 @@ class ToolRegistry:
 
     def get_by_stability(self, stability: ToolStability) -> list[BaseTool]:
         """Get all tools at a given stability level."""
-        return [t for t in self._tools.values() if t.stability == stability]
+        return [
+            t for t in self._tools.values()
+            if t.stability == stability and _tool_visible(t)
+        ]
 
     def find_by_capability(self, capability: str) -> list[BaseTool]:
         """Find tools that declare a given capability."""
         return [
             t for t in self._tools.values()
-            if capability in t.capabilities
+            if capability in t.capabilities and _tool_visible(t)
         ]
 
     def find_fallback(self, tool_name: str) -> Optional[BaseTool]:
@@ -230,6 +250,8 @@ class ToolRegistry:
         self.ensure_discovered()
         report: dict[str, Any] = {}
         for name, tool in self._tools.items():
+            if not _tool_visible(tool):
+                continue
             info = tool.get_info()
             report[name] = info
         return report
@@ -239,6 +261,8 @@ class ToolRegistry:
         self.ensure_discovered()
         grouped: dict[str, list[dict[str, Any]]] = {}
         for tool in self._tools.values():
+            if not _tool_visible(tool):
+                continue
             grouped.setdefault(tool.capability, []).append(tool.get_info())
         for items in grouped.values():
             items.sort(key=lambda item: (item["provider"], item["name"]))
@@ -249,6 +273,8 @@ class ToolRegistry:
         self.ensure_discovered()
         grouped: dict[str, list[dict[str, Any]]] = {}
         for tool in self._tools.values():
+            if not _tool_visible(tool):
+                continue
             grouped.setdefault(tool.provider, []).append(tool.get_info())
         for items in grouped.values():
             items.sort(key=lambda item: (item["capability"], item["name"]))
@@ -293,7 +319,10 @@ class ToolRegistry:
         menu: dict[str, dict[str, Any]] = {}
 
         # Skip selectors — they aggregate, they aren't providers themselves
-        tools = [t for t in self._tools.values() if t.provider != "selector"]
+        tools = [
+            t for t in self._tools.values()
+            if t.provider != "selector" and _tool_visible(t)
+        ]
 
         # Share one GET /v1/models across every dofe tool's status check in
         # this enumeration. get_info() already embeds each tool's status (and
@@ -514,14 +543,14 @@ class ToolRegistry:
         """List tools that require GPU (VRAM > 0)."""
         return [
             t.name for t in self._tools.values()
-            if t.resource_profile.vram_mb > 0
+            if t.resource_profile.vram_mb > 0 and _tool_visible(t)
         ]
 
     def network_required_tools(self) -> list[str]:
         """List tools that require network access."""
         return [
             t.name for t in self._tools.values()
-            if t.resource_profile.network_required
+            if t.resource_profile.network_required and _tool_visible(t)
         ]
 
 
