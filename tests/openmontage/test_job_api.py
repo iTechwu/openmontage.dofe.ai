@@ -12,6 +12,7 @@ from starlette.testclient import TestClient
 
 from openmontage.contracts import JobAttribution, PublishedArtifact
 from openmontage.job_api import TrustedAttributionResolver
+from openmontage import job_service as job_service_module
 from openmontage.job_service import JobService
 from openmontage.mcp_gateway_auth import gateway_attribution
 from openmontage.mcp_server import build_http_app, create_server
@@ -676,6 +677,143 @@ def test_rest_overview_matches_public_contract(tmp_path: Path) -> None:
         "sizeBytes", "sha256", "publishedAt",
     }
     assert data["health"]["service"] == "ok"
+
+
+def test_rest_series_buckets_jobs_per_creation_day(tmp_path: Path) -> None:
+    client, service = _client(tmp_path)
+    day_one = datetime(2026, 9, 1, 2, 0, tzinfo=timezone.utc)
+    day_two = datetime(2026, 9, 2, 2, 0, tzinfo=timezone.utc)
+    real_now = job_service_module._now
+
+    def restore_clock() -> None:
+        job_service_module._now = real_now
+
+    job_service_module._now = lambda: day_one
+    try:
+        client.post("/api/v1/jobs", json=_request(), headers=_headers())
+        job_service_module._now = lambda: day_two
+        second = client.post(
+            "/api/v1/jobs",
+            json={**_request(), "clientRequestId": "request-2"},
+            headers=_headers(),
+        ).json()["data"]["jobId"]
+        service.start_stage(second, "research")
+    finally:
+        restore_clock()
+
+    response = client.get(
+        "/api/v1/series"
+        "?start=2026-09-01T00:00:00%2B08:00&end=2026-09-03T00:00:00%2B08:00",
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    body = response.json()
+    assert body["meta"]["source"] == "montage"
+    data = body["data"]
+    assert data["workspaceId"] == "ws-1"
+    assert data["grain"] == "day"
+    assert data["timeZone"] == "Asia/Shanghai"
+    # 09-01 逐日： queued=1；09-02： running=1；无缺日期
+    assert data["days"] == [
+        {
+            "date": "2026-09-01",
+            "total": 1,
+            "queued": 1,
+            "running": 0,
+            "waiting_approval": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "cancel_requested": 0,
+            "cancelled": 0,
+        },
+        {
+            "date": "2026-09-02",
+            "total": 1,
+            "queued": 0,
+            "running": 1,
+            "waiting_approval": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "cancel_requested": 0,
+            "cancelled": 0,
+        },
+    ]
+    assert data["statusCounts"] == {
+        "queued": 1,
+        "running": 1,
+        "waiting_approval": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "cancel_requested": 0,
+        "cancelled": 0,
+    }
+    assert data["pendingApprovals"] == 0
+    assert "employeeId" not in json.dumps(data)
+
+
+def test_rest_series_isolates_other_workspaces(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    client.post("/api/v1/jobs", json=_request(), headers=_headers())
+    other_attribution = JobAttribution(
+        workspace_id="ws-2",
+        employee_id="employee-2",
+        runtime_id="runtime-2",
+        root_task_id="task-2",
+        conversation_id="conversation-2",
+        source_invocation_id="invocation-2",
+        trace_id="trace-2",
+    )
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(other_attribution.to_wire(), separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+    other_headers = {
+        "Authorization": f"Bearer {SERVICE_TOKEN}",
+        "X-Dofe-Job-Attribution": encoded,
+    }
+
+    response = client.get(
+        "/api/v1/series"
+        "?start=2026-09-01T00:00:00%2B08:00&end=2026-09-03T00:00:00%2B08:00",
+        headers=other_headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["workspaceId"] == "ws-2"
+    assert data["statusCounts"] == {
+        key: 0
+        for key in (
+            "queued", "running", "waiting_approval", "succeeded",
+            "failed", "cancel_requested", "cancelled",
+        )
+    }
+    assert all(day["total"] == 0 for day in data["days"])
+
+
+def test_rest_series_requires_authentication_and_valid_ranges(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+
+    unauthenticated = client.get(
+        "/api/v1/series"
+        "?start=2026-09-01T00:00:00%2B08:00&end=2026-09-03T00:00:00%2B08:00",
+    )
+    assert unauthenticated.status_code == 401
+
+    window = "?start=2026-09-01T00:00:00%2B08:00&end=2026-09-03T00:00:00%2B08:00"
+    for query, headers in [
+        ("", _headers()),  # 缺少 start/end
+        ("?start=2026-09-03T00:00:00%2B08:00&end=2026-09-01T00:00:00%2B08:00", _headers()),
+        ("?start=2026-09-01T00:00:00%2B08:00&end=2026-10-05T00:00:00%2B08:00", _headers()),
+        (f"{window}&timezone=America/New_York", _headers()),
+        ("?start=2026-09-01&end=2026-09-03T00:00:00%2B08:00", _headers()),
+    ]:
+        response = client.get(f"/api/v1/series{query}", headers=headers)
+        assert response.status_code == 422, query
+        assert (
+            response.json()["error"]["code"] == "OPENMONTAGE_VALIDATION_FAILED"
+        ), query
 
 
 def test_rest_detail_and_list_hide_internal_identity(tmp_path: Path) -> None:

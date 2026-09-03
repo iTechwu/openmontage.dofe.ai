@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from starlette.responses import JSONResponse
 
@@ -25,6 +26,20 @@ RECENT_ARTIFACTS_LIMIT = 8
 # Truthful worker row for client-stage-only deployments: the API process that
 # answers this request *is* the component executing client stages.
 SERVICE_WORKER_ID = "openmontage-mcp"
+
+# Daily series allowlist (docs/0903/dashboard §4 P1): the dashboard buckets
+# days in one of these zones; anything else is rejected by the route.
+SERIES_TIME_ZONES = ("Asia/Shanghai", "UTC")
+SERIES_MAX_DAYS = 31
+_SERIES_STATUSES = (
+    "queued",
+    "running",
+    "waiting_approval",
+    "succeeded",
+    "failed",
+    "cancel_requested",
+    "cancelled",
+)
 
 # Overview-facing statuses: the dashboard keys counts and renders these
 # verbatim, so keep them lowercase (detail/list keep the canonical enum).
@@ -203,6 +218,57 @@ def public_overview(
             ],
         },
         "health": public_health(executions, now),
+    }
+
+
+def public_series(
+    workspace_id: str,
+    entries: Sequence[tuple[str, str]],
+    *,
+    start: datetime,
+    end: datetime,
+    time_zone: ZoneInfo,
+) -> dict[str, Any]:
+    """Daily job series for the yootun dashboard (docs/0903/dashboard §4 P1).
+
+    Jobs bucket on their creation day in the requested timezone and carry
+    their current status. ``entries`` are the lightweight
+    ``(created_at_text, status_text)`` pairs from
+    ``JobService.series_entries``; every day of the window is zero-filled so
+    the client never has to guess missing dates.
+    """
+    last_day = (end - timedelta(microseconds=1)).astimezone(time_zone).date()
+    day_list: list[str] = []
+    cursor = start.astimezone(time_zone).date()
+    while cursor <= last_day:
+        day_list.append(cursor.isoformat())
+        cursor += timedelta(days=1)
+
+    def day_of(created_at_text: str) -> str:
+        return datetime.fromisoformat(created_at_text).astimezone(time_zone).date().isoformat()
+
+    buckets: dict[str, dict[str, int]] = {
+        day: dict.fromkeys(_SERIES_STATUSES, 0) for day in day_list
+    }
+    totals: dict[str, int] = dict.fromkeys(_SERIES_STATUSES, 0)
+    for created_at_text, status in entries:
+        key = public_status(status)
+        bucket = buckets.get(day_of(created_at_text))
+        if bucket is None or key not in bucket:
+            continue
+        bucket[key] += 1
+        totals[key] += 1
+
+    return {
+        "workspaceId": workspace_id,
+        "grain": "day",
+        "timeZone": str(time_zone),
+        "days": [
+            {"date": day, "total": sum(bucket.values()), **bucket}
+            for day, bucket in buckets.items()
+        ],
+        "statusCounts": totals,
+        "pendingApprovals": totals["waiting_approval"],
     }
 
 

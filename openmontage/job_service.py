@@ -626,6 +626,49 @@ class JobService:
             ).fetchall()
         return [JobSnapshot.model_validate_json(row["snapshot_json"]) for row in rows]
 
+    def series_entries(
+        self,
+        workspace_id: str,
+        *,
+        start: datetime,
+        end: datetime,
+        limit: int = 5000,
+    ) -> list[tuple[str, str]]:
+        """Creation-window entries ``(created_at, status)`` for one workspace.
+
+        Feeds the daily dashboard series: bounds are compared as UTC ISO text,
+        matching the ``created_at`` column written by :meth:`create_job`
+        (timezone-aware UTC ``isoformat``). Only the lightweight status is
+        extracted from each snapshot — never full model validation, so a
+        31-day window stays cheap.
+        """
+        if not workspace_id:
+            raise ValueError("workspace_id is required")
+        if end <= start:
+            raise ValueError("series end must be after start")
+        bounded = min(10000, max(1, int(limit)))
+        start_text = start.astimezone(timezone.utc).isoformat()
+        end_text = end.astimezone(timezone.utc).isoformat()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT created_at, snapshot_json
+                FROM openmontage_job
+                WHERE workspace_id = ?
+                  AND created_at >= ?
+                  AND created_at < ?
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (workspace_id, start_text, end_text, bounded),
+            ).fetchall()
+        entries: list[tuple[str, str]] = []
+        for row in rows:
+            payload = json.loads(row["snapshot_json"])
+            status = payload.get("status") if isinstance(payload, dict) else None
+            entries.append((row["created_at"], str(status) if status else ""))
+        return entries
+
     def claim_job(
         self,
         *,

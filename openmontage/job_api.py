@@ -7,8 +7,9 @@ import hmac
 import json
 import os
 from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 from starlette.exceptions import HTTPException
@@ -31,11 +32,14 @@ from openmontage.job_service import (
 )
 from openmontage.mcp_gateway_auth import gateway_attribution, gateway_attempted
 from openmontage.public_contract import (
+    SERIES_MAX_DAYS,
+    SERIES_TIME_ZONES,
     envelope,
     public_artifact,
     public_event,
     public_job,
     public_overview,
+    public_series,
     request_id,
     status_name,
 )
@@ -173,6 +177,31 @@ def create_job_routes(
         except Exception as exc:
             return _error_response(exc, req_id)
 
+    async def series(request: Request) -> JSONResponse:
+        req_id = request_id(request.headers)
+        try:
+            attribution = attribution_resolver(request.headers)
+            start = _series_instant(request.query_params.get("start"), "start")
+            end = _series_instant(request.query_params.get("end"), "end")
+            if end <= start:
+                raise ValueError("end must be after start")
+            if end - start > timedelta(days=SERIES_MAX_DAYS):
+                raise ValueError(f"series range must be at most {SERIES_MAX_DAYS} days")
+            time_zone = _series_time_zone(request.query_params.get("timezone", "Asia/Shanghai"))
+            entries = service.series_entries(attribution.workspace_id, start=start, end=end)
+            return envelope(
+                public_series(
+                    attribution.workspace_id,
+                    entries,
+                    start=start,
+                    end=end,
+                    time_zone=time_zone,
+                ),
+                req_id,
+            )
+        except Exception as exc:
+            return _error_response(exc, req_id)
+
     async def list_events(request: Request) -> JSONResponse:
         req_id = request_id(request.headers)
         try:
@@ -265,6 +294,7 @@ def create_job_routes(
 
     return [
         Route("/api/v1/overview", overview, methods=["GET"]),
+        Route("/api/v1/series", series, methods=["GET"]),
         Route("/api/v1/jobs", list_jobs, methods=["GET"]),
         Route("/api/v1/jobs", create_job, methods=["POST"]),
         Route("/api/v1/jobs/{job_id}", get_job, methods=["GET"]),
@@ -283,6 +313,25 @@ async def _optional_json_object(request: Request) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("request body must be an object")
     return value
+
+
+def _series_instant(value: str | None, label: str) -> datetime:
+    text = (value or "").strip()
+    if not text:
+        raise ValueError(f"{label} is required")
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{label} must be an ISO 8601 instant") from exc
+    if moment.tzinfo is None:
+        raise ValueError(f"{label} must carry a timezone offset")
+    return moment
+
+
+def _series_time_zone(name: str) -> ZoneInfo:
+    if name not in SERIES_TIME_ZONES:
+        raise ValueError("timezone is not supported")
+    return ZoneInfo(name)
 
 
 def _expected_sequence(body: Mapping[str, Any]) -> int | None:
