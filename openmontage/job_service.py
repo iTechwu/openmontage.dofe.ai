@@ -633,14 +633,15 @@ class JobService:
         start: datetime,
         end: datetime,
         limit: int = 5000,
-    ) -> list[tuple[str, str]]:
-        """Creation-window entries ``(created_at, status)`` for one workspace.
+    ) -> list[tuple[str, str, list[tuple[str, str, Any, Any]]]]:
+        """Creation-window entries ``(created_at, status, stages)`` for one
+        workspace.
 
         Feeds the daily dashboard series: bounds are compared as UTC ISO text,
         matching the ``created_at`` column written by :meth:`create_job`
-        (timezone-aware UTC ``isoformat``). Only the lightweight status is
-        extracted from each snapshot — never full model validation, so a
-        31-day window stays cheap.
+        (timezone-aware UTC ``isoformat``). Only lightweight fields are
+        extracted from each snapshot (status + per-stage code/status/timing) —
+        never full model validation, so a 31-day window stays cheap.
         """
         if not workspace_id:
             raise ValueError("workspace_id is required")
@@ -662,11 +663,24 @@ class JobService:
                 """,
                 (workspace_id, start_text, end_text, bounded),
             ).fetchall()
-        entries: list[tuple[str, str]] = []
+        entries: list[tuple[str, str, list[tuple[str, str, Any, Any]]]] = []
         for row in rows:
             payload = json.loads(row["snapshot_json"])
             status = payload.get("status") if isinstance(payload, dict) else None
-            entries.append((row["created_at"], str(status) if status else ""))
+            stages: list[tuple[str, str, Any, Any]] = []
+            raw_stages = payload.get("stages") if isinstance(payload, dict) else None
+            for stage in raw_stages or []:
+                if not isinstance(stage, dict):
+                    continue
+                stages.append(
+                    (
+                        str(stage.get("code") or "unknown"),
+                        str(stage.get("status") or ""),
+                        stage.get("started_at"),
+                        stage.get("completed_at"),
+                    )
+                )
+            entries.append((row["created_at"], str(status) if status else "", stages))
         return entries
 
     def claim_job(

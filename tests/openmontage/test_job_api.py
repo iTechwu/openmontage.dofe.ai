@@ -751,6 +751,56 @@ def test_rest_series_buckets_jobs_per_creation_day(tmp_path: Path) -> None:
     }
     assert data["pendingApprovals"] == 0
     assert "employeeId" not in json.dumps(data)
+    # 阶段统计覆盖窗口内每个作业的 research 阶段；未完成的样本无耗时分位数
+    research = next(stage for stage in data["stageStats"] if stage["stage"] == "research")
+    assert research["count"] == 2
+    assert research["succeeded"] == 0
+    assert research["durationP50Ms"] is None
+
+
+def test_public_series_stage_stats_aggregates_stage_durations() -> None:
+    from zoneinfo import ZoneInfo
+
+    from openmontage.public_contract import public_series
+
+    entries = [
+        (
+            "2026-09-01T02:00:00+00:00",
+            "SUCCEEDED",
+            [
+                ("research", "SUCCEEDED", "2026-09-01T02:00:00+00:00", "2026-09-01T03:00:00+00:00"),
+                ("script", "FAILED", "2026-09-01T03:00:00+00:00", "2026-09-01T03:30:00+00:00"),
+            ],
+        ),
+        (
+            "2026-09-02T02:00:00+00:00",
+            "RUNNING",
+            [("research", "RUNNING", "2026-09-02T02:00:00+00:00", None)],
+        ),
+    ]
+    result = public_series(
+        "ws-1",
+        entries,
+        start=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        end=datetime(2026, 9, 3, tzinfo=timezone.utc),
+        time_zone=ZoneInfo("Asia/Shanghai"),
+    )
+
+    research = next(stage for stage in result["stageStats"] if stage["stage"] == "research")
+    assert research == {
+        "stage": "research",
+        "count": 2,
+        "succeeded": 1,
+        "failed": 0,
+        "durationP50Ms": 3600000.0,
+        "durationP95Ms": 3600000.0,
+    }
+    script = next(stage for stage in result["stageStats"] if stage["stage"] == "script")
+    assert script["count"] == 1
+    assert script["failed"] == 1
+    assert script["durationP50Ms"] == 1800000.0
+    # 无 attribution / employeeId 泄漏
+    assert "employeeId" not in json.dumps(result["stageStats"])
 
 
 def test_rest_series_isolates_other_workspaces(tmp_path: Path) -> None:

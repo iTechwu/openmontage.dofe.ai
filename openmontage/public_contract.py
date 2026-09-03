@@ -233,9 +233,10 @@ def public_series(
 
     Jobs bucket on their creation day in the requested timezone and carry
     their current status. ``entries`` are the lightweight
-    ``(created_at_text, status_text)`` pairs from
+    ``(created_at_text, status_text, stages)`` rows from
     ``JobService.series_entries``; every day of the window is zero-filled so
-    the client never has to guess missing dates.
+    the client never has to guess missing dates. ``stageStats`` aggregates
+    per-stage counts and run durations across the window's jobs.
     """
     last_day = (end - timedelta(microseconds=1)).astimezone(time_zone).date()
     day_list: list[str] = []
@@ -251,13 +252,16 @@ def public_series(
         day: dict.fromkeys(_SERIES_STATUSES, 0) for day in day_list
     }
     totals: dict[str, int] = dict.fromkeys(_SERIES_STATUSES, 0)
-    for created_at_text, status in entries:
+    stage_samples: list[list[tuple[str, str, Any, Any]]] = []
+    for created_at_text, status, stages in entries:
         key = public_status(status)
         bucket = buckets.get(day_of(created_at_text))
         if bucket is None or key not in bucket:
             continue
         bucket[key] += 1
         totals[key] += 1
+        if stages:
+            stage_samples.append(stages)
 
     return {
         "workspaceId": workspace_id,
@@ -269,7 +273,66 @@ def public_series(
         ],
         "statusCounts": totals,
         "pendingApprovals": totals["waiting_approval"],
+        "stageStats": _stage_stats(stage_samples),
     }
+
+
+def _stage_stats(
+    stage_samples: Sequence[Sequence[tuple[str, str, Any, Any]]],
+) -> list[dict[str, Any]]:
+    """Per-stage counts and duration percentiles over the window's jobs.
+
+    Durations use ``started_at``/``completed_at`` pairs already stored on each
+    stage snapshot; percentiles are interpolated in-process (like
+    ``percentile_cont``). No attribution or media paths are exposed here.
+    """
+    by_stage: dict[str, dict[str, Any]] = {}
+    for stages in stage_samples:
+        for code, status, started_at, completed_at in stages:
+            entry = by_stage.setdefault(
+                code or "unknown",
+                {"count": 0, "succeeded": 0, "failed": 0, "durations": []},
+            )
+            entry["count"] += 1
+            normalized = status_name(status).lower()
+            if normalized == "succeeded":
+                entry["succeeded"] += 1
+            elif normalized == "failed":
+                entry["failed"] += 1
+            if started_at and completed_at:
+                try:
+                    begin = datetime.fromisoformat(str(started_at))
+                    finish = datetime.fromisoformat(str(completed_at))
+                except ValueError:
+                    continue
+                duration_ms = (finish - begin).total_seconds() * 1000
+                if duration_ms >= 0:
+                    entry["durations"].append(duration_ms)
+
+    def percentile(sorted_values: list[float], fraction: float) -> float | None:
+        if not sorted_values:
+            return None
+        position = (len(sorted_values) - 1) * fraction
+        lower = int(position)
+        upper = min(lower + 1, len(sorted_values) - 1)
+        weight = position - lower
+        return round(sorted_values[lower] * (1 - weight) + sorted_values[upper] * weight)
+
+    stats: list[dict[str, Any]] = []
+    for code in sorted(by_stage):
+        entry = by_stage[code]
+        durations = sorted(entry["durations"])
+        stats.append(
+            {
+                "stage": code,
+                "count": entry["count"],
+                "succeeded": entry["succeeded"],
+                "failed": entry["failed"],
+                "durationP50Ms": percentile(durations, 0.5),
+                "durationP95Ms": percentile(durations, 0.95),
+            }
+        )
+    return stats
 
 
 def _job_title(snapshot: JobSnapshot) -> str:
