@@ -146,34 +146,76 @@ def public_event(event: JobEvent) -> dict[str, Any]:
 
 
 def public_health(
-    executions: Mapping[str, tuple[str | None, datetime | None]],
+    executions: Mapping[str, tuple[str | None, datetime | None, datetime | None]],
     now: datetime,
 ) -> dict[str, Any]:
     """Worker health derived from job lease freshness (docs/0903 §3.4).
 
     ``executions`` must only contain RUNNING jobs. A fresh lease means the
     worker is online; an expired lease means the job stopped progressing.
-    Without lease evidence (client-stage-only deployments never claim jobs)
-    the API service itself is the truthful worker row.
+    ``heartbeat_at`` is the last lease renewal time, surfaced verbatim so the
+    dashboard can show how stale a degraded worker is. Without lease evidence
+    (client-stage-only deployments never claim jobs) the API service itself is
+    the truthful worker row.
     """
     workers: list[dict[str, str]] = []
     degraded = False
-    for job_id, (worker_id, lease_expires_at) in sorted(executions.items()):
+    for job_id, (worker_id, lease_expires_at, heartbeat_at) in sorted(executions.items()):
         del job_id  # keyed iteration only; the worker row is per worker
         fresh = lease_expires_at is not None and lease_expires_at > now
         workers.append(
-            {"id": worker_id or "unknown", "status": "online" if fresh else "degraded"}
+            {
+                "id": worker_id or "unknown",
+                "status": "online" if fresh else "degraded",
+                "lastHeartbeatAt": _isoformat(heartbeat_at),
+            }
         )
         degraded = degraded or not fresh
     if not workers:
-        workers = [{"id": SERVICE_WORKER_ID, "status": "online"}]
+        workers = [{"id": SERVICE_WORKER_ID, "status": "online", "lastHeartbeatAt": ""}]
     return {"service": "degraded" if degraded else "ok", "workers": workers}
+
+
+def public_approval_waits(
+    items: Sequence[JobSnapshot],
+    waiting_starts: Mapping[str, str],
+    now: datetime,
+) -> dict[str, Any]:
+    """Approval-wait metrics for the dashboard (docs/0903/dashboard P2).
+
+    ``items`` are the workspace jobs currently in WAITING_APPROVAL;
+    ``waiting_starts`` maps job_id → the creation time of that job's latest
+    awaiting-approval event. Durations are measured against ``now``.
+    """
+    waiting_items = [item for item in items if public_status(item.status) == "waiting_approval"]
+    waits: list[float] = []
+    oldest: datetime | None = None
+    for item in waiting_items:
+        raw = waiting_starts.get(item.job_id)
+        if not raw:
+            continue
+        try:
+            started = datetime.fromisoformat(raw)
+        except ValueError:
+            continue
+        duration_ms = max((now - started).total_seconds() * 1000, 0)
+        waits.append(duration_ms)
+        if oldest is None or started < oldest:
+            oldest = started
+    waits.sort()
+    return {
+        "pending": len(waiting_items),
+        "oldestWaitingAt": _isoformat(oldest),
+        "waitP50Ms": round(waits[len(waits) // 2]) if waits else None,
+        "waitP95Ms": round(waits[max(len(waits) - 1, 0)]) if waits else None,
+    }
 
 
 def public_overview(
     workspace_id: str,
     items: Sequence[JobSnapshot],
-    executions: Mapping[str, tuple[str | None, datetime | None]],
+    executions: Mapping[str, tuple[str | None, datetime | None, datetime | None]],
+    waiting_starts: Mapping[str, str],
     now: datetime,
 ) -> dict[str, Any]:
     """Dashboard overview contract (docs/0903 §3.4)."""
@@ -217,6 +259,7 @@ def public_overview(
                 for artifact in all_artifacts[:RECENT_ARTIFACTS_LIMIT]
             ],
         },
+        "approvals": public_approval_waits(items, waiting_starts, now),
         "health": public_health(executions, now),
     }
 

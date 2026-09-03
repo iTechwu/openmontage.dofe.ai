@@ -893,7 +893,7 @@ def test_rest_overview_without_leases_reports_service_worker(tmp_path: Path) -> 
     data = response.json()["data"]
     assert data["health"] == {
         "service": "ok",
-        "workers": [{"id": "openmontage-mcp", "status": "online"}],
+        "workers": [{"id": "openmontage-mcp", "status": "online", "lastHeartbeatAt": ""}],
     }
 
 
@@ -921,8 +921,27 @@ def test_rest_overview_reports_stale_lease_as_degraded(tmp_path: Path) -> None:
     data = response.json()["data"]
     assert data["health"] == {
         "service": "degraded",
-        "workers": [{"id": "worker-1", "status": "degraded"}],
+        "workers": [{"id": "worker-1", "status": "degraded", "lastHeartbeatAt": "2026-08-05T10:00:00+00:00"}],
     }
+
+
+def test_rest_overview_reports_approval_wait_metrics(tmp_path: Path) -> None:
+    client, service = _client(tmp_path)
+    job_id = client.post(
+        "/api/v1/jobs", json=_request(), headers=_headers()
+    ).json()["data"]["jobId"]
+    service.start_stage(job_id, "research")
+    service.request_stage_approval(job_id, "research", reason="needs human review")
+
+    response = client.get("/api/v1/overview", headers=_headers())
+
+    assert response.status_code == 200
+    approvals = response.json()["data"]["approvals"]
+    assert approvals["pending"] == 1
+    assert approvals["oldestWaitingAt"]
+    assert approvals["waitP50Ms"] is not None
+    assert approvals["waitP95Ms"] is not None
+    assert "employeeId" not in json.dumps(approvals)
 
 
 def test_rest_overview_is_scoped_to_workspace(tmp_path: Path) -> None:

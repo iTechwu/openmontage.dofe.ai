@@ -169,9 +169,21 @@ def create_job_routes(
                 for item in items
                 if status_name(item.status) == "RUNNING"
             ]
+            waiting_ids = [
+                item.job_id
+                for item in items
+                if status_name(item.status) == "WAITING_APPROVAL"
+            ]
             executions = service.execution_states(running_ids)
+            waiting_starts = service.waiting_since(attribution.workspace_id, waiting_ids)
             return envelope(
-                public_overview(attribution.workspace_id, items, executions, clock()),
+                public_overview(
+                    attribution.workspace_id,
+                    items,
+                    executions,
+                    waiting_starts,
+                    clock(),
+                ),
                 req_id,
             )
         except Exception as exc:

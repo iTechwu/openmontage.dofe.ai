@@ -478,21 +478,23 @@ class JobService:
     def execution_states(
         self,
         job_ids: Sequence[str],
-    ) -> dict[str, tuple[str | None, datetime | None]]:
-        """Return ``(worker_id, lease_expires_at)`` per job that has one.
+    ) -> dict[str, tuple[str | None, datetime | None, datetime | None]]:
+        """Return ``(worker_id, lease_expires_at, heartbeat_at)`` per job.
 
-        Jobs without an execution row are absent from the result. Used by the
-        public overview to derive worker health from lease freshness.
+        ``heartbeat_at`` is the execution row's ``updated_at`` — the last time
+        the worker renewed the lease. Jobs without an execution row are absent
+        from the result. Used by the public overview to derive worker health
+        from lease freshness and to surface last-heartbeat time.
         """
         ids = [job_id for job_id in job_ids if job_id]
-        states: dict[str, tuple[str | None, datetime | None]] = {}
+        states: dict[str, tuple[str | None, datetime | None, datetime | None]] = {}
         for start in range(0, len(ids), 100):
             chunk = ids[start : start + 100]
             placeholders = ",".join("?" for _ in chunk)
             with self._connect() as connection:
                 rows = connection.execute(
                     f"""
-                    SELECT job_id, worker_id, lease_expires_at
+                    SELECT job_id, worker_id, lease_expires_at, updated_at
                     FROM openmontage_job_execution
                     WHERE job_id IN ({placeholders})
                     """,
@@ -505,8 +507,47 @@ class JobService:
                     if raw
                     else None
                 )
-                states[row["job_id"]] = (row["worker_id"], expires)
+                raw_heartbeat = row["updated_at"]
+                heartbeat = (
+                    _to_utc(datetime.fromisoformat(raw_heartbeat), "updated_at")
+                    if raw_heartbeat
+                    else None
+                )
+                states[row["job_id"]] = (row["worker_id"], expires, heartbeat)
         return states
+
+    def waiting_since(self, workspace_id: str, job_ids: Sequence[str]) -> dict[str, str]:
+        """Latest awaiting-approval event time (UTC ISO text) per waiting job.
+
+        Feeds the dashboard's approval-wait metrics: only jobs that are still
+        WAITING_APPROVAL are passed in by the caller, so MAX(created_at) over
+        ``JOB_WAITING_APPROVAL`` events is the moment the current wait began
+        (a re-approved stage writes a fresh event each time it re-enters the
+        wait).
+        """
+        ids = [job_id for job_id in job_ids if job_id]
+        if not workspace_id or not ids:
+            return {}
+        waiting: dict[str, str] = {}
+        for start in range(0, len(ids), 100):
+            chunk = ids[start : start + 100]
+            placeholders = ",".join("?" for _ in chunk)
+            with self._connect() as connection:
+                rows = connection.execute(
+                    f"""
+                    SELECT e.job_id AS job_id, MAX(e.created_at) AS waited_since
+                    FROM openmontage_job_event e
+                    JOIN openmontage_job j ON j.job_id = e.job_id
+                    WHERE j.workspace_id = ?
+                      AND e.job_id IN ({placeholders})
+                      AND e.event_json LIKE '%"openmontage.job.waiting_approval"%'
+                    GROUP BY e.job_id
+                    """,
+                    (workspace_id, *chunk),
+                ).fetchall()
+            for row in rows:
+                waiting[row["job_id"]] = row["waited_since"]
+        return waiting
 
     def create_job(
         self,
