@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -318,6 +320,12 @@ def _validate_artifact_input(request: JobCreateRequest) -> None:
         )
 
 
+# Read-only projection of job→workspace ownership for Backlot (docs/0903 §4).
+# Backlot mounts projects read-only, so it consumes this atomic JSON manifest
+# instead of opening the SQLite database from a :ro volume.
+WORKSPACE_MAP_NAME = "workspace-map.json"
+
+
 class JobService:
     def __init__(self, database_path: str | Path, *, projects_dir: str | Path | None = None):
         self.database_path = Path(database_path)
@@ -440,6 +448,65 @@ class JobService:
                 )
                 """
             )
+        self._export_workspace_map()
+
+    def _export_workspace_map(self) -> None:
+        """Best-effort atomic export of job→workspace ownership for Backlot.
+
+        Never raises: a failed export only means Backlot cannot see new jobs
+        until the next export (service construction or job creation) — it must
+        not fail a submission that already committed.
+        """
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT job_id, workspace_id FROM openmontage_job
+                    ORDER BY created_at, job_id
+                    """
+                ).fetchall()
+            payload = {row["job_id"]: row["workspace_id"] for row in rows}
+            target = self.database_path.parent / WORKSPACE_MAP_NAME
+            tmp = target.with_name(target.name + ".tmp")
+            tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+            os.replace(tmp, target)
+        except (sqlite3.Error, OSError):
+            logging.getLogger(__name__).warning(
+                "Failed to export OpenMontage workspace map", exc_info=True
+            )
+
+    def execution_states(
+        self,
+        job_ids: Sequence[str],
+    ) -> dict[str, tuple[str | None, datetime | None]]:
+        """Return ``(worker_id, lease_expires_at)`` per job that has one.
+
+        Jobs without an execution row are absent from the result. Used by the
+        public overview to derive worker health from lease freshness.
+        """
+        ids = [job_id for job_id in job_ids if job_id]
+        states: dict[str, tuple[str | None, datetime | None]] = {}
+        for start in range(0, len(ids), 100):
+            chunk = ids[start : start + 100]
+            placeholders = ",".join("?" for _ in chunk)
+            with self._connect() as connection:
+                rows = connection.execute(
+                    f"""
+                    SELECT job_id, worker_id, lease_expires_at
+                    FROM openmontage_job_execution
+                    WHERE job_id IN ({placeholders})
+                    """,
+                    chunk,
+                ).fetchall()
+            for row in rows:
+                raw = row["lease_expires_at"]
+                expires = (
+                    _to_utc(datetime.fromisoformat(raw), "lease_expires_at")
+                    if raw
+                    else None
+                )
+                states[row["job_id"]] = (row["worker_id"], expires)
+        return states
 
     def create_job(
         self,
@@ -528,12 +595,14 @@ class JobService:
                     now.isoformat(),
                 ),
             )
-            return self._persist_event(
+            created = self._persist_event(
                 connection,
                 snapshot,
                 JobEventType.JOB_CREATED,
                 {"workflow": {"name": workflow.name, "version": workflow.version}},
             )
+        self._export_workspace_map()
+        return created
 
     def get_job(self, job_id: str) -> JobSnapshot:
         with self._connect() as connection:

@@ -7,9 +7,11 @@ import hmac
 import json
 import os
 from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import ValidationError
+from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -28,6 +30,15 @@ from openmontage.job_service import (
     JobSubmissionError,
 )
 from openmontage.mcp_gateway_auth import gateway_attribution, gateway_attempted
+from openmontage.public_contract import (
+    envelope,
+    public_artifact,
+    public_event,
+    public_job,
+    public_overview,
+    request_id,
+    status_name,
+)
 
 
 class TrustedContextError(PermissionError):
@@ -103,26 +114,33 @@ def require_same_workspace(job: JobSnapshot, attribution: JobAttribution) -> Non
 def create_job_routes(
     service: JobService,
     attribution_resolver: AttributionResolver,
+    *,
+    now_fn: Callable[[], datetime] | None = None,
 ) -> list[Route]:
+    clock = now_fn or (lambda: datetime.now(timezone.utc))
+
     async def create_job(request: Request) -> JSONResponse:
+        req_id = request_id(request.headers)
         try:
             attribution = attribution_resolver(request.headers)
             payload = JobCreateRequest.model_validate(await request.json())
             snapshot = service.create_job(payload, attribution)
-            return JSONResponse(snapshot.to_wire(), status_code=201)
+            return envelope(public_job(snapshot), req_id, status_code=201)
         except Exception as exc:
-            return _error_response(exc)
+            return _error_response(exc, req_id)
 
     async def get_job(request: Request) -> JSONResponse:
+        req_id = request_id(request.headers)
         try:
             attribution = attribution_resolver(request.headers)
             snapshot = service.get_job(request.path_params["job_id"])
             require_same_workspace(snapshot, attribution)
-            return JSONResponse(snapshot.to_wire())
+            return envelope(public_job(snapshot), req_id)
         except Exception as exc:
-            return _error_response(exc)
+            return _error_response(exc, req_id)
 
     async def list_jobs(request: Request) -> JSONResponse:
+        req_id = request_id(request.headers)
         try:
             attribution = attribution_resolver(request.headers)
             raw_limit = request.query_params.get("limit", "50")
@@ -130,39 +148,33 @@ def create_job_routes(
             if limit < 1 or limit > 100:
                 raise ValueError("limit must be between 1 and 100")
             items = service.list_jobs(attribution.workspace_id, limit=limit)
-            return JSONResponse({"items": [item.to_wire() for item in items], "limit": limit})
+            return envelope(
+                {"items": [public_job(item) for item in items], "limit": limit},
+                req_id,
+            )
         except Exception as exc:
-            return _error_response(exc)
+            return _error_response(exc, req_id)
 
     async def overview(request: Request) -> JSONResponse:
+        req_id = request_id(request.headers)
         try:
             attribution = attribution_resolver(request.headers)
             items = service.list_jobs(attribution.workspace_id, limit=100)
-            by_status: dict[str, int] = {}
-            artifact_count = 0
-            awaiting_approval = 0
-            for item in items:
-                status = str(item.status.value)
-                by_status[status] = by_status.get(status, 0) + 1
-                artifact_count += len(item.artifacts)
-                if status == "WAITING_APPROVAL":
-                    awaiting_approval += 1
-            return JSONResponse({
-                "workspaceId": attribution.workspace_id,
-                "totals": {"jobs": len(items), "artifacts": artifact_count},
-                "statusCounts": by_status,
-                "awaitingApproval": awaiting_approval,
-                "recentJobs": [
-                    {"jobId": item.job_id, "status": item.status.value,
-                     "workflow": item.workflow.name, "currentStage": item.current_stage,
-                     "createdAt": item.created_at.isoformat(), "updatedAt": item.updated_at.isoformat()}
-                    for item in items[:10]
-                ],
-            })
+            running_ids = [
+                item.job_id
+                for item in items
+                if status_name(item.status) == "RUNNING"
+            ]
+            executions = service.execution_states(running_ids)
+            return envelope(
+                public_overview(attribution.workspace_id, items, executions, clock()),
+                req_id,
+            )
         except Exception as exc:
-            return _error_response(exc)
+            return _error_response(exc, req_id)
 
     async def list_events(request: Request) -> JSONResponse:
+        req_id = request_id(request.headers)
         try:
             attribution = attribution_resolver(request.headers)
             job_id = request.path_params["job_id"]
@@ -173,47 +185,57 @@ def create_job_routes(
             if after_sequence < 0:
                 raise ValueError("afterSequence must be non-negative")
             events = service.list_events(job_id, after_sequence=after_sequence)
-            return JSONResponse(
+            return envelope(
                 {
-                    "events": [event.to_wire() for event in events],
+                    "events": [public_event(event) for event in events],
                     "lastSequence": snapshot.last_sequence,
-                }
+                },
+                req_id,
             )
         except Exception as exc:
-            return _error_response(exc)
+            return _error_response(exc, req_id)
 
     async def list_artifacts(request: Request) -> JSONResponse:
+        req_id = request_id(request.headers)
         try:
             attribution = attribution_resolver(request.headers)
             snapshot = service.get_job(request.path_params["job_id"])
             require_same_workspace(snapshot, attribution)
-            return JSONResponse(
+            return envelope(
                 {
-                    "artifacts": [artifact.to_wire() for artifact in snapshot.artifacts],
+                    "artifacts": [
+                        public_artifact(artifact) for artifact in snapshot.artifacts
+                    ],
                     "lastSequence": snapshot.last_sequence,
-                }
+                },
+                req_id,
             )
         except Exception as exc:
-            return _error_response(exc)
+            return _error_response(exc, req_id)
 
     async def cancel_job(request: Request) -> JSONResponse:
+        req_id = request_id(request.headers)
         try:
             attribution = attribution_resolver(request.headers)
             job_id = request.path_params["job_id"]
             snapshot = service.get_job(job_id)
             require_same_workspace(snapshot, attribution)
             body = await _optional_json_object(request)
-            return JSONResponse(
-                service.request_cancel(
-                    job_id,
-                    expected_sequence=_expected_sequence(body),
-                    idempotency_key=_header(request.headers, "Idempotency-Key"),
-                ).to_wire()
+            return envelope(
+                public_job(
+                    service.request_cancel(
+                        job_id,
+                        expected_sequence=_expected_sequence(body),
+                        idempotency_key=_header(request.headers, "Idempotency-Key"),
+                    )
+                ),
+                req_id,
             )
         except Exception as exc:
-            return _error_response(exc)
+            return _error_response(exc, req_id)
 
     async def approve_stage(request: Request) -> JSONResponse:
+        req_id = request_id(request.headers)
         try:
             attribution = attribution_resolver(request.headers)
             job_id = request.path_params["job_id"]
@@ -226,17 +248,20 @@ def create_job_routes(
                 raise ValueError("stage is required")
             if not isinstance(approved, bool):
                 raise ValueError("approved must be boolean")
-            return JSONResponse(
-                service.resolve_stage_approval(
-                    job_id,
-                    stage,
-                    approved=approved,
-                    expected_sequence=_expected_sequence(body),
-                    idempotency_key=_header(request.headers, "Idempotency-Key"),
-                ).to_wire()
+            return envelope(
+                public_job(
+                    service.resolve_stage_approval(
+                        job_id,
+                        stage,
+                        approved=approved,
+                        expected_sequence=_expected_sequence(body),
+                        idempotency_key=_header(request.headers, "Idempotency-Key"),
+                    )
+                ),
+                req_id,
             )
         except Exception as exc:
-            return _error_response(exc)
+            return _error_response(exc, req_id)
 
     return [
         Route("/api/v1/overview", overview, methods=["GET"]),
@@ -269,45 +294,36 @@ def _expected_sequence(body: Mapping[str, Any]) -> int | None:
     return value
 
 
-def _error_response(error: Exception) -> JSONResponse:
+def _error_response(error: Exception, req_id: str = "") -> JSONResponse:
+    """docs/0903 §3 error envelope: ``{"error": {code, message?, requestId}}``
+    with ``Cache-Control: no-store``."""
+    request_ref: dict[str, str] = {"requestId": req_id} if req_id else {}
+
+    def body(code: str, message: str | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"code": code, **request_ref}
+        if message:
+            payload["message"] = message
+        return {"error": payload}
+
+    def respond(status: int, payload: dict[str, Any]) -> JSONResponse:
+        return JSONResponse(
+            payload, status_code=status, headers={"Cache-Control": "no-store"}
+        )
+
     if isinstance(error, TrustedContextError):
-        return JSONResponse(
-            {"error": {"code": "OPENMONTAGE_UNAUTHORIZED"}},
-            status_code=401,
-        )
+        return respond(401, body("OPENMONTAGE_UNAUTHORIZED"))
     if isinstance(error, JobNotFoundError):
-        return JSONResponse(
-            {"error": {"code": "OPENMONTAGE_JOB_NOT_FOUND"}},
-            status_code=404,
-        )
+        return respond(404, body("OPENMONTAGE_JOB_NOT_FOUND"))
     if isinstance(error, JobConflictError):
-        return JSONResponse(
-            {"error": {"code": "OPENMONTAGE_JOB_CONFLICT", "message": str(error)}},
-            status_code=409,
-        )
+        return respond(409, body("OPENMONTAGE_JOB_CONFLICT", str(error)))
     if isinstance(error, JobStateError):
-        return JSONResponse(
-            {"error": {"code": "OPENMONTAGE_JOB_STATE_INVALID", "message": str(error)}},
-            status_code=409,
-        )
+        return respond(409, body("OPENMONTAGE_JOB_STATE_INVALID", str(error)))
     if isinstance(error, WorkflowConfigurationError):
-        return JSONResponse(
-            {
-                "error": {
-                    "code": "OPENMONTAGE_WORKFLOW_UNAVAILABLE",
-                    "message": str(error),
-                }
-            },
-            status_code=503,
-        )
+        return respond(503, body("OPENMONTAGE_WORKFLOW_UNAVAILABLE", str(error)))
     if isinstance(error, JobSubmissionError):
-        return JSONResponse(
-            {"error": {"code": "OPENMONTAGE_SUBMISSION_REJECTED", "message": str(error)}},
-            status_code=422,
-        )
+        return respond(422, body("OPENMONTAGE_SUBMISSION_REJECTED", str(error)))
+    if isinstance(error, HTTPException) and error.status_code == 405:
+        return respond(405, body("OPENMONTAGE_METHOD_NOT_ALLOWED"))
     if isinstance(error, (ValidationError, ValueError, KeyError)):
-        return JSONResponse(
-            {"error": {"code": "OPENMONTAGE_VALIDATION_FAILED", "message": str(error)}},
-            status_code=422,
-        )
+        return respond(422, body("OPENMONTAGE_VALIDATION_FAILED", str(error)))
     raise error

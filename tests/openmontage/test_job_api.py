@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import jsonschema
@@ -52,11 +54,15 @@ def _request() -> dict[str, object]:
     }
 
 
-def _client(tmp_path: Path) -> tuple[TestClient, JobService]:
+def _client(
+    tmp_path: Path,
+    now_fn: Callable[[], datetime] | None = None,
+) -> tuple[TestClient, JobService]:
     service = JobService(tmp_path / "jobs.sqlite3")
     app = build_http_app(
         job_service=service,
         attribution_resolver=TrustedAttributionResolver(SERVICE_TOKEN),
+        now_fn=now_fn,
     )
     return TestClient(app), service
 
@@ -67,7 +73,10 @@ def test_rest_job_creation_requires_trusted_service_context(tmp_path: Path) -> N
     response = client.post("/api/v1/jobs", json=_request())
 
     assert response.status_code == 401
-    assert response.json() == {"error": {"code": "OPENMONTAGE_UNAUTHORIZED"}}
+    assert response.headers["cache-control"] == "no-store"
+    error = response.json()["error"]
+    assert error["code"] == "OPENMONTAGE_UNAUTHORIZED"
+    assert error["requestId"]
 
 
 def test_rest_job_creation_rejects_unknown_workflow_as_validation_error(tmp_path: Path) -> None:
@@ -105,12 +114,11 @@ def test_rest_job_creation_reports_invalid_manifest_as_workflow_unavailable(
     response = client.post("/api/v1/jobs", json=_request(), headers=_headers())
 
     assert response.status_code == 503
-    assert response.json() == {
-        "error": {
-            "code": "OPENMONTAGE_WORKFLOW_UNAVAILABLE",
-            "message": "Workflow 'framework-smoke' is unavailable because its manifest is invalid",
-        }
-    }
+    error = response.json()["error"]
+    assert error["code"] == "OPENMONTAGE_WORKFLOW_UNAVAILABLE"
+    assert error["message"] == (
+        "Workflow 'framework-smoke' is unavailable because its manifest is invalid"
+    )
 
 
 @pytest.fixture(
@@ -142,12 +150,11 @@ def test_rest_job_creation_reports_invalid_manifest_projection_as_unavailable(
     response = client.post("/api/v1/jobs", json=_request(), headers=_headers())
 
     assert response.status_code == 503
-    assert response.json() == {
-        "error": {
-            "code": "OPENMONTAGE_WORKFLOW_UNAVAILABLE",
-            "message": "Workflow 'framework-smoke' is unavailable because its manifest is invalid",
-        }
-    }
+    error = response.json()["error"]
+    assert error["code"] == "OPENMONTAGE_WORKFLOW_UNAVAILABLE"
+    assert error["message"] == (
+        "Workflow 'framework-smoke' is unavailable because its manifest is invalid"
+    )
 
 
 def test_rest_job_creation_reports_manifest_name_mismatch_as_unavailable(
@@ -167,10 +174,12 @@ def test_rest_job_creation_reports_manifest_name_mismatch_as_unavailable(
     response = client.post("/api/v1/jobs", json=_request(), headers=_headers())
 
     assert response.status_code == 503
-    assert response.json()["error"] == {
-        "code": "OPENMONTAGE_WORKFLOW_UNAVAILABLE",
-        "message": "Workflow 'framework-smoke' is unavailable because its manifest is invalid",
-    }
+    error = response.json()["error"]
+    assert error["code"] == "OPENMONTAGE_WORKFLOW_UNAVAILABLE"
+    assert error["message"] == (
+        "Workflow 'framework-smoke' is unavailable because its manifest is invalid"
+    )
+    assert error["requestId"]
 
 
 def test_rest_job_creation_reports_duplicate_manifest_stages_as_unavailable(
@@ -271,7 +280,8 @@ def test_rest_job_create_status_and_event_replay(tmp_path: Path) -> None:
 
     created = client.post("/api/v1/jobs", json=_request(), headers=_headers())
     assert created.status_code == 201
-    job_id = created.json()["jobId"]
+    assert created.headers["cache-control"] == "no-store"
+    job_id = created.json()["data"]["jobId"]
 
     service.start_stage(job_id, "research")
     status = client.get(f"/api/v1/jobs/{job_id}", headers=_headers())
@@ -281,15 +291,20 @@ def test_rest_job_create_status_and_event_replay(tmp_path: Path) -> None:
     )
 
     assert status.status_code == 200
-    assert status.json()["status"] == "RUNNING"
-    assert status.json()["currentStage"] == "research"
-    assert [event["sequence"] for event in replay.json()["events"]] == [2]
-    assert replay.json()["lastSequence"] == 2
+    assert status.json()["data"]["status"] == "RUNNING"
+    assert status.json()["data"]["currentStage"] == "research"
+    body = replay.json()
+    assert body["meta"]["source"] == "montage"
+    assert body["meta"]["requestId"]
+    assert [event["sequence"] for event in body["data"]["events"]] == [2]
+    assert body["data"]["lastSequence"] == 2
+    # Public event projection drops the attribution fields embedded in JobEvent.
+    assert "workspaceId" not in json.dumps(body["data"]["events"])
 
 
 def test_rest_lists_published_video_artifacts(tmp_path: Path) -> None:
     client, service = _client(tmp_path)
-    job_id = client.post("/api/v1/jobs", json=_request(), headers=_headers()).json()["jobId"]
+    job_id = client.post("/api/v1/jobs", json=_request(), headers=_headers()).json()["data"]["jobId"]
     service.publish_artifact(
         job_id,
         PublishedArtifact(
@@ -308,13 +323,18 @@ def test_rest_lists_published_video_artifacts(tmp_path: Path) -> None:
     response = client.get(f"/api/v1/jobs/{job_id}/artifacts", headers=_headers())
 
     assert response.status_code == 200
-    assert response.json()["artifacts"][0]["employeeArtifactId"] == "eart-1"
-    assert response.json()["lastSequence"] == 2
+    artifact = response.json()["data"]["artifacts"][0]
+    assert artifact["artifactId"] == "eart-1"
+    assert set(artifact) == {
+        "artifactId", "jobId", "role", "fileName", "mediaType",
+        "sizeBytes", "sha256", "publishedAt",
+    }
+    assert response.json()["data"]["lastSequence"] == 2
 
 
 def test_rest_job_access_is_scoped_to_attribution_workspace(tmp_path: Path) -> None:
     client, _ = _client(tmp_path)
-    job_id = client.post("/api/v1/jobs", json=_request(), headers=_headers()).json()["jobId"]
+    job_id = client.post("/api/v1/jobs", json=_request(), headers=_headers()).json()["data"]["jobId"]
     other = _attribution().model_copy(update={"workspace_id": "ws-2"})
     encoded = base64.urlsafe_b64encode(
         json.dumps(other.to_wire(), separators=(",", ":")).encode("utf-8")
@@ -333,7 +353,7 @@ def test_rest_job_access_is_scoped_to_attribution_workspace(tmp_path: Path) -> N
 
 def test_rest_cancel_uses_persisted_idempotency_and_sequence_fencing(tmp_path: Path) -> None:
     client, service = _client(tmp_path)
-    job_id = client.post("/api/v1/jobs", json=_request(), headers=_headers()).json()["jobId"]
+    job_id = client.post("/api/v1/jobs", json=_request(), headers=_headers()).json()["data"]["jobId"]
     headers = {**_headers(), "Idempotency-Key": "cancel-job-1-at-sequence-1"}
 
     first = client.post(
@@ -354,8 +374,8 @@ def test_rest_cancel_uses_persisted_idempotency_and_sequence_fencing(tmp_path: P
 
     assert first.status_code == 200
     assert repeated.status_code == 200
-    assert first.json()["lastSequence"] == 2
-    assert repeated.json()["lastSequence"] == 2
+    assert first.json()["data"]["lastSequence"] == 2
+    assert repeated.json()["data"]["lastSequence"] == 2
     assert conflicting.status_code == 409
     assert [event.sequence for event in service.list_events(job_id)] == [1, 2]
 
@@ -588,3 +608,164 @@ async def test_mcp_job_creation_rejects_invalid_request_contracts(
 
     assert result.is_error is True
     assert message_fragment in result.content[0].text
+
+# ---------------------------------------------------------------------------
+# Public contract: docs/0903 §3 envelope + §3.4 overview shape
+# ---------------------------------------------------------------------------
+
+
+def test_rest_overview_matches_public_contract(tmp_path: Path) -> None:
+    client, service = _client(tmp_path)
+    client.post("/api/v1/jobs", json=_request(), headers=_headers())
+    second = client.post(
+        "/api/v1/jobs",
+        json={
+            **_request(),
+            "clientRequestId": "request-2",
+            "brief": {"title": "Second brief"},
+        },
+        headers=_headers(),
+    ).json()["data"]["jobId"]
+    service.start_stage(second, "research")
+    service.publish_artifact(
+        second,
+        PublishedArtifact(
+            job_id=second,
+            employee_artifact_id="eart-9",
+            employee_id="employee-1",
+            role="final_video",
+            file_name="final.mp4",
+            media_type="video/mp4",
+            size_bytes=7,
+            sha256="b" * 64,
+            published_at="2026-08-05T10:00:09Z",
+        ),
+    )
+
+    response = client.get("/api/v1/overview", headers=_headers())
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    body = response.json()
+    assert body["meta"]["source"] == "montage"
+    assert body["meta"]["requestId"]
+    assert body["meta"]["generatedAt"]
+    data = body["data"]
+    assert data["workspaceId"] == "ws-1"
+    assert data["jobs"] == {
+        "total": 2,
+        "queued": 1,
+        "running": 1,
+        "completed": 0,
+        "failed": 0,
+        "statusCounts": {"queued": 1, "running": 1},
+    }
+    assert data["pendingApprovals"] == 0
+    recent = data["recentJobs"][0]
+    assert recent["jobId"] == second
+    assert recent["title"] == "Second brief"
+    assert recent["status"] == "running"
+    assert recent["workflow"] == "framework-smoke"
+    assert recent["currentStage"] == "research"
+    assert data["artifacts"]["total"] == 1
+    artifact = data["artifacts"]["recent"][0]
+    assert artifact["artifactId"] == "eart-9"
+    assert artifact["jobId"] == second
+    assert set(artifact) == {
+        "artifactId", "jobId", "role", "fileName", "mediaType",
+        "sizeBytes", "sha256", "publishedAt",
+    }
+    assert data["health"]["service"] == "ok"
+
+
+def test_rest_detail_and_list_hide_internal_identity(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    job_id = client.post(
+        "/api/v1/jobs", json=_request(), headers=_headers()
+    ).json()["data"]["jobId"]
+
+    detail = client.get(f"/api/v1/jobs/{job_id}", headers=_headers())
+    listing = client.get("/api/v1/jobs", headers=_headers())
+
+    assert detail.status_code == 200
+    assert listing.status_code == 200
+    serialized = json.dumps([detail.json(), listing.json()])
+    assert "attribution" not in serialized
+    assert "employeeId" not in serialized
+    assert "ws-1" not in serialized
+    assert str(tmp_path) not in serialized
+
+
+def test_rest_overview_without_leases_reports_service_worker(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    client.post("/api/v1/jobs", json=_request(), headers=_headers())
+
+    response = client.get("/api/v1/overview", headers=_headers())
+
+    data = response.json()["data"]
+    assert data["health"] == {
+        "service": "ok",
+        "workers": [{"id": "openmontage-mcp", "status": "online"}],
+    }
+
+
+def test_rest_overview_reports_stale_lease_as_degraded(tmp_path: Path) -> None:
+    start = datetime(2026, 8, 5, 10, 0, 0, tzinfo=timezone.utc)
+    service = JobService(tmp_path / "jobs.sqlite3")
+    client = TestClient(
+        build_http_app(
+            job_service=service,
+            attribution_resolver=TrustedAttributionResolver(SERVICE_TOKEN),
+            now_fn=lambda: start + timedelta(minutes=5),
+        )
+    )
+    job_id = client.post(
+        "/api/v1/jobs", json=_request(), headers=_headers()
+    ).json()["data"]["jobId"]
+    service.start_stage(job_id, "research")
+    service.claim_job(
+        worker_id="worker-1", lease_duration=timedelta(seconds=1), now=start
+    )
+
+    response = client.get("/api/v1/overview", headers=_headers())
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["health"] == {
+        "service": "degraded",
+        "workers": [{"id": "worker-1", "status": "degraded"}],
+    }
+
+
+def test_rest_overview_is_scoped_to_workspace(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    client.post("/api/v1/jobs", json=_request(), headers=_headers())
+    other = _attribution().model_copy(update={"workspace_id": "ws-2"})
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(other.to_wire(), separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+
+    response = client.get(
+        "/api/v1/overview",
+        headers={
+            "Authorization": f"Bearer {SERVICE_TOKEN}",
+            "X-Dofe-Job-Attribution": encoded,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["workspaceId"] == "ws-2"
+    assert data["jobs"]["total"] == 0
+    assert data["artifacts"]["total"] == 0
+
+
+def test_rest_overview_echoes_request_id(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+
+    response = client.get(
+        "/api/v1/overview",
+        headers={**_headers(), "X-Request-Id": "req-dashboard-42"},
+    )
+
+    assert response.json()["meta"]["requestId"] == "req-dashboard-42"

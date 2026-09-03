@@ -501,6 +501,7 @@ def build_http_app(
     *,
     job_service: Any = None,
     attribution_resolver: Any = None,
+    now_fn: Any = None,
 ) -> Any:
     from starlette.responses import JSONResponse
     from starlette.routing import Route
@@ -525,7 +526,10 @@ def build_http_app(
     async def health(_: Any) -> JSONResponse:
         return JSONResponse({"status": "ok", "service": "openmontage-mcp"})
 
-    routes = [Route("/healthz", health, methods=["GET"]), *create_job_routes(service, resolver)]
+    routes = [
+        Route("/healthz", health, methods=["GET"]),
+        *create_job_routes(service, resolver, now_fn=now_fn),
+    ]
     for route in reversed(routes):
         app.routes.insert(0, route)
     return McpGatewayAuthMiddleware(
