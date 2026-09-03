@@ -76,9 +76,10 @@ def _exports_block(project_id: str) -> dict[str, Any]:
     """Describe (and materialize) the on-demand file-server export surface.
 
     When the file-server exporter is configured (docker/CI deployment) project files
-    are mirrored into the shared exchange for CI DSH consumers. Remote clients must
-    use the authenticated ``read_project_file`` MCP tool for text analysis files;
-    returned host paths are not local filesystem paths.
+    are mirrored into the shared exchange for CI-side delivery workflows. Remote
+    clients must use the authenticated ``read_project_file`` and
+    ``read_project_image`` MCP tools; returned host paths are never local filesystem
+    paths.
     """
     exporter = ProjectFileExporter()
     if not exporter.enabled:
@@ -98,9 +99,11 @@ def _exports_block(project_id: str) -> dict[str, Any]:
         "instructions": (
             "List the prepared project files with list_project_files(project_id). For JSON/"
             "Markdown analysis, call read_project_file(project_id, relative_path) through "
-            "the authenticated MCP channel; do not use a local Read tool on /exchange or "
-            "the CI-only http URL. Use sync_project_exports / export_project_file only for "
-            "CI DSH shared-mount or media delivery workflows."
+            "the authenticated MCP channel. For visual inspection, call "
+            "read_project_image(project_id, relative_path), which returns native MCP "
+            "image content. Never pass /exchange paths or the CI-only HTTP URL to a "
+            "local filesystem/image tool. Use sync_project_exports / export_project_file "
+            "only for CI-side shared-mount or media delivery workflows."
         ),
     }
 

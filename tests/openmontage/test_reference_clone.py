@@ -174,6 +174,41 @@ def test_read_project_file_returns_bounded_text(tmp_path):
         raise AssertionError("Expected the bounded read to reject an oversized file")
 
 
+def test_read_project_image_returns_native_image_bytes(tmp_path):
+    project_dir = tmp_path / "clone-example"
+    project_dir.mkdir()
+    # Small valid PNG signature/body is sufficient for the transport contract;
+    # image decoding is owned by the receiving MCP client.
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    (project_dir / "reference" / "keyframes").mkdir(parents=True)
+    (project_dir / "reference" / "keyframes" / "frame_0000.png").write_bytes(png)
+    exporter = ProjectFileExporter(projects_root=tmp_path)
+
+    relative, data, media_type = exporter.read_image_bytes(
+        "clone-example", "reference/keyframes/frame_0000.png"
+    )
+
+    assert relative == "reference/keyframes/frame_0000.png"
+    assert data == png
+    assert media_type == "image/png"
+
+
+def test_read_project_image_rejects_paths_outside_project(tmp_path):
+    project_dir = tmp_path / "clone-example"
+    project_dir.mkdir()
+    exporter = ProjectFileExporter(projects_root=tmp_path)
+
+    try:
+        exporter.read_image_bytes("clone-example", "../outside.png")
+    except ProjectFileExportError as exc:
+        assert "relative_path" in str(exc) or "traverse" in str(exc)
+    else:
+        raise AssertionError("Expected image path traversal to be rejected")
+
+
 def test_capabilities_include_replayable_job_submission_contract(monkeypatch):
     monkeypatch.setattr(
         reference_clone.registry,

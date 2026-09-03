@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal
@@ -421,8 +422,8 @@ def create_server(
 
         Returns every file's project-relative path and size (metadata only; nothing is
         copied), plus the shared file-server export root when the file-server exporter
-        is enabled. Use ``export_project_file`` to mirror a specific file into the
-        shared exchange so the workspace agent can read it.
+        is enabled. Use ``read_project_file``/``read_project_image`` for client-side
+        inspection; use ``export_project_file`` only for CI-side delivery workflows.
         """
         return ProjectFileExporter().list(project_id)
 
@@ -430,10 +431,10 @@ def create_server(
     def export_project_file(project_id: str, relative_path: str, include_media: bool = False) -> dict[str, Any]:
         """Mirror one project file (or a whole directory) into the shared file-server.
 
-        Returns CI shared-mount references. Remote clients should use
-        ``read_project_file`` for text; the loopback URL is CI-internal. Copying is on
-        demand and, by default, skips large media files; pass ``include_media=true`` to
-        mirror a media file (e.g. the reference video).
+        Returns CI shared-mount references. Remote clients must use
+        ``read_project_file``/``read_project_image`` instead; the loopback URL and
+        ``/exchange`` path are CI-internal. Copying is on demand and, by default,
+        skips large media files; pass ``include_media=true`` for CI-side delivery.
         """
         return ProjectFileExporter().export(project_id, relative_path, include_media=include_media)
 
@@ -441,6 +442,41 @@ def create_server(
     def read_project_file(project_id: str, relative_path: str, max_bytes: int = 2_000_000) -> dict[str, Any]:
         """Read a bounded UTF-8 analysis file through the authenticated MCP channel."""
         return ProjectFileExporter().read_text(project_id, relative_path, max_bytes=max_bytes)
+
+    @server.tool(structured_output=False)
+    def read_project_image(
+        project_id: str,
+        relative_path: str,
+        max_bytes: int = 4_000_000,
+    ) -> Any:
+        """Read one project image and return it as native MCP image content.
+
+        This is the only supported visual-inspection path for prepared
+        projects. The image is read in the OpenMontage/CI process and returned
+        inline, so clients never need to resolve a CI-only ``/exchange`` path.
+        """
+        from mcp.types import CallToolResult, ImageContent, TextContent
+
+        relative, data, media_type = ProjectFileExporter().read_image_bytes(
+            project_id,
+            relative_path,
+            max_bytes=max_bytes,
+        )
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=(
+                        f"<path>{relative}</path>\n<type>image</type>\n"
+                        f"<content>{media_type} image, {len(data)} bytes</content>"
+                    ),
+                ),
+                ImageContent(
+                    data=base64.b64encode(data).decode("ascii"),
+                    mimeType=media_type,
+                ),
+            ]
+        )
 
     @server.tool()
     def read_openmontage_file(path: str, max_bytes: int = 2_000_000) -> dict[str, Any]:
@@ -462,9 +498,10 @@ def create_server(
         """Mirror a prepared project's whole analysis set into the shared file-server.
 
         Copies the artifacts, keyframes, scenes, transcript, briefs and manifest —
-        everything the agent inspects — while leaving large media files uncopied. Returns
-        the DSH-readable ``export_file_path`` (``/exchange/...``) and the list of files
-        now available; each entry's ``file_path`` is what the DSH GUI can open.
+        everything needed by CI-side delivery workflows — while leaving large media
+        files uncopied. Returns CI-only ``export_file_path``/``/exchange`` references;
+        remote Agents must use ``read_project_file`` or ``read_project_image`` for
+        inspection.
         """
         return ProjectFileExporter().export_analysis(project_id)
 

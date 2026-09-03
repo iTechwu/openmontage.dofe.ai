@@ -87,7 +87,11 @@ Use this to determine the production approach:
 Getting this wrong leads to proposing the wrong pipeline and wrong tool path.
 
 **Vision analysis:** After presenting the structural data, examine the extracted
-keyframes yourself. You ARE a multimodal model — look at the keyframe images and
+keyframes yourself. You ARE a multimodal model — call the OpenMontage MCP tool
+`read_project_image(project_id, relative_path)` for each selected keyframe. That
+tool reads the image on the CI server and returns native MCP image content. Never
+pass `/exchange/...` paths, container paths, or the CI file-server URL to a local
+filesystem/image tool. Then look at the keyframe images and
 enrich the VideoAnalysisBrief with:
 - Per-frame descriptions (subjects, text, composition, color)
 - Cross-frame visual continuity and style consistency

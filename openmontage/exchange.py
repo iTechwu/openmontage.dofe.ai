@@ -1,13 +1,11 @@
 """On-demand export of OpenMontage project files through the shared file-server.
 
-The workspace agent (DSH harness) cannot read OpenMontage's project directory
-(``/data/projects/<id>/...``): it lives in the OpenMontage container namespace
-and is not mounted into the harness. To let the agent fetch generated files we
-mirror them into the shared exchange directory that the ``mcp-file-server``
-already serves (host ``/data/mcp-exchange`` -> ``http://127.0.0.1:18090``, and
-``/exchange`` inside the harness). The base URL uses ``127.0.0.1`` because the
-harness runs in host-network mode and cannot resolve ``host.docker.internal``;
-OpenMontage only builds this URL string and never fetches it.
+OpenMontage's project directory (``/data/projects/<id>/...``) lives in the CI
+container namespace and is not mounted into the desktop Agent. The exchange
+directory is therefore only a CI-side delivery mirror. Desktop visual
+inspection uses the authenticated ``read_project_image`` MCP tool, which
+returns native image content; clients must never resolve the mirror's
+``/exchange`` path locally.
 
 The exporter mirrors files with a small margin but never over-copies, and keeps
 the mirror healthy with periodic cleanup:
@@ -26,7 +24,7 @@ Configuration (the docker/CI deployment sets these; local dev leaves them unset,
 in which case the exporter is disabled and container paths are returned as-is):
 
   OPENMONTAGE_EXPORT_DIR            container mirror target, e.g. /data/mcp-exchange/openmontage
-  OPENMONTAGE_FILE_SERVER_BASE_URL  public file-server base, e.g. http://host.docker.internal:18090
+  OPENMONTAGE_FILE_SERVER_BASE_URL  CI-internal file-server base, e.g. http://127.0.0.1:18090
   OPENMONTAGE_EXPORT_PREFIX         URL path segment under the base; default is the
                                     last component of OPENMONTAGE_EXPORT_DIR ("openmontage")
 """
@@ -49,6 +47,7 @@ _HARNESS_EXCHANGE_PATH = os.environ.get("OPENMONTAGE_HARNESS_EXCHANGE_PATH", "/e
 
 # Media extensions that are large and only worth mirroring when explicitly asked.
 _MEDIA_EXTENSIONS = frozenset({".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".wav", ".mp3", ".m4a", ".flac"})
+_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif"})
 
 
 class ProjectFileExportError(RuntimeError):
@@ -81,6 +80,18 @@ def _safe_relative(relative_path: str) -> Path:
 
 def _is_media(path: Path) -> bool:
     return path.suffix.lower() in _MEDIA_EXTENSIONS
+
+
+def _image_media_type(data: bytes) -> str | None:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
 
 
 def _ignore_media(dir_path: str, names: list[str]) -> set[str]:
@@ -282,6 +293,46 @@ class ProjectFileExporter:
             "size_bytes": size_bytes,
             "content": content,
         }
+
+    def read_image_bytes(
+        self,
+        project_id: str,
+        relative_path: str,
+        *,
+        max_bytes: int = 4_000_000,
+    ) -> tuple[str, bytes, str]:
+        """Read one project image for native MCP image content.
+
+        The bytes stay inside the authenticated OpenMontage MCP call.  This is
+        intentionally separate from ``export``: a desktop Agent cannot resolve
+        the CI-only ``/exchange`` mount, and returning that path creates a
+        misleading local-file contract.
+        """
+        if max_bytes <= 0 or max_bytes > 10_000_000:
+            raise ProjectFileExportError("max_bytes must be between 1 and 10000000")
+        project_dir = _project_dir(self.projects_root, project_id)
+        rel = _safe_relative(relative_path)
+        if rel.suffix.lower() not in _IMAGE_EXTENSIONS:
+            raise ProjectFileExportError(
+                "Only PNG, JPEG, WebP, and GIF images can be read through MCP"
+            )
+        source = (project_dir / rel).resolve()
+        if not str(source).startswith(str(project_dir) + os.sep):
+            raise ProjectFileExportError("relative_path escaped the project directory")
+        if not source.is_file():
+            raise ProjectFileExportError(f"Not an image file in project {project_id}: {relative_path}")
+        size_bytes = source.stat().st_size
+        if size_bytes > max_bytes:
+            raise ProjectFileExportError(
+                f"Image is {size_bytes} bytes; reduce max_bytes or use a smaller keyframe"
+            )
+        data = source.read_bytes()
+        media_type = _image_media_type(data)
+        if media_type is None:
+            raise ProjectFileExportError(
+                "Image bytes are not a valid PNG, JPEG, WebP, or GIF"
+            )
+        return str(rel), data, media_type
 
     def export_analysis(self, project_id: str) -> dict[str, Any]:
         """Mirror the whole project analysis set, skipping large media files.

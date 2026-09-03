@@ -78,7 +78,33 @@ async def test_mcp_server_publishes_reference_clone_surface():
         "submit_client_stage",
         "read_openmontage_file",
         "read_project_file",
+        "read_project_image",
     }
     assert {str(resource.uri) for resource in resources.resources} == {
         "openmontage://reference-clone-guide"
     }
+
+
+@pytest.mark.asyncio
+async def test_mcp_server_returns_project_images_as_native_content(tmp_path, monkeypatch):
+    from mcp import Client
+
+    from openmontage import exchange
+    from openmontage.mcp_server import create_server
+
+    project = tmp_path / "clone-demo" / "reference" / "keyframes"
+    project.mkdir(parents=True)
+    (project / "frame_0000.jpg").write_bytes(b"\xff\xd8\xfffake")
+    monkeypatch.setattr(exchange, "PROJECTS_DIR", tmp_path)
+
+    async with Client(create_server()) as client:
+        result = await client.call_tool(
+            "read_project_image",
+            {
+                "project_id": "clone-demo",
+                "relative_path": "reference/keyframes/frame_0000.jpg",
+            },
+        )
+
+    assert [item.type for item in result.content] == ["text", "image"]
+    assert result.content[1].mime_type == "image/jpeg"
