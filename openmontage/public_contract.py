@@ -394,4 +394,6 @@ def _artifact_order(artifact: PublishedArtifact) -> str:
 def _isoformat(value: Any) -> str:
     if isinstance(value, datetime):
         return value.isoformat()
+    if value is None:
+        return ""
     return str(value)

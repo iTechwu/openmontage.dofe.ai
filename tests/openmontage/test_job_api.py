@@ -944,6 +944,20 @@ def test_rest_overview_reports_approval_wait_metrics(tmp_path: Path) -> None:
     assert "employeeId" not in json.dumps(approvals)
 
 
+def test_rest_overview_without_waiting_jobs_has_empty_approval_times(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    client.post("/api/v1/jobs", json=_request(), headers=_headers())
+
+    response = client.get("/api/v1/overview", headers=_headers())
+
+    assert response.status_code == 200
+    approvals = response.json()["data"]["approvals"]
+    assert approvals["pending"] == 0
+    # 无等待作业时必须是空串/None 值，绝不能序列化出字符串 "None"
+    assert approvals["oldestWaitingAt"] == ""
+    assert approvals["waitP50Ms"] is None
+
+
 def test_rest_overview_is_scoped_to_workspace(tmp_path: Path) -> None:
     client, _ = _client(tmp_path)
     client.post("/api/v1/jobs", json=_request(), headers=_headers())
