@@ -41,7 +41,7 @@ def test_docker_contract_exposes_mcp_and_persists_projects():
     assert "OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL" in compose
     assert "DOFE_DOCKER_MODEL_BASE_URL" in compose
     assert "DOFE_DOCKER_INTERNAL_API_BASE_URL" in compose
-    assert "http://dofe-models-api:3101" in compose
+    assert "https://ixicai.cn/api" in compose
     assert "http://api:3101" not in compose
     assert "DOFE_MODEL_API_KEY:" not in compose
     assert "INTERNAL_API_SECRET:" not in compose
