@@ -30,7 +30,9 @@ SERVICE_WORKER_ID = "openmontage-mcp"
 # Daily series allowlist (docs/0903/dashboard §4 P1): the dashboard buckets
 # days in one of these zones; anything else is rejected by the route.
 SERIES_TIME_ZONES = ("Asia/Shanghai", "UTC")
-SERIES_MAX_DAYS = 31
+# 与 Models usage/daily 的 366 天上限对齐（docs/0903/dashboard P2 长期留存）。
+# SQLite 本地扫描 + 原始行是唯一权威（无删除策略），放宽窗口不需要物化表。
+SERIES_MAX_DAYS = 366
 _SERIES_STATUSES = (
     "queued",
     "running",

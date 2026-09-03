@@ -688,7 +688,7 @@ class JobService:
             raise ValueError("workspace_id is required")
         if end <= start:
             raise ValueError("series end must be after start")
-        bounded = min(10000, max(1, int(limit)))
+        bounded = min(20000, max(1, int(limit)))
         start_text = start.astimezone(timezone.utc).isoformat()
         end_text = end.astimezone(timezone.utc).isoformat()
         with self._connect() as connection:

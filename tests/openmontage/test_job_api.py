@@ -855,7 +855,8 @@ def test_rest_series_requires_authentication_and_valid_ranges(tmp_path: Path) ->
     for query, headers in [
         ("", _headers()),  # 缺少 start/end
         ("?start=2026-09-03T00:00:00%2B08:00&end=2026-09-01T00:00:00%2B08:00", _headers()),
-        ("?start=2026-09-01T00:00:00%2B08:00&end=2026-10-05T00:00:00%2B08:00", _headers()),
+        # 窗口上限已放宽到 366 天（docs/0903/dashboard P2），399 天仍拒绝
+        ("?start=2026-09-01T00:00:00%2B08:00&end=2027-10-05T00:00:00%2B08:00", _headers()),
         (f"{window}&timezone=America/New_York", _headers()),
         ("?start=2026-09-01&end=2026-09-03T00:00:00%2B08:00", _headers()),
     ]:
