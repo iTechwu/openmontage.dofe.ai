@@ -152,7 +152,7 @@
 
 - `test_docker_job_bridge.py::test_compose_ships_no_in_container_job_worker` — 断言 `"worker" not in compose_text` 匹配到 compose 注释中的 "worker" 字样。
 - `test_event_outbox.py::test_publisher_from_environment_requires_a_complete_bridge_configuration`
-- `test_integration_contracts.py::test_docker_contract_exposes_mcp_and_persists_projects` — 断言 `http://dofe-models-api:3101`，实际 compose 用 `host.docker.internal`。
+- `test_integration_contracts.py::test_docker_contract_exposes_mcp_and_persists_projects` — 已解决：断言已对齐公共 Models API `https://ixicai.cn/api`。
 - `test_integration_contracts.py::test_mcp_server_publishes_reference_clone_surface`
 - `test_job_worker.py::test_worker_pauses_at_approval_and_resumes_with_latest_job_snapshot`
 - `test_reference_clone.py::test_prepare_creates_agent_ready_airouter_project`
