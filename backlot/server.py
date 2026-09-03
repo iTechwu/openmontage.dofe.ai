@@ -13,6 +13,7 @@ import json
 import os
 import secrets
 import time
+from collections.abc import Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Optional
@@ -29,6 +30,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 
 from backlot.state import PROJECTS_DIR, REPO_ROOT, list_projects, load_board_state, summarize_project
+from backlot.workspace_map import WorkspaceMap
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
 THUMB_CACHE_DIR = Path(
@@ -101,25 +103,27 @@ def _auth_html(base_path: str) -> HTMLResponse:
 class ChangeHub:
     """Fan-out of project-change notifications to SSE subscribers.
 
-    Subscriptions are filtered: a board subscribed to one project only ever
-    receives that project's ids, so unrelated-project bursts can't flood its
-    queue and starve out the one notification it actually needs.
+    Subscriptions carry an ``accepts`` predicate: a board subscribed to one
+    project only ever receives that project's ids, and an authenticated
+    subscriber only ever receives ids inside its workspace, so unrelated or
+    foreign-project bursts can't flood its queue and starve out the one
+    notification it actually needs.
     """
 
     def __init__(self) -> None:
-        self._subscribers: dict[asyncio.Queue, Optional[str]] = {}
+        self._subscribers: dict[asyncio.Queue, Callable[[str], bool]] = {}
 
-    def subscribe(self, project_id: Optional[str] = None) -> asyncio.Queue:
+    def subscribe(self, accepts: Optional[Callable[[str], bool]] = None) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=64)
-        self._subscribers[q] = project_id
+        self._subscribers[q] = accepts or (lambda _project_id: True)
         return q
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
         self._subscribers.pop(q, None)
 
     def publish(self, project_id: str) -> None:
-        for q, only in list(self._subscribers.items()):
-            if only is not None and only != project_id:
+        for q, accepts in list(self._subscribers.items()):
+            if not accepts(project_id):
                 continue
             try:
                 q.put_nowait(project_id)
@@ -229,6 +233,7 @@ def create_app() -> FastAPI:
     ).lower() not in {"0", "false", "no"}
     session_ttl = 12 * 60 * 60
     sessions: dict[str, tuple[float, str]] = {}
+    workspace_map = WorkspaceMap(PROJECTS_DIR)
 
     def session_is_valid(token: str | None) -> bool:
         if not token:
@@ -239,6 +244,41 @@ def create_app() -> FastAPI:
             sessions.pop(token, None)
             return False
         return True
+
+    def session_workspace(token: str | None) -> str | None:
+        entry = sessions.get(token or "")
+        if entry and entry[0] > time.monotonic():
+            return entry[1]
+        return None
+
+    def _request_workspace(request: Request) -> str | None:
+        """Session workspace in auth mode; None means dev mode (no scoping)."""
+        if not auth_url:
+            return None
+        return session_workspace(request.cookies.get("openmontage_backlot_session"))
+
+    def authorize_project(request: Request, project_id: str) -> None:
+        """404 unless the session workspace owns the project (auth mode only).
+
+        Fails closed as 404 (not 403) so a foreign project id is
+        indistinguishable from an unknown one.
+        """
+        if not auth_url:
+            return
+        workspace = session_workspace(
+            request.cookies.get("openmontage_backlot_session")
+        )
+        if workspace is None or workspace_map.workspace_of(project_id) != workspace:
+            raise HTTPException(status_code=404, detail="unknown project")
+
+    def _workspace_accepts(workspace: str | None) -> Callable[[str], bool]:
+        """SSE predicate: dev mode sees all changes; auth mode sees only the
+        session workspace's projects (nothing at all without a workspace)."""
+        if not auth_url:
+            return lambda _project_id: True
+        if workspace is None:
+            return lambda _project_id: False
+        return lambda project_id: workspace_map.workspace_of(project_id) == workspace
 
     if auth_url:
         @app.middleware("http")
@@ -275,17 +315,22 @@ def create_app() -> FastAPI:
             if not isinstance(api_key, str) or not api_key or len(api_key) > 4096:
                 return JSONResponse({"error": "invalid_api_key"}, status_code=401)
             try:
-                workspace_id = await asyncio.to_thread(_validate_models_api_key, api_key, auth_url)
+                tenant_id = await asyncio.to_thread(
+                    _validate_models_api_key, api_key, auth_url
+                )
             except ModelsAuthUnavailable:
                 return JSONResponse({"error": "auth_unavailable"}, status_code=503)
-            if not workspace_id:
+            if not tenant_id:
                 return JSONResponse({"error": "invalid_api_key"}, status_code=401)
             now = time.monotonic()
             for expired_token, expires_at in list(sessions.items()):
                 if expires_at[0] <= now:
                     sessions.pop(expired_token, None)
             token = secrets.token_urlsafe(32)
-            sessions[token] = (now + session_ttl, workspace_id)
+            # Canonical workspace id, matching the JobService attribution
+            # (workspace_id = tenant:{tenantId}) so board visibility lines up
+            # with job ownership in workspace-map.json.
+            sessions[token] = (now + session_ttl, f"tenant:{tenant_id}")
             response = Response(status_code=204)
             response.set_cookie(
                 "openmontage_backlot_session",
@@ -308,20 +353,28 @@ def create_app() -> FastAPI:
         return {"ok": True, "app": "backlot"}
 
     @app.get("/api/projects")
-    async def projects() -> list:
-        return await asyncio.to_thread(_cached_summaries)
+    async def projects(request: Request) -> list:
+        summaries = await asyncio.to_thread(_cached_summaries)
+        workspace = _request_workspace(request)
+        if workspace is None:
+            return summaries
+        allowed = workspace_map.projects_for(workspace)
+        return [s for s in summaries if s["project_id"] in allowed]
 
     @app.get("/api/project/{project_id}/state")
-    async def project_state(project_id: str) -> dict:
+    async def project_state(project_id: str, request: Request) -> dict:
+        authorize_project(request, project_id)
         project_dir = _safe_project_dir(project_id)
         return await asyncio.to_thread(load_board_state, project_dir)
 
     @app.get("/api/project/{project_id}/events")
     async def project_events(project_id: str, request: Request) -> StreamingResponse:
+        authorize_project(request, project_id)
+        accepts = _workspace_accepts(_request_workspace(request))
         _safe_project_dir(project_id)  # 404 early for unknown projects
 
         async def stream():
-            q = hub.subscribe(project_id)
+            q = hub.subscribe(lambda pid: pid == project_id and accepts(pid))
             try:
                 yield _sse({"type": "hello", "project_id": project_id})
                 while True:
@@ -349,8 +402,10 @@ def create_app() -> FastAPI:
 
     @app.get("/api/library/events")
     async def library_events(request: Request) -> StreamingResponse:
+        accepts = _workspace_accepts(_request_workspace(request))
+
         async def stream():
-            q = hub.subscribe()
+            q = hub.subscribe(accepts)
             try:
                 yield _sse({"type": "hello"})
                 while True:
@@ -378,7 +433,10 @@ def create_app() -> FastAPI:
     # ---- Thumbnails (downscaled, cached on disk) ------------------------
 
     @app.get("/thumb/{project_id}/{file_path:path}")
-    async def thumb(project_id: str, file_path: str, w: int = 640) -> FileResponse:
+    async def thumb(
+        project_id: str, file_path: str, request: Request, w: int = 640
+    ) -> FileResponse:
+        authorize_project(request, project_id)
         project_dir = _safe_project_dir(project_id)
         target = (project_dir / file_path).resolve()
         try:
@@ -400,7 +458,10 @@ def create_app() -> FastAPI:
     # ---- Media (range requests handled by FileResponse) ---------------
 
     @app.get("/media/{project_id}/{file_path:path}")
-    async def media(project_id: str, file_path: str) -> FileResponse:
+    async def media(
+        project_id: str, file_path: str, request: Request
+    ) -> FileResponse:
+        authorize_project(request, project_id)
         project_dir = _safe_project_dir(project_id)
         target = (project_dir / file_path).resolve()
         try:
@@ -414,11 +475,13 @@ def create_app() -> FastAPI:
     # ---- UI ------------------------------------------------------------
 
     @app.get("/p/{project_id}")
-    async def board_page(project_id: str) -> HTMLResponse:
+    async def board_page(project_id: str, request: Request) -> HTMLResponse:
+        authorize_project(request, project_id)
         return _ui_html("board.html", ("board.css", "board.js"), base_path)
 
     @app.get("/p/{project_path:path}")
-    async def board_page_path(project_path: str) -> HTMLResponse:
+    async def board_page_path(project_path: str, request: Request) -> HTMLResponse:
+        authorize_project(request, project_path.split("/", 1)[0])
         return _ui_html("board.html", ("board.css", "board.js"), base_path)
 
     @app.get("/")

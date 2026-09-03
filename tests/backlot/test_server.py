@@ -131,7 +131,7 @@ class TestBacklotServerApi:
         monkeypatch.setattr(
             server_mod,
             "_validate_models_api_key",
-            lambda api_key, auth_url: api_key == "valid-key",
+            lambda api_key, auth_url: "tenant-a" if api_key == "valid-key" else None,
         )
 
         with TestClient(server_mod.create_app(), follow_redirects=False) as auth_client:
@@ -153,7 +153,10 @@ class TestBacklotServerApi:
         assert "HttpOnly" in accepted.headers["set-cookie"]
         assert "Path=/montage" in accepted.headers["set-cookie"]
         assert "SameSite=none" in accepted.headers["set-cookie"]
+        # Fail closed: no workspace-map entry exists, so the session's
+        # tenant has no visible projects yet.
         assert projects.status_code == 200
+        assert projects.json() == []
 
     def test_projects_shape_and_state(self, client, projects_root):
         _make_project(projects_root, "film")
@@ -267,3 +270,117 @@ class TestFindingsFixes:
         fake_video.write_bytes(b"\x00" * 4096)
         res = client.get("/thumb/vid/renders/final.mp4")
         assert res.status_code == 404  # never the raw video bytes (F-03)
+
+
+def _bind_workspace(root, mapping):
+    dot = root / ".openmontage"
+    dot.mkdir(parents=True, exist_ok=True)
+    (dot / "workspace-map.json").write_text(json.dumps(mapping), encoding="utf-8")
+
+
+class TestBacklotWorkspaceIsolation:
+    """docs/0903 §4: an authenticated session only ever sees its own tenant's
+    projects. Foreign or unbound projects answer 404 — never 403 — so the id
+    space is indistinguishable from "unknown"."""
+
+    @pytest.fixture
+    def auth_client(self, projects_root, monkeypatch):
+        async def no_watch():
+            return None
+
+        monkeypatch.setattr(server_mod, "_watch_projects", no_watch)
+        monkeypatch.setenv(
+            "OPENMONTAGE_BACKLOT_AUTH_URL",
+            "http://models.test/internal/mcp/auth-context",
+        )
+        monkeypatch.setenv("OPENMONTAGE_BACKLOT_SECURE_COOKIE", "false")
+        monkeypatch.setattr(
+            server_mod,
+            "_validate_models_api_key",
+            lambda api_key, auth_url: api_key.removeprefix("key-for-") or None,
+        )
+        with TestClient(server_mod.create_app(), follow_redirects=False) as instance:
+            yield instance
+
+    def _session(self, client, tenant):
+        response = client.post("/auth/session", json={"apiKey": f"key-for-{tenant}"})
+        assert response.status_code == 204
+        return response.headers["set-cookie"].split(";", 1)[0]
+
+    def test_projects_list_scoped_to_session_workspace(
+        self, auth_client, projects_root
+    ):
+        _make_project(projects_root, "film")
+        _make_project(projects_root, "promo")
+        _bind_workspace(projects_root, {"film": "tenant:tenant-a", "promo": "tenant:tenant-b"})
+
+        own = auth_client.get("/api/projects", headers={"Cookie": self._session(auth_client, "tenant-a")})
+        other = auth_client.get("/api/projects", headers={"Cookie": self._session(auth_client, "tenant-b")})
+
+        assert [s["project_id"] for s in own.json()] == ["film"]
+        assert [s["project_id"] for s in other.json()] == ["promo"]
+
+    def test_foreign_project_routes_return_404(self, auth_client, projects_root):
+        project = _make_project(projects_root, "film")
+        _write_png(project / "assets" / "images" / "still.png")
+        _bind_workspace(projects_root, {"film": "tenant:tenant-a"})
+        cookie = self._session(auth_client, "tenant-b")
+
+        assert auth_client.get("/api/projects", headers={"Cookie": cookie}).json() == []
+        assert auth_client.get("/api/project/film/state", headers={"Cookie": cookie}).status_code == 404
+        assert auth_client.get("/api/project/film/events", headers={"Cookie": cookie}).status_code == 404
+        assert auth_client.get("/p/film", headers={"Cookie": cookie}).status_code == 404
+        assert auth_client.get(
+            "/thumb/film/assets/images/still.png", headers={"Cookie": cookie}
+        ).status_code == 404
+        assert auth_client.get(
+            "/media/film/assets/images/still.png", headers={"Cookie": cookie}
+        ).status_code == 404
+
+    def test_unbound_project_hidden_even_from_own_tenant(
+        self, auth_client, projects_root
+    ):
+        _make_project(projects_root, "orphan")
+        cookie = self._session(auth_client, "tenant-a")
+
+        assert auth_client.get("/api/projects", headers={"Cookie": cookie}).json() == []
+        assert auth_client.get("/api/project/orphan/state", headers={"Cookie": cookie}).status_code == 404
+
+    def test_workspace_map_updates_are_picked_up(self, auth_client, projects_root):
+        _make_project(projects_root, "film")
+        cookie = self._session(auth_client, "tenant-a")
+
+        before = auth_client.get("/api/project/film/state", headers={"Cookie": cookie})
+        _bind_workspace(projects_root, {"film": "tenant:tenant-a"})
+        after = auth_client.get("/api/project/film/state", headers={"Cookie": cookie})
+
+        assert before.status_code == 404
+        assert after.status_code == 200
+
+    def test_library_events_never_deliver_foreign_projects(self, projects_root):
+        hub = server_mod.ChangeHub()
+        workspace_map = server_mod.WorkspaceMap(projects_root)
+        _bind_workspace(projects_root, {"film": "tenant:tenant-a"})
+
+        tenant_a = hub.subscribe(
+            lambda pid: workspace_map.workspace_of(pid) == "tenant:tenant-a"
+        )
+        tenant_b = hub.subscribe(
+            lambda pid: workspace_map.workspace_of(pid) == "tenant:tenant-b"
+        )
+        unfiltered = hub.subscribe()
+
+        hub.publish("film")
+
+        assert tenant_a.qsize() == 1
+        assert tenant_b.qsize() == 0
+        assert unfiltered.qsize() == 1
+
+    def test_auth_disabled_mode_ignores_the_map(self, client, projects_root):
+        _make_project(projects_root, "film")
+        _bind_workspace(projects_root, {"film": "tenant:tenant-a"})
+
+        response = client.get("/api/projects")
+
+        assert response.status_code == 200
+        assert [s["project_id"] for s in response.json()] == ["film"]
