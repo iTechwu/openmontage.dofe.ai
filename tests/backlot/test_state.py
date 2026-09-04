@@ -354,3 +354,19 @@ class TestStoryboardVisualSelection:
         assert card["visual"]["exists"] is True
         assert card["visual"]["path"].endswith("real.png")
         assert [t["path"].split("/")[-1] for t in card["takes"]] == ["real.png"]
+
+    def test_media_history_groups_images_and_videos_by_extension(self, projects_root):
+        p = self._project_with_scenes(
+            projects_root,
+            [{"id": "sc1", "type": "generated", "start_seconds": 0, "end_seconds": 5}],
+            [
+                {"id": "img", "type": "image", "path": "assets/images/one.png", "scene_id": "sc1"},
+                {"id": "clip", "type": "animation", "path": "renders/two.mp4", "scene_id": "sc1"},
+            ],
+        )
+        (p / "assets" / "images" / "one.png").write_bytes(b"fake")
+        (p / "renders" / "two.mp4").write_bytes(b"fake")
+        card = self._card(p, "sc1")
+        assert [x["id"] for x in card["media_history"]["images"]] == ["img"]
+        assert [x["id"] for x in card["media_history"]["videos"]] == ["clip"]
+        assert card["media_history"]["videos"][0]["media_type"] == "video"

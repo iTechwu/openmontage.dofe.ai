@@ -315,24 +315,26 @@ def _asset_entry(project_dir: Path, asset: dict) -> dict:
     file_path = resolved if resolved is not None else (project_dir / raw_path)
     exists = resolved is not None
     kind = asset.get("type") or ""
-    if not kind and file_path.suffix:
-        ext = file_path.suffix.lower()
-        if ext in MEDIA_IMAGE_EXT:
-            kind = "image"
-        elif ext in MEDIA_VIDEO_EXT:
-            kind = "video"
-        elif ext in MEDIA_AUDIO_EXT:
-            kind = "audio"
+    ext = file_path.suffix.lower()
+    media_type = None
+    if ext in MEDIA_IMAGE_EXT:
+        media_type = "image"
+    elif ext in MEDIA_VIDEO_EXT:
+        media_type = "video"
+    elif ext in MEDIA_AUDIO_EXT:
+        media_type = "audio"
+    if not kind and media_type:
+        kind = media_type
     # A visual is only *renderable* on the board if the file it points at is
     # actually a raster image or a video. Bespoke/atelier assets (type
     # "animation" pointing at a .tsx composition) exist on disk but can't be
     # thumbnailed — routing them to <img> yields a broken image. The board
     # falls back to a per-scene snapshot or the shot-spec placeholder instead.
-    ext = file_path.suffix.lower()
     renderable = exists and ext in (MEDIA_IMAGE_EXT | MEDIA_VIDEO_EXT)
     return {
         "id": asset.get("id"),
         "type": kind,
+        "media_type": media_type,
         "scene_id": asset.get("scene_id"),
         "path": _rel(project_dir, file_path) if exists else raw_path,
         "exists": exists,
@@ -449,6 +451,10 @@ def _build_storyboard(
         # Only files that can actually be shown (raster/video) are takes; a
         # bespoke composition asset (.tsx animation) is real but not showable.
         renderable = [a for a in visuals if a.get("renderable")]
+        media_history = {
+            "images": [a for a in renderable if a.get("media_type") == "image"],
+            "videos": [a for a in renderable if a.get("media_type") == "video"],
+        }
         # A raster/video asset whose FILE is missing stays as a "file missing"
         # indicator. But an asset that EXISTS yet can't be shown (a .tsx atelier
         # composition) is dropped — it falls back to a per-scene snapshot.
@@ -479,6 +485,7 @@ def _build_storyboard(
             "required_assets": scene.get("required_assets") or [],
             "visual": active_visual,
             "takes": renderable,
+            "media_history": media_history,
             "audio": audio,
             "generating": generating.get(sid) is not None,
             "generating_tool": (generating.get(sid) or {}).get("tool"),

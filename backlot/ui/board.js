@@ -567,9 +567,65 @@ function openNarrModal(card) {
   modal.classList.add("open");
 }
 
-function closeModal() { modal.classList.remove("open"); }
+function closeModal() {
+  modal.querySelectorAll("video").forEach((video) => { video.pause(); video.removeAttribute("src"); video.load(); });
+  modal.innerHTML = "";
+  modal.classList.remove("open");
+}
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
 modal.addEventListener("click", (e) => { if (e.target === modal) closeModal(); });
+
+function mediaKind(media) {
+  if (media && (media.media_type === "image" || media.media_type === "video")) return media.media_type;
+  if (media && (media.type === "image" || media.type === "video")) return media.type;
+  const path = String((media && media.path) || "").toLowerCase();
+  return /\.(mp4|webm|mov)$/.test(path) ? "video" : "image";
+}
+
+function mediaTrigger(node, handler, labelText) {
+  node.setAttribute("role", "button");
+  node.setAttribute("tabindex", "0");
+  node.setAttribute("aria-label", labelText);
+  node.onclick = handler;
+  node.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); handler(); }
+  });
+  return node;
+}
+
+function mediaFileName(media) {
+  const path = String((media && media.path) || "");
+  return path.split("/").pop() || "media";
+}
+
+function openMediaModal(project, media, labelText = "媒体预览") {
+  if (!media || !media.path) return;
+  const kind = mediaKind(media);
+  const src = mediaURL(project, media.path);
+  const name = mediaFileName(media);
+  const preview = kind === "video"
+    ? el("video", { class: "media-modal-media", src, controls: "", preload: "metadata", playsinline: "" })
+    : el("img", { class: "media-modal-media", src, alt: name });
+  preview.onerror = () => {
+    const error = el("div", { class: "media-modal-error", role: "alert" }, "素材暂时无法加载");
+    preview.replaceWith(error);
+  };
+  const download = el("a", { class: "media-action", href: src, download: name }, "下载");
+  modal.innerHTML = "";
+  modal.append(
+    el("button", { class: "modal-close", type: "button", onclick: closeModal, "aria-label": "关闭预览" }, "关闭"),
+    el("div", { class: "media-modal" },
+      el("div", { class: "media-modal-head" },
+        el("div", { class: "media-modal-title" }, labelText),
+        el("div", { class: "media-modal-name" }, name)),
+      preview,
+      el("div", { class: "media-actions" }, download,
+        media.size != null ? el("span", { class: "media-modal-meta" }, `${(Number(media.size) / 1048576).toFixed(1)} MB`) : null,
+        media.source_tool ? el("span", { class: "media-modal-meta" }, media.source_tool) : null),
+    ),
+  );
+  modal.classList.add("open");
+}
 
 // ---------------------------------------------------------------------------
 // right rail: decisions, activity
@@ -698,15 +754,12 @@ function sceneCard(s, card) {
     const v = card.visual;
     const badge = [v.model || v.source_tool, v.cost_usd != null ? fmtMoney(v.cost_usd) : null,
       v.quality_score != null ? `质量 ${v.quality_score}` : null].filter(Boolean).join(" · ");
-    if (v.type === "video") {
+    if (mediaKind(v) === "video") {
       thumb = el("div", { class: "thumb approved" },
         el("video", { src: mediaURL(s.project_id, v.path), muted: "", preload: "metadata", playsinline: "" }),
         el("span", { class: "play" }, "▶"),
         badge ? el("span", { class: "badge" }, badge) : null);
-      thumb.onclick = () => {
-        const vid = thumb.querySelector("video");
-        if (vid.paused) vid.play(); else vid.pause();
-      };
+      mediaTrigger(thumb, () => openMediaModal(s.project_id, v, `${sceneLabel(card.id)} · 视频`), `${sceneLabel(card.id)} 视频预览`);
     } else {
       const img = el("img", { src: thumbURL(s.project_id, v.path, 640), loading: "lazy", alt: "" });
       // A thumbnail that fails to load must never show a broken-image icon —
@@ -722,6 +775,7 @@ function sceneCard(s, card) {
       };
       thumb = el("div", { class: "thumb approved" }, img,
         v.snapshot ? el("span", { class: "badge" }, "快照") : (badge ? el("span", { class: "badge" }, badge) : null));
+      mediaTrigger(thumb, () => openMediaModal(s.project_id, v, `${sceneLabel(card.id)} · 图片`), `${sceneLabel(card.id)} 图片预览`);
     }
   } else if (card.type === "animation") {
     // Bespoke/atelier scene with no snapshot yet — name it as such rather
@@ -763,20 +817,33 @@ function sceneCard(s, card) {
         .map((t) => el("span", { style: "font-family:var(--mono);font-size:calc(8.5px * var(--fs-scale));letter-spacing:.04em;color:#62626c;border:1px solid #212129;border-radius:3px;padding:1px 5px" }, shotLabel(t)))));
   }
 
-  // takes drawer
-  if (card.takes.length > 1) {
+  // Historical media is grouped by actual file type. This also handles old
+  // manifests whose type says "animation" while the file is an MP4.
+  const history = card.media_history || {
+    images: card.takes.filter((t) => mediaKind(t) === "image"),
+    videos: card.takes.filter((t) => mediaKind(t) === "video"),
+  };
+  const historyTotal = (history.images || []).length + (history.videos || []).length;
+  if (historyTotal > 1) {
     const takes = el("div", { class: "takes" });
-    card.takes.forEach((t, i) => {
-      const isActive = card.visual && (
-        t === card.visual
-        || (t.path && t.path === card.visual.path)
-        || (t.id && t.id === card.visual.id)
-      );
-      const tk = el("span", { class: `tk${isActive ? " active" : ""}`, title: `第 ${i + 1} 个镜头` });
-      if (t.exists && t.type === "image") tk.append(el("img", { src: thumbURL(s.project_id, t.path, 320), loading: "lazy", alt: "" }));
-      takes.append(tk);
-    });
-    takes.append(el("span", { class: "tk-label" }, `${card.takes.length} 个镜头`));
+    for (const [kind, items] of [["image", history.images || []], ["video", history.videos || []]]) {
+      if (!items.length) continue;
+      const group = el("div", { class: "take-group" },
+        el("div", { class: "take-group-label" }, `${kind === "image" ? "历史图片" : "历史视频"} · ${items.length}`),
+        el("div", { class: "take-group-items" }));
+      const list = group.querySelector(".take-group-items");
+      items.forEach((t, i) => {
+        const isActive = card.visual && ((t.path && t.path === card.visual.path) || (t.id && t.id === card.visual.id));
+        const tk = el("button", { class: `tk${isActive ? " active" : ""}`, type: "button", title: `预览${kind === "image" ? "图片" : "视频"} ${i + 1}`, "aria-label": `预览${kind === "image" ? "图片" : "视频"} ${i + 1}` });
+        const image = el("img", { src: thumbURL(s.project_id, t.path, 320), loading: "lazy", alt: "" });
+        image.onerror = () => { image.replaceWith(el("span", { class: "tk-fallback" }, kind === "video" ? "视频" : "图片")); };
+        tk.append(image);
+        tk.onclick = () => openMediaModal(s.project_id, t, `${sceneLabel(card.id)} · ${kind === "image" ? "历史图片" : "历史视频"}`);
+        list.append(tk);
+      });
+      takes.append(group);
+    }
+    takes.append(el("span", { class: "tk-label" }, `${historyTotal} 个历史素材`));
     wrap.append(takes);
   }
 
@@ -850,6 +917,8 @@ function renderRenders(s) {
       onclick: () => { activeRender = i; render(); },
     }, `${r.path.split("/").pop()}${r.at_root ? " · 根目录" : ""}`)),
     el("span", { style: "margin-left:auto" }, `${(current.size / 1048576).toFixed(1)} MB`),
+    el("button", { class: "media-action", type: "button", onclick: () => openMediaModal(s.project_id, current, "成片预览") }, "放大预览"),
+    el("a", { class: "media-action", href: src, download: mediaFileName(current) }, "下载"),
   );
   return el("div", {},
     el("div", { class: "section-title" }, "成片",
@@ -863,8 +932,11 @@ function renderFoundMedia(s) {
   if (s.storyboard || !s.media.snapshots.length) return null;
   const grid = el("div", { class: "found-grid" });
   for (const snap of s.media.snapshots.slice(0, 12)) {
-    grid.append(el("div", { class: "thumb" },
-      el("img", { src: thumbURL(s.project_id, snap.path, 640), loading: "lazy", alt: "" })));
+    const item = { ...snap, media_type: "image" };
+    const thumb = el("div", { class: "thumb approved" },
+      el("img", { src: thumbURL(s.project_id, snap.path, 640), loading: "lazy", alt: "" }));
+    mediaTrigger(thumb, () => openMediaModal(s.project_id, item, "发现的图片"), "预览发现的图片");
+    grid.append(thumb);
   }
   return el("div", {},
     el("div", { class: "section-title" }, "监控发现的画面",
@@ -958,7 +1030,7 @@ function stateAt(s, T) {
     } else {
       for (const card of view.storyboard.scenes) {
         const visible = assetsDone || finished.has(card.id);
-        if (!visible) { card.visual = null; card.takes = []; card.audio = []; }
+        if (!visible) { card.visual = null; card.takes = []; card.media_history = { images: [], videos: [] }; card.audio = []; }
         card.generating = startedNow.has(card.id);
         card.generating_tool = (startedNow.get(card.id) || {}).tool;
       }
@@ -1120,7 +1192,10 @@ function normalize(s) {
   s.events = Array.isArray(s.events) ? s.events : [];
   if (s.storyboard && Array.isArray(s.storyboard.scenes)) {
     for (const c of s.storyboard.scenes) {
-      c.takes = Array.isArray(c.takes) ? c.takes : [];
+      c.takes = Array.isArray(c.takes) ? c.takes.filter((t) => t && typeof t === "object" && t.path) : [];
+      c.media_history = c.media_history && typeof c.media_history === "object" ? c.media_history : {};
+      c.media_history.images = Array.isArray(c.media_history.images) ? c.media_history.images.filter((t) => t && typeof t === "object" && t.path) : c.takes.filter((t) => mediaKind(t) === "image");
+      c.media_history.videos = Array.isArray(c.media_history.videos) ? c.media_history.videos.filter((t) => t && typeof t === "object" && t.path) : c.takes.filter((t) => mediaKind(t) === "video");
       c.audio = Array.isArray(c.audio) ? c.audio : [];
       c.required_assets = Array.isArray(c.required_assets) ? c.required_assets : [];
     }

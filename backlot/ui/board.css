@@ -790,10 +790,15 @@ aside .panel:nth-of-type(1) { animation-delay: .32s } aside .panel:nth-of-type(2
 .wave .wv-time { font-family: var(--mono); font-size: calc(9px * var(--fs-scale)); color: var(--text-3); margin-left: 6px; align-self: center; }
 
 /* takes drawer */
-.takes { display: flex; gap: 5px; padding: 8px 2px 0; align-items: center; }
-.takes .tk { width: 44px; aspect-ratio: 16/9; border-radius: 3px; overflow: hidden; border: 1px solid var(--border); opacity: .55; position: relative; }
+.takes { display: flex; gap: 5px; padding: 8px 2px 0; flex-wrap: wrap; align-items: flex-end; }
+.take-group { display: flex; flex-direction: column; gap: 4px; }
+.take-group-label { color: var(--text-3); font-family: var(--mono); font-size: calc(8.5px * var(--fs-scale)); letter-spacing: .04em; }
+.take-group-items { display: flex; gap: 5px; }
+.takes .tk { width: 44px; aspect-ratio: 16/9; border-radius: 3px; overflow: hidden; border: 1px solid var(--border); opacity: .55; position: relative; padding: 0; background: var(--surface-2); cursor: pointer; }
 .takes .tk img { width: 100%; height: 100%; object-fit: cover; }
 .takes .tk.active { opacity: 1; border-color: var(--amber); box-shadow: 0 0 0 1px var(--amber); }
+.takes .tk:hover { opacity: 1; border-color: var(--text-2); }
+.takes .tk-fallback { display: grid; place-items: center; width: 100%; height: 100%; color: var(--text-3); font-family: var(--mono); font-size: calc(8px * var(--fs-scale)); }
 .takes .tk-label { font-family: var(--mono); font-size: calc(9px * var(--fs-scale)); color: var(--text-3); letter-spacing: .05em; }
 
 /* ---------- empty state ---------- */
@@ -822,6 +827,16 @@ aside .panel:nth-of-type(1) { animation-delay: .32s } aside .panel:nth-of-type(2
   color: var(--text-2); font-size: calc(12px * var(--fs-scale)); cursor: pointer; letter-spacing: .1em;
   background: var(--surface-2); border: 1px solid var(--border); border-radius: 99px; padding: 6px 14px;
 }
+.media-modal { width: min(1080px, 100%); margin: 0 auto; }
+.media-modal-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
+.media-modal-title { color: var(--text-1); font-family: var(--mono); font-size: calc(12px * var(--fs-scale)); letter-spacing: .12em; }
+.media-modal-name { color: var(--text-3); font-family: var(--mono); font-size: calc(10px * var(--fs-scale)); overflow-wrap: anywhere; }
+.media-modal-media { display: block; width: 100%; max-height: min(75vh, 760px); object-fit: contain; border: 1px solid var(--border); border-radius: 8px; background: var(--media-bg); }
+.media-modal-error { min-height: 240px; display: grid; place-items: center; color: var(--text-3); border: 1px dashed var(--border); border-radius: 8px; }
+.media-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding-top: 12px; }
+.media-action { display: inline-flex; align-items: center; justify-content: center; min-height: 30px; padding: 5px 11px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-2); color: var(--text-2); font-family: var(--mono); font-size: calc(10px * var(--fs-scale)); text-decoration: none; cursor: pointer; }
+.media-action:hover { border-color: var(--amber); color: var(--amber); }
+.media-modal-meta { color: var(--text-3); font-family: var(--mono); font-size: calc(10px * var(--fs-scale)); }
 
 /* ---------- library ---------- */
 .lib-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 18px; padding-top: 24px; }
@@ -1010,6 +1025,10 @@ body:not(.first) .approval-review { animation: none; }
   .clapper { width: 30px; height: 23px; }
   .slate .wordmark { font-size: calc(10px * var(--fs-scale)); }
   .slate h1 { font-size: calc(15px * var(--fs-scale)); letter-spacing: .06em; }
+  .modal-bg { padding: 58px 12px 24px; }
+  .modal-close { top: 12px; right: 12px; }
+  .media-modal-head { display: block; }
+  .media-modal-name { margin-top: 4px; }
   .chip { font-size: calc(9.5px * var(--fs-scale)); padding: 3px 7px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
   .live { font-size: calc(10px * var(--fs-scale)); letter-spacing: .1em; }
   .cost { width: 100%; }
