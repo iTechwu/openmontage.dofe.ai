@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from openmontage.tool_gateway import ToolGateway, ToolGatewayError
+from openmontage.contracts import JobAttribution, JobCreateRequest
+from openmontage.job_service import JobService
+from openmontage.tool_gateway import (
+    ALLOWED_TOOLS,
+    ToolGateway,
+    ToolGatewayError,
+    gateway_tools_for_declared,
+    stage_allows_gateway_tool,
+)
 from tools.base_tool import BaseTool, ToolResult
 
 
@@ -70,7 +79,15 @@ class _FakeService:
 
     @staticmethod
     def _require_client_lease(*args, **kwargs):
-        return None
+        return {
+            "response_json": json.dumps(
+                {
+                    "stageContract": {
+                        "gatewayTools": ["image_selector", "video_selector"]
+                    }
+                }
+            )
+        }
 
 
 @pytest.fixture()
@@ -197,6 +214,180 @@ class _SingleToolRegistry:
 def _gateway_with(tool: BaseTool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ToolGateway:
     monkeypatch.setattr("openmontage.tool_gateway.registry", _SingleToolRegistry(tool))
     return ToolGateway(_FakeService(tmp_path / "projects"))
+
+
+class _RaisingTool(_FakeTool):
+    def execute(self, inputs: dict) -> ToolResult:
+        raise RuntimeError("Bearer provider-secret at /data/private/tool.log")
+
+
+class _FailedResultTool(_FakeTool):
+    def execute(self, inputs: dict) -> ToolResult:
+        return ToolResult(
+            success=False,
+            data={
+                "stderr": "Bearer provider-secret at /data/private/provider-stderr.log",
+                "nested": {"stdout": "provider-secret"},
+            },
+            artifacts=["/data/private/provider-output.mp4"],
+            error="Bearer provider-secret at /data/private/provider-response.json",
+        )
+
+
+class _InconsistentFailedResultTool(_FailedResultTool):
+    def execute(self, inputs: dict) -> ToolResult:
+        result = super().execute(inputs)
+        result.success = True
+        return result
+
+
+@pytest.mark.parametrize(
+    "tool_type", [_RaisingTool, _FailedResultTool, _InconsistentFailedResultTool]
+)
+def test_tool_failures_do_not_expose_provider_details(
+    tool_type: type[BaseTool],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    gateway = _gateway_with(tool_type(), tmp_path, monkeypatch)
+
+    result = _invoke(gateway)
+
+    assert result["success"] is False
+    assert result["error"] == {
+        "code": "TOOL_EXECUTION_FAILED",
+        "category": "tool",
+        "message": "OpenMontage tool execution failed; retry or choose another allowed tool",
+    }
+    assert "provider-secret" not in str(result)
+    assert "/data/private" not in str(result)
+    assert "provider-secret" not in caplog.text
+    assert "/data/private" not in caplog.text
+    assert result["data"] == {}
+    assert result["artifacts"] == []
+
+
+def test_failed_tool_result_does_not_materialize_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_read = False
+
+    def track_artifact(_value: str, _project_dir: Path) -> None:
+        nonlocal artifact_read
+        artifact_read = True
+
+    monkeypatch.setattr("openmontage.tool_gateway._artifact", track_artifact)
+    gateway = _gateway_with(_FailedResultTool(), tmp_path, monkeypatch)
+
+    result = _invoke(gateway)
+
+    assert result["success"] is False
+    assert artifact_read is False
+
+
+def test_declared_avatar_tools_map_to_exact_gateway_names() -> None:
+    declared = [
+        "talking_head",
+        "lip_sync",
+        "tts_selector",
+        "subtitle_gen",
+        "image_selector",
+        "audio_enhance",
+        "video_selector",
+    ]
+
+    assert gateway_tools_for_declared(declared) == [
+        "avatar_video",
+        "tts_selector",
+        "image_selector",
+        "video_selector",
+    ]
+    assert stage_allows_gateway_tool(declared, "avatar_video") is True
+    assert stage_allows_gateway_tool(declared, "talking_head") is False
+
+
+def test_invoke_uses_persisted_lease_contract_when_manifest_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_manifest_load(_workflow: str) -> None:
+        raise OSError("/data/private/pipeline_defs/animation.yaml")
+
+    monkeypatch.setattr("lib.pipeline_loader.load_pipeline_readonly", fail_manifest_load)
+    gateway = _gateway_with(_FakeTool(), tmp_path, monkeypatch)
+
+    result = _invoke(gateway)
+
+    assert result["success"] is True
+
+
+def test_real_job_service_begin_contract_authorizes_gateway_invoke(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = JobService(
+        tmp_path / "jobs.sqlite3", projects_dir=tmp_path / "projects"
+    )
+    job = service.create_job(
+        JobCreateRequest(
+            client_request_id="gateway-contract-integration",
+            workflow="framework-smoke",
+            input={"type": "text", "inlineText": "Smoke"},
+            brief={"title": "Smoke"},
+            output={"container": "mp4"},
+            budget={"maxAmount": "1.00", "currency": "CNY"},
+        ),
+        JobAttribution(
+            workspace_id="ws-1",
+            employee_id="employee-1",
+            runtime_id="runtime-1",
+            root_task_id="task-1",
+            conversation_id="conversation-1",
+            source_invocation_id="invocation-1",
+            trace_id="trace-1",
+        ),
+    )
+    lease = service.begin_client_stage(
+        job.job_id,
+        "research",
+        idempotency_key="begin-gateway-contract-integration",
+        stage_contract_factory=lambda _snapshot, _stage: {
+            "gatewayTools": ["image_selector"]
+        },
+    )
+    monkeypatch.setattr("openmontage.tool_gateway.registry", _FakeRegistry())
+    gateway = ToolGateway(service)
+
+    result = gateway.invoke(
+        tool_name="image_selector",
+        operation="generate",
+        inputs={"output_path": "assets/images/integration.png"},
+        job_id=job.job_id,
+        stage="research",
+        stage_attempt=lease.stage_attempt,
+        lease_token=lease.lease_token,
+        idempotency_key="invoke-gateway-contract-integration",
+    )
+
+    assert result["success"] is True
+    assert result["artifacts"][0]["path"] == "assets/images/integration.png"
+
+
+def test_every_manifest_gateway_tool_uses_the_gateway_allowlist() -> None:
+    from lib.pipeline_loader import list_pipelines, load_pipeline_readonly
+
+    for workflow in list_pipelines():
+        manifest = load_pipeline_readonly(workflow)
+        for stage in manifest["stages"]:
+            declared = stage.get("tools_available", [])
+            gateway_tools = gateway_tools_for_declared(declared)
+            assert set(gateway_tools) <= ALLOWED_TOOLS
+            assert all(
+                stage_allows_gateway_tool(declared, tool_name)
+                for tool_name in gateway_tools
+            )
 
 
 def test_generate_operation_not_injected_when_tool_enum_rejects_it(

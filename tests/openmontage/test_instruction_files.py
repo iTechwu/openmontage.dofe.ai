@@ -31,7 +31,8 @@ def test_reads_markdown_from_repo_root_file() -> None:
     result = read_instruction_file("AGENT_GUIDE.md")
 
     assert result["relative_path"] == "AGENT_GUIDE.md"
-    assert result["path"] == str((REPO / "AGENT_GUIDE.md").resolve())
+    assert "path" not in result
+    assert str(REPO) not in str(result)
     assert len(result["content"]) > 0
     assert result["size"] == (REPO / "AGENT_GUIDE.md").stat().st_size
     assert result["content_hash"] == "sha256:" + hashlib.sha256(

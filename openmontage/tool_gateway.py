@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import mimetypes
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from openmontage.job_service import JobService
-from lib.pipeline_loader import load_pipeline_readonly
 from tools.base_tool import ToolResult
 from tools.tool_registry import registry
 
@@ -31,6 +31,8 @@ ALLOWED_TOOLS = frozenset({
     "hyperframes_compose", "composition_validator", "audio_probe", "export_bundle",
 })
 
+_DECLARED_AVATAR_TOOLS = frozenset({"talking_head", "lip_sync"})
+
 _PATH_KEYS = frozenset({"path", "file", "input_path", "output_path", "output_dir", "export_dir"})
 _PATH_SUFFIXES = ("_path", "_paths", "_file", "_files", "_dir", "_dirs")
 _OUTPUT_REQUIRED = frozenset({
@@ -40,6 +42,11 @@ _OUTPUT_REQUIRED = frozenset({
     "hyperframes_compose", "export_bundle",
 })
 
+_SAFE_TOOL_FAILURE_MESSAGE = (
+    "OpenMontage tool execution failed; retry or choose another allowed tool"
+)
+logger = logging.getLogger(__name__)
+
 
 class ToolGatewayError(ValueError):
     def __init__(self, code: str, message: str, *, category: str = "tool_gateway") -> None:
@@ -47,6 +54,44 @@ class ToolGatewayError(ValueError):
         self.code = code
         self.category = category
         self.message = message
+
+
+def gateway_tools_for_declared(declared_tools: Any) -> list[str]:
+    """Map manifest tool names to the exact public Gateway tool surface."""
+    if not isinstance(declared_tools, list) or not all(
+        isinstance(item, str) for item in declared_tools
+    ):
+        raise TypeError("tools_available must be a list of strings")
+    result: list[str] = []
+    for declared_name in declared_tools:
+        gateway_name = (
+            "avatar_video" if declared_name in _DECLARED_AVATAR_TOOLS else declared_name
+        )
+        if gateway_name in ALLOWED_TOOLS and gateway_name not in result:
+            result.append(gateway_name)
+    return result
+
+
+def stage_allows_gateway_tool(declared_tools: Any, tool_name: str) -> bool:
+    """Return whether a manifest declaration permits an exact Gateway name."""
+    return tool_name in gateway_tools_for_declared(declared_tools)
+
+
+def _gateway_tools_from_lease(lease_row: Any) -> frozenset[str]:
+    """Read the immutable Gateway authorization captured for this stage attempt."""
+    try:
+        response = json.loads(lease_row["response_json"])
+        gateway_tools = response["stageContract"]["gatewayTools"]
+        if not isinstance(gateway_tools, list) or not all(
+            isinstance(item, str) and item in ALLOWED_TOOLS for item in gateway_tools
+        ):
+            raise TypeError("gatewayTools must contain allowed tool names")
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ToolGatewayError(
+            "STAGE_CONTRACT_UNAVAILABLE",
+            "stage execution contract is unavailable; re-begin the stage",
+        ) from exc
+    return frozenset(gateway_tools)
 
 
 def _canonical(value: Any) -> str:
@@ -175,19 +220,17 @@ class ToolGateway:
         if not isinstance(idempotency_key, str) or not idempotency_key.strip() or len(idempotency_key) > 256:
             raise ToolGatewayError("IDEMPOTENCY_CONFLICT", "idempotency_key must be non-empty and <=256 characters")
 
-        snapshot = self.service.get_job(job_id)
-        try:
-            manifest = load_pipeline_readonly(snapshot.workflow.name)
-            stage_def = next(s for s in manifest["stages"] if s["name"] == stage)
-        except (KeyError, StopIteration, FileNotFoundError) as exc:
-            raise ToolGatewayError("STAGE_STATE_INVALID", f"unknown stage {stage!r}") from exc
-        declared = set(stage_def.get("tools_available", []))
-        if tool_name not in declared and not (tool_name == "avatar_video" and {"talking_head", "lip_sync"} & declared):
-            raise ToolGatewayError("TOOL_NOT_ALLOWED", f"{tool_name!r} is not allowed in stage {stage!r}")
-
         now = datetime.now(timezone.utc)
         with self.service._connect() as db:
-            self.service._require_client_lease(db, job_id, stage, lease_token, int(stage_attempt), now, fencing=(operation != "progress"))
+            lease_row = self.service._require_client_lease(
+                db, job_id, stage, lease_token, int(stage_attempt), now,
+                fencing=(operation != "progress"),
+            )
+            gateway_tools = _gateway_tools_from_lease(lease_row)
+        if tool_name not in gateway_tools:
+            raise ToolGatewayError(
+                "TOOL_NOT_ALLOWED", f"{tool_name!r} is not allowed in stage {stage!r}"
+            )
         project_dir = (self.service.projects_dir / job_id).resolve()
         project_dir.mkdir(parents=True, exist_ok=True)
         internal = TOOL_ALIASES.get(tool_name, tool_name)
@@ -252,21 +295,29 @@ class ToolGateway:
         except ToolGatewayError:
             raise
         except Exception as exc:
+            logger.error(
+                "OpenMontage tool %s failed with %s",
+                tool_name,
+                type(exc).__name__,
+            )
             response = {"success": False, "status": "failed", "tool_name": tool_name, "operation": operation,
-                        "error": {"code": "TOOL_EXECUTION_FAILED", "category": "tool", "message": str(exc)[:300]}}
+                        "data": {}, "artifacts": [],
+                        "error": {"code": "TOOL_EXECUTION_FAILED", "category": "tool", "message": _SAFE_TOOL_FAILURE_MESSAGE}}
         with self.service._connect() as db:
             db.execute("UPDATE openmontage_tool_invocation SET status='completed', result_json=?, updated_at=? WHERE job_id=? AND stage=? AND stage_attempt=? AND tool_name=? AND idempotency_key=?",
                        (_canonical(response), datetime.now(timezone.utc).isoformat(), *key_args))
         return response
 
     def _wire_result(self, tool_name: str, operation: str, result: ToolResult, project_dir: Path) -> dict[str, Any]:
+        failed = not result.success or bool(result.error)
         artifacts: list[dict[str, Any]] = []
-        for raw in result.artifacts:
-            item = _artifact(str(raw), project_dir)
-            if item is not None:
-                artifacts.append(item)
-        data = _sanitize_data(result.data, project_dir)
-        if isinstance(data, dict):
+        if not failed:
+            for raw in result.artifacts:
+                item = _artifact(str(raw), project_dir)
+                if item is not None:
+                    artifacts.append(item)
+        data = {} if failed else _sanitize_data(result.data, project_dir)
+        if not failed and isinstance(data, dict):
             for key in ("output", "output_path", "path", "file", "video_path", "audio_path"):
                 value = data.get(key)
                 if isinstance(value, str):
@@ -274,11 +325,16 @@ class ToolGateway:
                     if item is not None and item not in artifacts:
                         artifacts.append(item)
         response: dict[str, Any] = {
-            "success": bool(result.success), "status": "completed" if result.success else "failed",
+            "success": not failed, "status": "failed" if failed else "completed",
             "tool_name": tool_name, "operation": operation, "data": data, "artifacts": artifacts,
         }
-        if result.error:
-            response["error"] = {"code": "TOOL_EXECUTION_FAILED", "category": "tool", "message": str(result.error)[:500]}
+        if failed:
+            logger.error("OpenMontage tool %s returned a provider failure", tool_name)
+            response["error"] = {
+                "code": "TOOL_EXECUTION_FAILED",
+                "category": "tool",
+                "message": _SAFE_TOOL_FAILURE_MESSAGE,
+            }
         if result.model:
             response["model"] = result.model
         if result.cost_currency or result.cost_amount is not None or result.cost_usd:

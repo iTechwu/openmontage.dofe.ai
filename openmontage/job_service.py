@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -100,9 +100,10 @@ class ClientStageLease:
     lease_token: str
     expires_at: datetime
     snapshot: JobSnapshot
+    stage_contract: dict[str, Any] | None = None
 
     def to_wire(self) -> dict[str, Any]:
-        return {
+        result = {
             "jobId": self.job_id,
             "stage": self.stage,
             "stageAttempt": self.stage_attempt,
@@ -111,6 +112,9 @@ class ClientStageLease:
             "lastSequence": self.snapshot.last_sequence,
             "job": self.snapshot.to_wire(),
         }
+        if self.stage_contract is not None:
+            result["stageContract"] = self.stage_contract
+        return result
 
     @classmethod
     def from_wire(cls, data: dict[str, Any]) -> "ClientStageLease":
@@ -123,6 +127,7 @@ class ClientStageLease:
             lease_token=data["leaseToken"],
             expires_at=expires,
             snapshot=JobSnapshot.model_validate(data["job"]),
+            stage_contract=data.get("stageContract"),
         )
 
 
@@ -1322,7 +1327,7 @@ class JobService:
     ) -> sqlite3.Row | None:
         return connection.execute(
             """
-            SELECT idempotency_key, stage_attempt, lease_token, expires_at
+            SELECT idempotency_key, stage_attempt, lease_token, expires_at, response_json
             FROM openmontage_client_stage_lease
             WHERE job_id = ? AND stage = ? AND status = 'active'
             ORDER BY created_at DESC
@@ -1430,6 +1435,7 @@ class JobService:
         expected_sequence: int | None = None,
         lease_duration: timedelta | None = None,
         now: datetime | None = None,
+        stage_contract_factory: Callable[[JobSnapshot, str], dict[str, Any]] | None = None,
     ) -> ClientStageLease:
         """Begin exclusive client execution of one stage (plan §6.1).
 
@@ -1485,6 +1491,11 @@ class JobService:
 
             if not cancelled:
                 stage_index, stage = self._stage(snapshot, stage_code)
+                stage_contract = (
+                    stage_contract_factory(snapshot, stage_code)
+                    if stage_contract_factory is not None
+                    else None
+                )
 
                 active = self._fetch_active_client_lease(connection, job_id, stage_code)
                 if active is not None:
@@ -1534,6 +1545,24 @@ class JobService:
                         f"stage {stage_code!r} is {stage.status} and cannot be begun",
                     )
 
+                # Initialize the filesystem workspace before persisting the
+                # RUNNING state or lease. A failed disk write must roll this
+                # transaction back so the client is never locked out by a
+                # lease token it did not receive.
+                from lib.checkpoint import init_project
+
+                try:
+                    init_project(
+                        job_id,
+                        title=str(snapshot.request.brief.get("title") or job_id),
+                        pipeline_type=snapshot.workflow.name,
+                        pipeline_dir=self.projects_dir,
+                    )
+                except OSError as exc:
+                    raise ClientStageError(
+                        "PROJECT_INIT_FAILED", f"project workspace could not be initialized: {exc}"
+                    ) from exc
+
                 stage.status = StageStatus.RUNNING
                 stage.attempt += 1
                 stage.started_at = effective_now
@@ -1559,6 +1588,7 @@ class JobService:
                     lease_token=lease_token,
                     expires_at=expires_at,
                     snapshot=snapshot,
+                    stage_contract=stage_contract,
                 )
                 connection.execute(
                     """
@@ -1587,16 +1617,6 @@ class JobService:
         if cancelled:
             raise ClientStageError("JOB_CANCELLED", f"Job {job_id} has been cancelled")
 
-        # Project workspace on disk (checkpoint home + Backlot marker). This
-        # is filesystem I/O, kept outside the SQLite write transaction.
-        from lib.checkpoint import init_project
-
-        init_project(
-            job_id,
-            title=str(snapshot.request.brief.get("title") or job_id),
-            pipeline_type=snapshot.workflow.name,
-            pipeline_dir=self.projects_dir,
-        )
         return lease
 
     def update_client_stage_progress(
@@ -1821,6 +1841,16 @@ class JobService:
         if replay is not None:
             return replay
 
+        # Idempotent replays are allowed after lease release, but every new
+        # submission must prove lease ownership before its provenance or media
+        # payload can trigger repository/file reads.
+        effective_now = _normalize_now(now)
+        with self._connect() as connection:
+            self._require_client_lease(
+                connection, job_id, stage_code, lease_token, stage_attempt,
+                effective_now, fencing=True,
+            )
+
         # Instruction provenance is verified against the live CI repository
         # before any state changes (plan §14: events record what the client
         # actually read).
@@ -1850,16 +1880,6 @@ class JobService:
             )
         except MediaReferenceError as exc:
             raise ClientStageError("MEDIA_REFERENCE_INVALID", str(exc)) from exc
-
-        # Lease ownership is the first gate: without a current lease the client
-        # must not write anything. It is checked read-only here, before the
-        # checkpoint write, and re-checked inside the write transaction below.
-        effective_now = _normalize_now(now)
-        with self._connect() as connection:
-            self._require_client_lease(
-                connection, job_id, stage_code, lease_token, stage_attempt,
-                effective_now, fencing=True,
-            )
 
         # Stage / approval validation and the checkpoint write happen outside
         # the SQLite write transaction. The disk checkpoint must never be

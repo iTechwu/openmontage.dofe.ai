@@ -360,10 +360,15 @@ Use /recreate-video on this Douyin link: <url>. Create an original 9:16 version.
   `invoke_openmontage_tool` call must include the returned `job_id`, `stage`,
   `stage_attempt`, and `lease_token`, plus a non-empty stable `idempotency_key`.
   `begin_client_stage` returns these values as `jobId`, `stage`, `stageAttempt`,
-  and `leaseToken`; map them to the snake-case tool arguments. Between begin
-  and submit, call zero or more tools explicitly allowed by that stage; do not
-  invent a tool call for a stage whose tool list is empty. Stage submission keys
-  `artifacts` by canonical artifact name, such as
+  and `leaseToken`; map them to the snake-case tool arguments. Its additive
+  `stageContract` is the authoritative execution guide for that attempt: read
+  every `instructionFiles` entry through `read_openmontage_file`; map each read
+  result to `instruction_provenance` as
+  `{"path": result.relative_path, "content_hash": result.content_hash}`. The
+  manifest vocabulary is reported in `declaredTools`, while only exact names in
+  `gatewayTools` may be passed to `invoke_openmontage_tool`. Call zero or more of
+  those tools and use `produces` as the top-level keys in submitted `artifacts`.
+  Do not invent a tool call when `gatewayTools` is empty. A canonical submission looks like
   `{"research_brief": {<brief fields>}}`. Calls outside this lifecycle return a
   structured stage or Job error.
 - `openmontage://reference-clone-guide`: shared agent workflow resource.

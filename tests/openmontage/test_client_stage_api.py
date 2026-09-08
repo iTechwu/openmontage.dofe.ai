@@ -132,6 +132,32 @@ def test_begin_starts_first_stage_and_moves_job_to_running(tmp_path: Path) -> No
     assert "leaseToken" not in json.dumps(events[-1].payload)
 
 
+def test_begin_project_initialization_failure_does_not_commit_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    job = _job(service)
+
+    def fail_project_init(*_args: object, **_kwargs: object) -> None:
+        raise OSError("/data/private/projects/job/project.json")
+
+    monkeypatch.setattr("lib.checkpoint.init_project", fail_project_init)
+
+    with pytest.raises(ClientStageError) as exc_info:
+        _begin(service, job.job_id, "research")
+
+    assert exc_info.value.code == "PROJECT_INIT_FAILED"
+    snapshot = service.get_job(job.job_id)
+    assert snapshot.status == JobStatus.QUEUED
+    assert snapshot.current_stage is None
+    assert snapshot.stages[0].status == StageStatus.PENDING
+    assert snapshot.stages[0].attempt == 0
+    assert [event.event_type for event in service.list_events(job.job_id)] == [
+        JobEventType.JOB_CREATED
+    ]
+
+
 def test_begin_creates_project_workspace_on_disk(tmp_path: Path) -> None:
     service = _service(tmp_path)
     job = _job(service)
@@ -480,6 +506,40 @@ def test_submit_rejects_missing_canonical_artifact(tmp_path: Path) -> None:
             artifacts={},
         )
     assert exc_info.value.code == "ARTIFACT_SCHEMA_INVALID"
+
+
+def test_submit_rejects_invalid_lease_before_reading_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    job = _job(service)
+    lease = _begin(service, job.job_id, "research")
+    provenance_read = False
+
+    def track_provenance(_value: object) -> list[dict[str, str]]:
+        nonlocal provenance_read
+        provenance_read = True
+        return []
+
+    monkeypatch.setattr(
+        "openmontage.instruction_files.verify_instruction_provenance",
+        track_provenance,
+    )
+
+    with pytest.raises(ClientStageError) as exc_info:
+        service.submit_client_stage(
+            job.job_id,
+            "research",
+            stage_attempt=lease.stage_attempt,
+            status="in_progress",
+            lease_token="wrong-lease",
+            idempotency_key="reject-before-payload",
+            instruction_provenance=[{"path": "/private/file", "content_hash": "secret"}],
+        )
+
+    assert exc_info.value.code == "STAGE_LEASE_INVALID"
+    assert provenance_read is False
 
 
 def test_submit_is_idempotent(tmp_path: Path) -> None:

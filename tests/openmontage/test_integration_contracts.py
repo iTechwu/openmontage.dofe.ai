@@ -102,6 +102,19 @@ async def test_mcp_server_publishes_reference_clone_surface():
     ) in normalized_description
     assert "zero or more" in invocation_description
     assert "zero or more" in server.instructions
+    begin_description = by_name["begin_client_stage"].description
+    for contract_field in (
+        "stageContract",
+        "declaredTools",
+        "gatewayTools",
+        "produces",
+        "instructionFiles",
+        "instruction_provenance",
+        '"path": result.relative_path',
+        '"content_hash": result.content_hash',
+    ):
+        assert contract_field in begin_description
+        assert contract_field in server.instructions
     submission_description = by_name["submit_client_stage"].description
     assert 'artifacts' in submission_description
     assert 'research_brief' in submission_description

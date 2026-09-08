@@ -28,6 +28,51 @@ except ImportError:  # pragma: no cover - create_server reports the actionable d
     Context = Any  # type: ignore[misc,assignment]
 
 
+class StageContractError(RuntimeError):
+    """The authoritative pipeline contract cannot be served safely."""
+
+
+def stage_execution_contract(snapshot: Any, stage_code: str) -> dict[str, Any]:
+    """Return the exact model-facing contract for one manifest stage."""
+    from lib.pipeline_loader import load_pipeline_readonly
+    from openmontage.client_stage_driver import PER_STAGE_INSTRUCTIONS
+    from openmontage.tool_gateway import gateway_tools_for_declared
+
+    try:
+        manifest = load_pipeline_readonly(snapshot.workflow.name)
+        stage_definition = next(
+            item for item in manifest["stages"] if item["name"] == stage_code
+        )
+        stage_snapshot = next(item for item in snapshot.stages if item.code == stage_code)
+        declared_tools = stage_definition.get("tools_available", [])
+        produces = stage_definition.get("produces", [])
+        if not isinstance(produces, list) or not all(
+            isinstance(item, str) for item in produces
+        ):
+            raise TypeError("produces must be a list of strings")
+
+        instruction_files = [
+            "AGENT_GUIDE.md",
+            f"pipeline_defs/{snapshot.workflow.name}.yaml",
+        ]
+        skill = stage_definition.get("skill")
+        if isinstance(skill, str) and skill:
+            instruction_files.append(f"skills/{skill}.md")
+        instruction_files.extend(
+            ["skills/meta/checkpoint-protocol.md", "skills/meta/reviewer.md"]
+        )
+        instruction_files.extend(PER_STAGE_INSTRUCTIONS.get(stage_code, ()))
+        return {
+            "declaredTools": list(declared_tools),
+            "gatewayTools": gateway_tools_for_declared(declared_tools),
+            "produces": list(produces),
+            "humanApprovalRequired": bool(stage_snapshot.approval_required),
+            "instructionFiles": instruction_files,
+        }
+    except Exception as exc:
+        raise StageContractError from exc
+
+
 def create_server(
     *,
     job_service: Any = None,
@@ -50,6 +95,7 @@ def create_server(
         JobConflictError,
         JobNotFoundError,
         JobStateError,
+        StageContractError,
     )
 
     server = MCPServer(
@@ -64,7 +110,11 @@ def create_server(
             "client-owned stage with begin_client_stage, zero or more stage-allowed "
             "invoke_openmontage_tool calls, then submit_client_stage. Every non-catalog "
             "invocation requires the active job_id, "
-            "stage, stage_attempt, lease_token, and a stable non-empty idempotency_key."
+            "stage, stage_attempt, lease_token, and a stable non-empty idempotency_key. Read "
+            "the returned stageContract: only call gatewayTools, read every instructionFiles "
+            "entry, and map each read result to instruction_provenance as "
+            "{\"path\": result.relative_path, \"content_hash\": result.content_hash}. "
+            "Submit artifacts keyed by produces; declaredTools are manifest vocabulary only."
         ),
         version="0.3.0",
     )
@@ -93,11 +143,11 @@ def create_server(
     def _client_stage_error(error: Exception) -> dict[str, Any]:
         if isinstance(error, ClientStageError):
             code = error.code
-            message = (
-                "OpenMontage could not persist the stage checkpoint"
-                if code == "CHECKPOINT_WRITE_FAILED"
-                else str(error).removeprefix(f"{code}: ")
-            )
+            safe_messages = {
+                "CHECKPOINT_WRITE_FAILED": "OpenMontage could not persist the stage checkpoint",
+                "PROJECT_INIT_FAILED": "OpenMontage could not initialize the project workspace",
+            }
+            message = safe_messages.get(code, str(error).removeprefix(f"{code}: "))
             category = "client_stage"
         elif isinstance(error, JobNotFoundError):
             code = "OPENMONTAGE_JOB_NOT_FOUND"
@@ -110,6 +160,10 @@ def create_server(
         elif isinstance(error, JobStateError):
             code = "OPENMONTAGE_JOB_STATE_INVALID"
             message = str(error)
+            category = "job"
+        elif isinstance(error, StageContractError):
+            code = "OPENMONTAGE_STAGE_CONTRACT_UNAVAILABLE"
+            message = "OpenMontage stage execution contract is unavailable"
             category = "job"
         else:  # pragma: no cover - callers restrict the caught exception types
             raise error
@@ -175,9 +229,10 @@ def create_server(
         current stage. That response's ``jobId``, ``stage``, ``stageAttempt``,
         and ``leaseToken`` map to this tool's ``job_id``, ``stage``,
         ``stage_attempt``, and ``lease_token`` arguments; also pass a stable
-        ``idempotency_key``. A stage may make zero or more calls allowed by its
-        tool list before ``submit_client_stage``; do not call this tool as a
-        standalone provider API or invent a call for a stage with no tools.
+        ``idempotency_key``. A stage may make zero or more calls using only the
+        exact names in ``stageContract.gatewayTools`` before
+        ``submit_client_stage``; do not call this tool as a standalone provider
+        API or invent a call when ``gatewayTools`` is empty.
         """
         from openmontage.job_api import require_same_workspace
         from openmontage.tool_gateway import ToolGatewayError
@@ -191,6 +246,7 @@ def create_server(
                 or not stage.strip()
                 or stage_attempt is None
                 or not lease_token.strip()
+                or not idempotency_key.strip()
             ):
                 return {
                     "success": False,
@@ -199,8 +255,9 @@ def create_server(
                         "code": "STAGE_LEASE_INVALID",
                         "category": "tool_gateway",
                         "message": (
-                            "job_id, stage, stage_attempt and lease_token "
-                            "are required; call begin_client_stage first"
+                            "job_id, stage, stage_attempt, lease_token and idempotency_key "
+                            "are required; obtain lease fields from begin_client_stage and "
+                            "supply a stable idempotency_key"
                         ),
                     },
                 }
@@ -359,7 +416,14 @@ def create_server(
         work, call Gateway tools as usual, report progress with
         ``update_client_stage_progress``, then finish with
         ``submit_client_stage``. Returns an opaque ``leaseToken``,
-        ``stageAttempt``, ``leaseExpiresAt`` and the latest Job snapshot.
+        ``stageAttempt``, ``leaseExpiresAt``, the latest Job snapshot, and a
+        ``stageContract`` containing manifest ``declaredTools``, exact callable
+        ``gatewayTools``, ``produces``, approval
+        policy, and ``instructionFiles`` to read with
+        ``read_openmontage_file``. Use ``produces`` as the top-level keys in
+        ``submit_client_stage.artifacts`` and preserve each instruction read's
+        result to an ``instruction_provenance`` entry as
+        ``{"path": result.relative_path, "content_hash": result.content_hash}``.
         Replays of the same ``idempotency_key`` return the original result;
         a second live owner is rejected with ``STAGE_ALREADY_OWNED``.
         """
@@ -369,12 +433,14 @@ def create_server(
             attribution = resolve_attribution(ctx.headers)
             snapshot = jobs().get_job(job_id)
             require_same_workspace(snapshot, attribution)
-            return jobs().begin_client_stage(
+            result = jobs().begin_client_stage(
                 job_id,
                 stage,
                 idempotency_key=idempotency_key,
                 expected_sequence=expected_sequence,
+                stage_contract_factory=stage_execution_contract,
             ).to_wire()
+            return result
         except client_stage_errors as exc:
             return _client_stage_error(exc)
 
@@ -428,14 +494,15 @@ def create_server(
         metadata: dict[str, Any] | None = None,
         instruction_provenance: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
-        """Submit a client stage's artifacts, checkpoint and status atomically.
+        """Submit a client stage's artifacts, checkpoint and status as one operation.
 
         ``status`` is one of ``completed`` / ``awaiting_human`` / ``failed`` /
         ``in_progress``. The server validates the lease, artifact and
         checkpoint schemas, approval rules and media references; writes the
         standard checkpoint under the CI project directory; records the Job
         event; and advances the Job. ``instruction_provenance`` is a list of
-        ``{"path", "content_hash"}`` entries from ``read_openmontage_file``
+        entries built from ``read_openmontage_file`` results as
+        ``{"path": result.relative_path, "content_hash": result.content_hash}``,
         proving which instructions the client followed. Gated stages must be
         submitted as ``awaiting_human`` and completed only after
         ``approve_video_stage`` approves them.
@@ -570,8 +637,9 @@ def create_server(
         files under the allowed instruction roots (``AGENT_GUIDE.md``,
         ``pipeline_defs/``, ``skills/``, ``.agents/skills/``, ``schemas/``,
         ``styles/``, ``remotion-composer/public/``, ``docs/``) are served; the
-        response includes the actual server path, size, mtime, a SHA-256
-        content hash, and the repository revision for instruction provenance.
+        response includes the repo-relative path, size, mtime, a SHA-256 content
+        hash, and the repository revision for instruction provenance. It never
+        exposes the CI filesystem path.
         Project artifacts and checkpoints belong to ``read_project_file``.
         """
         return read_instruction_file(path, max_bytes=max_bytes)

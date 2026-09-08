@@ -10,12 +10,12 @@ import jsonschema
 import pytest
 from starlette.testclient import TestClient
 
-from openmontage.contracts import JobAttribution, PublishedArtifact
+from openmontage.contracts import JobAttribution, JobStatus, PublishedArtifact, StageStatus
 from openmontage.job_api import TrustedAttributionResolver
 from openmontage import job_service as job_service_module
 from openmontage.job_service import JobService
 from openmontage.mcp_gateway_auth import gateway_attribution
-from openmontage.mcp_server import build_http_app, create_server
+from openmontage.mcp_server import build_http_app, create_server, stage_execution_contract
 
 
 SERVICE_TOKEN = "service-token"
@@ -601,15 +601,16 @@ async def test_mcp_tool_invocation_without_stage_lease_returns_structured_error(
             "code": "STAGE_LEASE_INVALID",
             "category": "tool_gateway",
             "message": (
-                "job_id, stage, stage_attempt and lease_token "
-                "are required; call begin_client_stage first"
+                "job_id, stage, stage_attempt, lease_token and idempotency_key "
+                "are required; obtain lease fields from begin_client_stage and "
+                "supply a stable idempotency_key"
             ),
         },
     }
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("field", ["job_id", "stage"])
+@pytest.mark.parametrize("field", ["job_id", "stage", "idempotency_key"])
 async def test_mcp_tool_invocation_rejects_whitespace_stage_context(
     tmp_path: Path,
     field: str,
@@ -739,6 +740,254 @@ async def test_mcp_stage_begin_maps_job_state_errors(
     assert result.is_error is False
     assert result.structured_content["error"]["code"] == error_code
     assert result.structured_content["error"]["category"] == "job"
+
+
+@pytest.mark.asyncio
+async def test_mcp_stage_begin_returns_and_replays_explicit_execution_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp import Client
+
+    service = JobService(tmp_path / "jobs.sqlite3")
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
+    ) as client:
+        created = await client.call_tool(
+            "submit_video_job", {**_request(), "workflow": "animation"}
+        )
+        result = await client.call_tool(
+            "begin_client_stage",
+            {
+                "job_id": created.structured_content["jobId"],
+                "stage": "research",
+                "idempotency_key": "begin-research-contract",
+            },
+        )
+        original = result.structured_content
+
+        def fail_manifest_load(_workflow: str) -> None:
+            raise OSError("/data/private/pipeline_defs/animation.yaml")
+
+        monkeypatch.setattr("lib.pipeline_loader.load_pipeline_readonly", fail_manifest_load)
+        replay = await client.call_tool(
+            "begin_client_stage",
+            {
+                "job_id": created.structured_content["jobId"],
+                "stage": "research",
+                "idempotency_key": "begin-research-contract",
+            },
+        )
+
+    assert result.is_error is False
+    assert replay.is_error is False
+    assert replay.structured_content == original
+    assert result.structured_content["stageContract"] == {
+        "declaredTools": [],
+        "gatewayTools": [],
+        "produces": ["research_brief"],
+        "humanApprovalRequired": False,
+        "instructionFiles": [
+            "AGENT_GUIDE.md",
+            "pipeline_defs/animation.yaml",
+            "skills/pipelines/animation/research-director.md",
+            "skills/meta/checkpoint-protocol.md",
+            "skills/meta/reviewer.md",
+        ],
+    }
+
+
+def test_stage_contract_distinguishes_manifest_and_gateway_tool_names(tmp_path: Path) -> None:
+    service = JobService(tmp_path / "jobs.sqlite3")
+    request = {**_request(), "workflow": "avatar-spokesperson"}
+    from openmontage.contracts import JobCreateRequest
+
+    job = service.create_job(JobCreateRequest.model_validate(request), _attribution())
+
+    contract = stage_execution_contract(service.get_job(job.job_id), "assets")
+
+    assert contract["declaredTools"] == [
+        "talking_head",
+        "lip_sync",
+        "tts_selector",
+        "subtitle_gen",
+        "image_selector",
+        "audio_enhance",
+        "video_selector",
+    ]
+    assert contract["gatewayTools"] == [
+        "avatar_video",
+        "tts_selector",
+        "image_selector",
+        "video_selector",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mcp_stage_begin_rejects_unavailable_contract_before_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp import Client
+
+    def fail_manifest_load(_workflow: str) -> None:
+        raise OSError("/data/private/pipeline_defs/animation.yaml")
+
+    service = JobService(tmp_path / "jobs.sqlite3")
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
+    ) as client:
+        created = await client.call_tool("submit_video_job", _request())
+        job_id = created.structured_content["jobId"]
+        monkeypatch.setattr("lib.pipeline_loader.load_pipeline_readonly", fail_manifest_load)
+        result = await client.call_tool(
+            "begin_client_stage",
+            {
+                "job_id": job_id,
+                "stage": "research",
+                "idempotency_key": "begin-research-contract-failure",
+            },
+        )
+
+    assert result.is_error is False
+    assert result.structured_content["error"] == {
+        "code": "OPENMONTAGE_STAGE_CONTRACT_UNAVAILABLE",
+        "category": "job",
+        "message": "OpenMontage stage execution contract is unavailable",
+    }
+    assert "/data/private" not in str(result.structured_content)
+    snapshot = service.get_job(job_id)
+    assert snapshot.status == JobStatus.QUEUED
+    assert snapshot.stages[0].status == StageStatus.PENDING
+    assert snapshot.stages[0].attempt == 0
+
+
+@pytest.mark.asyncio
+async def test_mcp_instruction_read_maps_to_submission_provenance(tmp_path: Path) -> None:
+    from mcp import Client
+
+    service = JobService(tmp_path / "jobs.sqlite3")
+    request = {**_request(), "workflow": "animation"}
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
+    ) as client:
+        created = await client.call_tool("submit_video_job", request)
+        job_id = created.structured_content["jobId"]
+        lease = await client.call_tool(
+            "begin_client_stage",
+            {"job_id": job_id, "stage": "research", "idempotency_key": "begin-read-submit"},
+        )
+        instruction = await client.call_tool(
+            "read_openmontage_file", {"path": "AGENT_GUIDE.md"}
+        )
+        submitted = await client.call_tool(
+            "submit_client_stage",
+            {
+                "job_id": lease.structured_content["jobId"],
+                "stage": lease.structured_content["stage"],
+                "stage_attempt": lease.structured_content["stageAttempt"],
+                "status": "completed",
+                "lease_token": lease.structured_content["leaseToken"],
+                "idempotency_key": "submit-read-submit",
+                "artifacts": {
+                    "research_brief": {
+                        "version": "1.0",
+                        "topic": "Smoke",
+                        "research_date": "2026-09-08",
+                        "landscape": {
+                            "existing_content": [
+                                {
+                                    "title": "Example",
+                                    "source": "test",
+                                    "angle": "test",
+                                    "what_it_covers": "test",
+                                }
+                                for _ in range(3)
+                            ],
+                            "saturated_angles": [],
+                            "underserved_gaps": ["Test gap"],
+                        },
+                        "data_points": [
+                            {
+                                "claim": f"Claim {index}",
+                                "source_url": f"https://example.com/{index}",
+                                "credibility": "secondary_source",
+                            }
+                            for index in range(3)
+                        ],
+                        "audience_insights": {
+                            "common_questions": ["q1", "q2", "q3"],
+                            "misconceptions": [],
+                            "knowledge_level": "intermediate",
+                        },
+                        "angles_discovered": [
+                            {
+                                "name": f"Angle {index}",
+                                "hook": "Hook",
+                                "type": "evergreen",
+                                "why_now": "Now",
+                            }
+                            for index in range(3)
+                        ],
+                        "sources": [
+                            {
+                                "url": f"https://example.com/{index}",
+                                "title": f"Source {index}",
+                                "used_for": "landscape",
+                            }
+                            for index in range(5)
+                        ],
+                    }
+                },
+                "instruction_provenance": [
+                    {
+                        "path": instruction.structured_content["relative_path"],
+                        "content_hash": instruction.structured_content["content_hash"],
+                    }
+                ],
+            },
+        )
+
+    assert submitted.is_error is False
+    assert submitted.structured_content["stages"][0]["status"] == "SUCCEEDED"
+
+
+@pytest.mark.asyncio
+async def test_mcp_stage_begin_hides_project_initialization_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp import Client
+
+    def fail_project_init(*_args: object, **_kwargs: object) -> None:
+        raise OSError("/data/private/projects/job/project.json")
+
+    monkeypatch.setattr("lib.checkpoint.init_project", fail_project_init)
+    service = JobService(tmp_path / "jobs.sqlite3")
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
+    ) as client:
+        created = await client.call_tool("submit_video_job", _request())
+        result = await client.call_tool(
+            "begin_client_stage",
+            {
+                "job_id": created.structured_content["jobId"],
+                "stage": "research",
+                "idempotency_key": "begin-research-init-failure",
+            },
+        )
+
+    assert result.is_error is False
+    assert result.structured_content["error"] == {
+        "code": "PROJECT_INIT_FAILED",
+        "category": "client_stage",
+        "message": "OpenMontage could not initialize the project workspace",
+    }
+    assert "/data/private" not in str(result.structured_content)
 
 
 @pytest.mark.asyncio

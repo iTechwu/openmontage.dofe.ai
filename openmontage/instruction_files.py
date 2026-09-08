@@ -150,8 +150,8 @@ def read_instruction_file(
 ) -> dict[str, Any]:
     """Read one instruction file from the live CI repository.
 
-    Returns the actual server path, repo-relative path, UTF-8 content, size,
-    modification time, a SHA-256 content hash, and the repository revision so
+    Returns the repo-relative path, UTF-8 content, size, modification time, a
+    SHA-256 content hash, and the repository revision so
     the client can record instruction provenance without caching the file.
     """
     if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or not 1 <= max_bytes <= MAX_BYTES_LIMIT:
@@ -207,7 +207,6 @@ def read_instruction_file(
 
     modified_at = datetime.fromtimestamp(resolved.stat().st_mtime, tz=timezone.utc)
     return {
-        "path": str(resolved),
         "relative_path": relative_path,
         "content": content,
         "size": len(data),
