@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from openmontage.contracts import JobAttribution, JobCreateRequest
-from openmontage.job_service import JobService
+from openmontage.job_service import ClientStageError, JobService
 from openmontage.tool_gateway import (
     ALLOWED_TOOLS,
     ToolGateway,
@@ -17,6 +18,18 @@ from openmontage.tool_gateway import (
     stage_allows_gateway_tool,
 )
 from tools.base_tool import BaseTool, ToolResult
+
+
+def _job_attribution() -> JobAttribution:
+    return JobAttribution(
+        workspace_id="ws-1",
+        employee_id="employee-1",
+        runtime_id="runtime-1",
+        root_task_id="task-1",
+        conversation_id="conversation-1",
+        source_invocation_id="invocation-1",
+        trace_id="trace-1",
+    )
 
 
 class _FakeTool(BaseTool):
@@ -373,6 +386,108 @@ def test_real_job_service_begin_contract_authorizes_gateway_invoke(
 
     assert result["success"] is True
     assert result["artifacts"][0]["path"] == "assets/images/integration.png"
+
+
+def test_expired_client_lease_cannot_invoke_gateway_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = JobService(
+        tmp_path / "jobs.sqlite3", projects_dir=tmp_path / "projects"
+    )
+    job = service.create_job(
+        JobCreateRequest(
+            client_request_id="expired-gateway-lease",
+            workflow="framework-smoke",
+            input={"type": "text", "inlineText": "Smoke"},
+            brief={"title": "Smoke"},
+            output={"container": "mp4"},
+            budget={"maxAmount": "1.00", "currency": "CNY"},
+        ),
+        _job_attribution(),
+    )
+    lease = service.begin_client_stage(
+        job.job_id,
+        "research",
+        idempotency_key="begin-expired-gateway-lease",
+        now=datetime.now(timezone.utc) - timedelta(hours=2),
+        lease_duration=timedelta(minutes=30),
+        stage_contract_factory=lambda _snapshot, _stage: {
+            "gatewayTools": ["image_selector"]
+        },
+    )
+    monkeypatch.setattr("openmontage.tool_gateway.registry", _FakeRegistry())
+    gateway = ToolGateway(service)
+
+    with pytest.raises(ClientStageError) as exc_info:
+        gateway.invoke(
+            tool_name="image_selector",
+            operation="generate",
+            inputs={"output_path": "assets/images/expired.png"},
+            job_id=job.job_id,
+            stage="research",
+            stage_attempt=lease.stage_attempt,
+            lease_token=lease.lease_token,
+            idempotency_key="invoke-expired-gateway-lease",
+        )
+
+    assert exc_info.value.code == "STAGE_LEASE_EXPIRED"
+    assert not (service.projects_dir / job.job_id / "assets/images/expired.png").exists()
+
+
+def test_legacy_active_lease_contract_is_backfilled_before_invoke(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = JobService(
+        tmp_path / "jobs.sqlite3", projects_dir=tmp_path / "projects"
+    )
+    job = service.create_job(
+        JobCreateRequest(
+            client_request_id="legacy-gateway-lease",
+            workflow="framework-smoke",
+            input={"type": "text", "inlineText": "Smoke"},
+            brief={"title": "Smoke"},
+            output={"container": "mp4"},
+            budget={"maxAmount": "1.00", "currency": "CNY"},
+        ),
+        _job_attribution(),
+    )
+    lease = service.begin_client_stage(
+        job.job_id,
+        "research",
+        idempotency_key="begin-legacy-gateway-lease",
+    )
+    assert lease.stage_contract is None
+    monkeypatch.setattr("openmontage.tool_gateway.registry", _FakeRegistry())
+    contract = {
+        "declaredTools": ["image_selector"],
+        "gatewayTools": ["image_selector"],
+        "produces": [],
+        "humanApprovalRequired": False,
+        "instructionFiles": [],
+    }
+    gateway = ToolGateway(
+        service,
+        stage_contract_factory=lambda _snapshot, _stage: contract,
+    )
+
+    result = gateway.invoke(
+        tool_name="image_selector",
+        operation="generate",
+        inputs={"output_path": "assets/images/legacy.png"},
+        job_id=job.job_id,
+        stage="research",
+        stage_attempt=lease.stage_attempt,
+        lease_token=lease.lease_token,
+        idempotency_key="invoke-legacy-gateway-lease",
+    )
+
+    assert result["success"] is True
+    with service._connect() as connection:
+        row = service._fetch_active_client_lease(connection, job.job_id, "research")
+    assert row is not None
+    assert json.loads(row["response_json"])["stageContract"] == contract
 
 
 def test_every_manifest_gateway_tool_uses_the_gateway_allowlist() -> None:

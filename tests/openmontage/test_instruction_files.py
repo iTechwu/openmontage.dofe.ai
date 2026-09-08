@@ -216,6 +216,26 @@ def test_rejects_non_utf8_file(tmp_path: Path) -> None:
     assert _code(exc_info) == "INSTRUCTION_FILE_UNAVAILABLE"
 
 
+def test_read_failure_does_not_expose_filesystem_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repo"
+    (root / "docs").mkdir(parents=True)
+    (root / "docs" / "note.md").write_text("content", encoding="utf-8")
+
+    def fail_open(*_args: object, **_kwargs: object) -> None:
+        raise OSError("/data/private/openmontage/docs/note.md")
+
+    monkeypatch.setattr("builtins.open", fail_open)
+    with pytest.raises(InstructionFileError) as exc_info:
+        read_instruction_file("docs/note.md", repo_root=root)
+
+    assert _code(exc_info) == "INSTRUCTION_FILE_UNAVAILABLE"
+    assert "docs/note.md" in str(exc_info.value)
+    assert "/data/private" not in str(exc_info.value)
+
+
 # --- Read-only guarantee ----------------------------------------------------
 
 

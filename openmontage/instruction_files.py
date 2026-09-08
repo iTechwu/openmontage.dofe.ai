@@ -18,6 +18,7 @@ provides no create / modify / delete / copy operation.
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -187,10 +188,14 @@ def read_instruction_file(
         # cannot slip past the limit between a stat() and a later read.
         with open(resolved, "rb") as handle:
             data = handle.read(max_bytes + 1)
+            modified_at = datetime.fromtimestamp(
+                os.fstat(handle.fileno()).st_mtime,
+                tz=timezone.utc,
+            )
     except OSError as exc:
         raise InstructionFileError(
             "INSTRUCTION_FILE_UNAVAILABLE",
-            f"instruction file cannot be read: {relative_path} ({exc})",
+            f"instruction file cannot be read: {relative_path}",
         ) from exc
     if len(data) > max_bytes:
         raise InstructionFileError(
@@ -205,7 +210,6 @@ def read_instruction_file(
             f"instruction file is not valid UTF-8: {relative_path}",
         ) from exc
 
-    modified_at = datetime.fromtimestamp(resolved.stat().st_mtime, tz=timezone.utc)
     return {
         "relative_path": relative_path,
         "content": content,

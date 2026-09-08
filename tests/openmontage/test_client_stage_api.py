@@ -215,6 +215,34 @@ def test_begin_is_idempotent_and_conflicts_on_different_arguments(tmp_path: Path
     assert exc_info.value.code == "IDEMPOTENCY_CONFLICT"
 
 
+def test_begin_replay_backfills_legacy_stage_contract(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    job = _job(service)
+    first = service.begin_client_stage(
+        job.job_id,
+        "research",
+        idempotency_key="legacy-begin",
+    )
+    assert first.stage_contract is None
+    contract = {
+        "declaredTools": [],
+        "gatewayTools": [],
+        "produces": ["research_brief"],
+        "humanApprovalRequired": False,
+        "instructionFiles": ["AGENT_GUIDE.md"],
+    }
+
+    replay = service.begin_client_stage(
+        job.job_id,
+        "research",
+        idempotency_key="legacy-begin",
+        stage_contract_factory=lambda _snapshot, _stage: contract,
+    )
+
+    assert replay.stage_contract == contract
+    assert replay.lease_token == first.lease_token
+
+
 def test_begin_rejects_second_live_owner(tmp_path: Path) -> None:
     service = _service(tmp_path)
     job = _job(service)

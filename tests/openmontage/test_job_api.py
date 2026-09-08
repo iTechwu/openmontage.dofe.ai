@@ -1025,6 +1025,60 @@ async def test_mcp_stage_submission_with_invalid_lease_returns_structured_error(
 
 
 @pytest.mark.asyncio
+async def test_mcp_stage_submission_hides_instruction_read_failure_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp import Client
+
+    from openmontage.instruction_files import InstructionFileError
+
+    def fail_provenance(_entries: object) -> list[dict[str, str]]:
+        raise InstructionFileError(
+            "INSTRUCTION_FILE_UNAVAILABLE",
+            "cannot read /data/private/openmontage/AGENT_GUIDE.md",
+        )
+
+    monkeypatch.setattr(
+        "openmontage.instruction_files.verify_instruction_provenance",
+        fail_provenance,
+    )
+    service = JobService(tmp_path / "jobs.sqlite3")
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
+    ) as client:
+        created = await client.call_tool("submit_video_job", _request())
+        job_id = created.structured_content["jobId"]
+        lease = await client.call_tool(
+            "begin_client_stage",
+            {"job_id": job_id, "stage": "research", "idempotency_key": "begin-research"},
+        )
+        result = await client.call_tool(
+            "submit_client_stage",
+            {
+                "job_id": job_id,
+                "stage": "research",
+                "stage_attempt": lease.structured_content["stageAttempt"],
+                "status": "in_progress",
+                "lease_token": lease.structured_content["leaseToken"],
+                "idempotency_key": "submit-provenance-read-failure",
+                "instruction_provenance": [
+                    {"path": "AGENT_GUIDE.md", "content_hash": "sha256:" + "0" * 64}
+                ],
+            },
+        )
+
+    assert result.is_error is False
+    assert result.structured_content["error"] == {
+        "code": "INSTRUCTION_FILE_UNAVAILABLE",
+        "category": "client_stage",
+        "message": "OpenMontage could not verify instruction provenance",
+    }
+    assert "/data/private" not in str(result.structured_content)
+
+
+@pytest.mark.asyncio
 async def test_mcp_stage_submission_requires_canonical_artifact_wrapper(
     tmp_path: Path,
 ) -> None:

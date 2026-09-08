@@ -1354,6 +1354,63 @@ class JobService:
             (now.isoformat(), job_id, stage, lease_token),
         )
 
+    def _client_lease_response_with_contract(
+        self,
+        connection: sqlite3.Connection,
+        job_id: str,
+        stage_code: str,
+        response_json: str,
+        stage_contract_factory: Callable[[JobSnapshot, str], dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        """Backfill the immutable stage contract on leases created before it existed."""
+        try:
+            response = json.loads(response_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ClientStageError(
+                "STAGE_CONTRACT_UNAVAILABLE", "client lease response is invalid"
+            ) from exc
+        existing = response.get("stageContract")
+        if existing is not None:
+            if not isinstance(existing, dict):
+                raise ClientStageError(
+                    "STAGE_CONTRACT_UNAVAILABLE", "client lease stage contract is invalid"
+                )
+            return response
+        if stage_contract_factory is None:
+            return response
+
+        snapshot = self._load_job(connection, job_id).model_copy(deep=True)
+        contract = stage_contract_factory(snapshot, stage_code)
+        if not isinstance(contract, dict):
+            raise ClientStageError(
+                "STAGE_CONTRACT_UNAVAILABLE", "client lease stage contract is invalid"
+            )
+        lease_token = response.get("leaseToken")
+        if not isinstance(lease_token, str) or not lease_token:
+            raise ClientStageError(
+                "STAGE_CONTRACT_UNAVAILABLE", "client lease token is invalid"
+            )
+        response["stageContract"] = contract
+        updated = connection.execute(
+            """
+            UPDATE openmontage_client_stage_lease
+            SET response_json = ?, updated_at = ?
+            WHERE job_id = ? AND stage = ? AND lease_token = ?
+            """,
+            (
+                _canonical_json(response),
+                datetime.now(timezone.utc).isoformat(),
+                job_id,
+                stage_code,
+                lease_token,
+            ),
+        )
+        if updated.rowcount != 1:
+            raise ClientStageError(
+                "STAGE_CONTRACT_UNAVAILABLE", "client lease could not be upgraded"
+            )
+        return response
+
     @classmethod
     def _require_client_lease(
         cls,
@@ -1368,8 +1425,8 @@ class JobService:
     ) -> sqlite3.Row:
         """Require the caller to own the current (Job, stage) lease.
 
-        ``fencing=False`` (progress heartbeats) additionally requires the lease
-        to be unexpired; ``fencing=True`` (submit/settle) only requires the
+        ``fencing=False`` (progress and tool execution) additionally requires
+        the lease to be unexpired; ``fencing=True`` (submit/settle) only requires the
         token to be current, mirroring the Worker settlement contract — a lease
         that lapsed mid-flight may still settle as long as nobody re-began the
         stage (a re-begin mints a fresh token, which fences the stale one).
@@ -1481,7 +1538,14 @@ class JobService:
                         "IDEMPOTENCY_CONFLICT",
                         "idempotency_key was already used for a different begin_client_stage request",
                     )
-                return ClientStageLease.from_wire(json.loads(replay["response_json"]))
+                response = self._client_lease_response_with_contract(
+                    connection,
+                    job_id,
+                    stage_code,
+                    replay["response_json"],
+                    stage_contract_factory,
+                )
+                return ClientStageLease.from_wire(response)
 
             snapshot = self._load_job(connection, job_id).model_copy(deep=True)
             self._require_expected_sequence(snapshot, expected_sequence)
@@ -1864,7 +1928,12 @@ class JobService:
             try:
                 provenance_entries = verify_instruction_provenance(instruction_provenance)
             except InstructionFileError as exc:
-                raise ClientStageError(exc.code, f"instruction provenance rejected: {exc}") from exc
+                message = (
+                    "instruction provenance could not be verified"
+                    if exc.code == "INSTRUCTION_FILE_UNAVAILABLE"
+                    else f"instruction provenance rejected: {exc}"
+                )
+                raise ClientStageError(exc.code, message) from exc
 
         # Media references are validated against the CI project directory;
         # completed/awaiting submissions must reference files that exist.

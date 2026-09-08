@@ -130,7 +130,7 @@ def create_server(
     def tool_gateway() -> Any:
         from openmontage.tool_gateway import ToolGateway
 
-        return ToolGateway(jobs())
+        return ToolGateway(jobs(), stage_contract_factory=stage_execution_contract)
 
     def resolve_attribution(headers: Mapping[str, str] | None) -> Any:
         nonlocal attribution_resolver
@@ -145,6 +145,9 @@ def create_server(
             code = error.code
             safe_messages = {
                 "CHECKPOINT_WRITE_FAILED": "OpenMontage could not persist the stage checkpoint",
+                "INSTRUCTION_FILE_UNAVAILABLE": (
+                    "OpenMontage could not verify instruction provenance"
+                ),
                 "PROJECT_INIT_FAILED": "OpenMontage could not initialize the project workspace",
             }
             message = safe_messages.get(code, str(error).removeprefix(f"{code}: "))

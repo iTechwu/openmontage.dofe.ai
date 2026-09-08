@@ -11,7 +11,7 @@ import logging
 import mimetypes
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from openmontage.job_service import JobService
 from tools.base_tool import ToolResult
@@ -77,10 +77,9 @@ def stage_allows_gateway_tool(declared_tools: Any, tool_name: str) -> bool:
     return tool_name in gateway_tools_for_declared(declared_tools)
 
 
-def _gateway_tools_from_lease(lease_row: Any) -> frozenset[str]:
+def _gateway_tools_from_response(response: Any) -> frozenset[str]:
     """Read the immutable Gateway authorization captured for this stage attempt."""
     try:
-        response = json.loads(lease_row["response_json"])
         gateway_tools = response["stageContract"]["gatewayTools"]
         if not isinstance(gateway_tools, list) or not all(
             isinstance(item, str) and item in ALLOWED_TOOLS for item in gateway_tools
@@ -92,6 +91,17 @@ def _gateway_tools_from_lease(lease_row: Any) -> frozenset[str]:
             "stage execution contract is unavailable; re-begin the stage",
         ) from exc
     return frozenset(gateway_tools)
+
+
+def _gateway_tools_from_lease(lease_row: Any) -> frozenset[str]:
+    try:
+        response = json.loads(lease_row["response_json"])
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ToolGatewayError(
+            "STAGE_CONTRACT_UNAVAILABLE",
+            "stage execution contract is unavailable; re-begin the stage",
+        ) from exc
+    return _gateway_tools_from_response(response)
 
 
 def _canonical(value: Any) -> str:
@@ -164,8 +174,14 @@ def _sanitize_data(value: Any, project_dir: Path) -> Any:
 class ToolGateway:
     """Dispatch the fixed logical tool surface inside a Job workspace."""
 
-    def __init__(self, service: JobService) -> None:
+    def __init__(
+        self,
+        service: JobService,
+        *,
+        stage_contract_factory: Callable[[Any, str], dict[str, Any]] | None = None,
+    ) -> None:
         self.service = service
+        self.stage_contract_factory = stage_contract_factory
         with self.service._connect() as db:  # shared durable Job database
             db.execute(
                 """CREATE TABLE IF NOT EXISTS openmontage_tool_invocation (
@@ -222,11 +238,23 @@ class ToolGateway:
 
         now = datetime.now(timezone.utc)
         with self.service._connect() as db:
+            if self.stage_contract_factory is not None:
+                self.service._begin_write(db)
             lease_row = self.service._require_client_lease(
                 db, job_id, stage, lease_token, int(stage_attempt), now,
-                fencing=(operation != "progress"),
+                fencing=False,
             )
-            gateway_tools = _gateway_tools_from_lease(lease_row)
+            if self.stage_contract_factory is None:
+                gateway_tools = _gateway_tools_from_lease(lease_row)
+            else:
+                response = self.service._client_lease_response_with_contract(
+                    db,
+                    job_id,
+                    stage,
+                    lease_row["response_json"],
+                    self.stage_contract_factory,
+                )
+                gateway_tools = _gateway_tools_from_response(response)
         if tool_name not in gateway_tools:
             raise ToolGatewayError(
                 "TOOL_NOT_ALLOWED", f"{tool_name!r} is not allowed in stage {stage!r}"
