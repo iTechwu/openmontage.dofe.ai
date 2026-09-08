@@ -574,6 +574,289 @@ async def test_mcp_job_creation_reports_invalid_manifest_without_internal_detail
 
 
 @pytest.mark.asyncio
+async def test_mcp_tool_invocation_without_stage_lease_returns_structured_error(
+    tmp_path: Path,
+) -> None:
+    from mcp import Client
+
+    service = JobService(tmp_path / "jobs.sqlite3")
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
+    ) as client:
+        result = await client.call_tool(
+            "invoke_openmontage_tool",
+            {
+                "tool_name": "tts_selector",
+                "operation": "generate",
+                "inputs": {"text": "test"},
+            },
+        )
+
+    assert result.is_error is False
+    assert result.structured_content == {
+        "success": False,
+        "status": "failed",
+        "error": {
+            "code": "STAGE_LEASE_INVALID",
+            "category": "tool_gateway",
+            "message": (
+                "job_id, stage, stage_attempt and lease_token "
+                "are required; call begin_client_stage first"
+            ),
+        },
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["job_id", "stage"])
+async def test_mcp_tool_invocation_rejects_whitespace_stage_context(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    from mcp import Client
+
+    service = JobService(tmp_path / "jobs.sqlite3")
+    arguments = {
+        "tool_name": "tts_selector",
+        "operation": "generate",
+        "inputs": {"text": "test"},
+        "job_id": "job-present",
+        "stage": "assets",
+        "stage_attempt": 1,
+        "lease_token": "lease-present",
+        "idempotency_key": "invoke-whitespace-context",
+    }
+    arguments[field] = "   "
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
+    ) as client:
+        result = await client.call_tool("invoke_openmontage_tool", arguments)
+
+    assert result.is_error is False
+    assert result.structured_content["error"]["code"] == "STAGE_LEASE_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_invocation_with_unknown_job_returns_structured_error(
+    tmp_path: Path,
+) -> None:
+    from mcp import Client
+
+    service = JobService(tmp_path / "jobs.sqlite3")
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
+    ) as client:
+        result = await client.call_tool(
+            "invoke_openmontage_tool",
+            {
+                "tool_name": "tts_selector",
+                "operation": "generate",
+                "inputs": {"text": "test"},
+                "job_id": "missing-job",
+                "stage": "assets",
+                "stage_attempt": 1,
+                "lease_token": "lease-missing-job",
+                "idempotency_key": "invoke-missing-job",
+            },
+        )
+
+    assert result.is_error is False
+    assert result.structured_content["error"]["code"] == "OPENMONTAGE_JOB_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_invocation_with_invalid_lease_returns_structured_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp import Client
+    from openmontage.job_service import ClientStageError
+
+    service = JobService(tmp_path / "jobs.sqlite3")
+
+    def reject_invalid_lease(*_args: object, **_kwargs: object) -> None:
+        raise ClientStageError("STAGE_LEASE_INVALID", "client lease is no longer current")
+
+    monkeypatch.setattr("openmontage.tool_gateway.ToolGateway.invoke", reject_invalid_lease)
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
+    ) as client:
+        created = await client.call_tool("submit_video_job", _request())
+        result = await client.call_tool(
+            "invoke_openmontage_tool",
+            {
+                "tool_name": "tts_selector",
+                "operation": "generate",
+                "inputs": {"text": "test"},
+                "job_id": created.structured_content["jobId"],
+                "stage": "research",
+                "stage_attempt": 1,
+                "lease_token": "stale-lease",
+                "idempotency_key": "invoke-stale-lease",
+            },
+        )
+
+    assert result.is_error is False
+    assert result.structured_content["error"]["code"] == "STAGE_LEASE_INVALID"
+    assert result.structured_content["error"]["category"] == "client_stage"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stage", "expected_sequence", "error_code"),
+    [
+        ("no-such-stage", None, "OPENMONTAGE_JOB_STATE_INVALID"),
+        ("research", 999, "OPENMONTAGE_JOB_CONFLICT"),
+    ],
+)
+async def test_mcp_stage_begin_maps_job_state_errors(
+    tmp_path: Path,
+    stage: str,
+    expected_sequence: int | None,
+    error_code: str,
+) -> None:
+    from mcp import Client
+
+    service = JobService(tmp_path / "jobs.sqlite3")
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
+    ) as client:
+        created = await client.call_tool("submit_video_job", _request())
+        arguments: dict[str, object] = {
+            "job_id": created.structured_content["jobId"],
+            "stage": stage,
+            "idempotency_key": f"begin-{stage}",
+        }
+        if expected_sequence is not None:
+            arguments["expected_sequence"] = expected_sequence
+        result = await client.call_tool("begin_client_stage", arguments)
+
+    assert result.is_error is False
+    assert result.structured_content["error"]["code"] == error_code
+    assert result.structured_content["error"]["category"] == "job"
+
+
+@pytest.mark.asyncio
+async def test_mcp_stage_submission_with_invalid_lease_returns_structured_error(
+    tmp_path: Path,
+) -> None:
+    from mcp import Client
+
+    service = JobService(tmp_path / "jobs.sqlite3")
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
+    ) as client:
+        created = await client.call_tool("submit_video_job", _request())
+        job_id = created.structured_content["jobId"]
+        lease = await client.call_tool(
+            "begin_client_stage",
+            {"job_id": job_id, "stage": "research", "idempotency_key": "begin-research"},
+        )
+        result = await client.call_tool(
+            "submit_client_stage",
+            {
+                "job_id": job_id,
+                "stage": "research",
+                "stage_attempt": lease.structured_content["stageAttempt"],
+                "status": "completed",
+                "lease_token": "wrong-lease",
+                "idempotency_key": "submit-research",
+            },
+        )
+
+    assert result.is_error is False
+    assert result.structured_content["error"]["code"] == "STAGE_LEASE_INVALID"
+    assert result.structured_content["error"]["category"] == "client_stage"
+
+
+@pytest.mark.asyncio
+async def test_mcp_stage_submission_requires_canonical_artifact_wrapper(
+    tmp_path: Path,
+) -> None:
+    from mcp import Client
+
+    service = JobService(tmp_path / "jobs.sqlite3")
+    request = {**_request(), "workflow": "animation"}
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
+    ) as client:
+        created = await client.call_tool("submit_video_job", request)
+        job_id = created.structured_content["jobId"]
+        lease = await client.call_tool(
+            "begin_client_stage",
+            {"job_id": job_id, "stage": "research", "idempotency_key": "begin-research"},
+        )
+        result = await client.call_tool(
+            "submit_client_stage",
+            {
+                "job_id": job_id,
+                "stage": "research",
+                "stage_attempt": lease.structured_content["stageAttempt"],
+                "status": "completed",
+                "lease_token": lease.structured_content["leaseToken"],
+                "idempotency_key": "submit-research",
+                "artifacts": {"version": "1.0", "topic": "unwrapped brief"},
+            },
+        )
+
+    assert result.is_error is False
+    assert result.structured_content["error"]["code"] == "ARTIFACT_SCHEMA_INVALID"
+    assert "canonical artifact 'research_brief'" in result.structured_content["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_stage_submission_hides_checkpoint_write_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mcp import Client
+
+    def fail_checkpoint_write(*_args: object, **_kwargs: object) -> None:
+        raise OSError("/data/private/jobs/secret-checkpoint.json")
+
+    monkeypatch.setattr("lib.checkpoint.write_checkpoint", fail_checkpoint_write)
+    service = JobService(tmp_path / "jobs.sqlite3")
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
+    ) as client:
+        created = await client.call_tool(
+            "submit_video_job", {**_request(), "workflow": "animation"}
+        )
+        job_id = created.structured_content["jobId"]
+        lease = await client.call_tool(
+            "begin_client_stage",
+            {"job_id": job_id, "stage": "research", "idempotency_key": "begin-research"},
+        )
+        result = await client.call_tool(
+            "submit_client_stage",
+            {
+                "job_id": job_id,
+                "stage": "research",
+                "stage_attempt": lease.structured_content["stageAttempt"],
+                "status": "in_progress",
+                "lease_token": lease.structured_content["leaseToken"],
+                "idempotency_key": "submit-research-progress",
+            },
+        )
+
+    assert result.is_error is False
+    assert result.structured_content["error"] == {
+        "code": "CHECKPOINT_WRITE_FAILED",
+        "category": "client_stage",
+        "message": "OpenMontage could not persist the stage checkpoint",
+    }
+    assert "/data/private" not in result.content[0].text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("field", "value", "message_fragment"),
     [

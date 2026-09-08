@@ -38,6 +38,20 @@ def create_server(
     except ImportError as exc:
         raise RuntimeError("Install MCP support with: pip install 'mcp>=2,<3'") from exc
 
+    from openmontage.job_service import (
+        ClientStageError,
+        JobConflictError,
+        JobNotFoundError,
+        JobStateError,
+    )
+
+    client_stage_errors = (
+        ClientStageError,
+        JobConflictError,
+        JobNotFoundError,
+        JobStateError,
+    )
+
     server = MCPServer(
         "OpenMontage",
         description="Prepare and inspect agent-led reference-video productions.",
@@ -46,7 +60,11 @@ def create_server(
             "creatively differentiated video. Then follow the returned agent_instructions "
             "and the OpenMontage pipeline approval gates. Before submit_video_job, call "
             "openmontage_capabilities and follow its job_submission contract; workflow is a "
-            "pipeline name, never a stage name such as compose."
+            "pipeline name, never a stage name such as compose. After submission, drive every "
+            "client-owned stage with begin_client_stage, zero or more stage-allowed "
+            "invoke_openmontage_tool calls, then submit_client_stage. Every non-catalog "
+            "invocation requires the active job_id, "
+            "stage, stage_attempt, lease_token, and a stable non-empty idempotency_key."
         ),
         version="0.3.0",
     )
@@ -71,6 +89,35 @@ def create_server(
 
             attribution_resolver = default_attribution_resolver()
         return attribution_resolver(headers)
+
+    def _client_stage_error(error: Exception) -> dict[str, Any]:
+        if isinstance(error, ClientStageError):
+            code = error.code
+            message = (
+                "OpenMontage could not persist the stage checkpoint"
+                if code == "CHECKPOINT_WRITE_FAILED"
+                else str(error).removeprefix(f"{code}: ")
+            )
+            category = "client_stage"
+        elif isinstance(error, JobNotFoundError):
+            code = "OPENMONTAGE_JOB_NOT_FOUND"
+            message = "OpenMontage Job was not found or is not visible to this workspace"
+            category = "job"
+        elif isinstance(error, JobConflictError):
+            code = "OPENMONTAGE_JOB_CONFLICT"
+            message = str(error)
+            category = "job"
+        elif isinstance(error, JobStateError):
+            code = "OPENMONTAGE_JOB_STATE_INVALID"
+            message = str(error)
+            category = "job"
+        else:  # pragma: no cover - callers restrict the caught exception types
+            raise error
+        return {
+            "success": False,
+            "status": "failed",
+            "error": {"code": code, "category": category, "message": message},
+        }
 
     @server.tool()
     def prepare_reference_clone(
@@ -122,6 +169,15 @@ def create_server(
         scored provider rankings, and ``progress`` reports progress. Tool-
         specific operations (e.g. video_selector's text_to_video / image_to_video
         / reference_to_video) go inside ``inputs``, not here.
+
+        Every non-catalog call belongs to an active client-stage lease. The
+        caller must first create a Job and call ``begin_client_stage`` for the
+        current stage. That response's ``jobId``, ``stage``, ``stageAttempt``,
+        and ``leaseToken`` map to this tool's ``job_id``, ``stage``,
+        ``stage_attempt``, and ``lease_token`` arguments; also pass a stable
+        ``idempotency_key``. A stage may make zero or more calls allowed by its
+        tool list before ``submit_client_stage``; do not call this tool as a
+        standalone provider API or invent a call for a stage with no tools.
         """
         from openmontage.job_api import require_same_workspace
         from openmontage.tool_gateway import ToolGatewayError
@@ -130,6 +186,24 @@ def create_server(
             attribution = resolve_attribution(ctx.headers)
             if operation == "catalog":
                 return tool_gateway().invoke(tool_name=tool_name, operation=operation, inputs=inputs)
+            if (
+                not job_id.strip()
+                or not stage.strip()
+                or stage_attempt is None
+                or not lease_token.strip()
+            ):
+                return {
+                    "success": False,
+                    "status": "failed",
+                    "error": {
+                        "code": "STAGE_LEASE_INVALID",
+                        "category": "tool_gateway",
+                        "message": (
+                            "job_id, stage, stage_attempt and lease_token "
+                            "are required; call begin_client_stage first"
+                        ),
+                    },
+                }
             snapshot = jobs().get_job(job_id)
             require_same_workspace(snapshot, attribution)
             return tool_gateway().invoke(
@@ -143,6 +217,8 @@ def create_server(
                 "status": "failed",
                 "error": {"code": exc.code, "category": exc.category, "message": exc.message},
             }
+        except client_stage_errors as exc:
+            return _client_stage_error(exc)
 
     @server.tool()
     def reference_clone_status(project_id: str) -> dict[str, Any]:
@@ -289,17 +365,18 @@ def create_server(
         """
         from openmontage.job_api import require_same_workspace
 
-        attribution = resolve_attribution(ctx.headers)
-        snapshot = jobs().get_job(job_id)
-        require_same_workspace(snapshot, attribution)
-        if not idempotency_key.strip():
-            raise ValueError("idempotency_key must be non-empty")
-        return jobs().begin_client_stage(
-            job_id,
-            stage,
-            idempotency_key=idempotency_key,
-            expected_sequence=expected_sequence,
-        ).to_wire()
+        try:
+            attribution = resolve_attribution(ctx.headers)
+            snapshot = jobs().get_job(job_id)
+            require_same_workspace(snapshot, attribution)
+            return jobs().begin_client_stage(
+                job_id,
+                stage,
+                idempotency_key=idempotency_key,
+                expected_sequence=expected_sequence,
+            ).to_wire()
+        except client_stage_errors as exc:
+            return _client_stage_error(exc)
 
     @server.tool()
     def update_client_stage_progress(
@@ -321,21 +398,22 @@ def create_server(
         """
         from openmontage.job_api import require_same_workspace
 
-        attribution = resolve_attribution(ctx.headers)
-        snapshot = jobs().get_job(job_id)
-        require_same_workspace(snapshot, attribution)
-        if not idempotency_key.strip():
-            raise ValueError("idempotency_key must be non-empty")
-        return jobs().update_client_stage_progress(
-            job_id,
-            stage,
-            stage_attempt=stage_attempt,
-            completed_units=completed_units,
-            total_units=total_units,
-            label_code=label_code,
-            lease_token=lease_token,
-            idempotency_key=idempotency_key,
-        ).to_wire()
+        try:
+            attribution = resolve_attribution(ctx.headers)
+            snapshot = jobs().get_job(job_id)
+            require_same_workspace(snapshot, attribution)
+            return jobs().update_client_stage_progress(
+                job_id,
+                stage,
+                stage_attempt=stage_attempt,
+                completed_units=completed_units,
+                total_units=total_units,
+                label_code=label_code,
+                lease_token=lease_token,
+                idempotency_key=idempotency_key,
+            ).to_wire()
+        except client_stage_errors as exc:
+            return _client_stage_error(exc)
 
     @server.tool()
     def submit_client_stage(
@@ -361,25 +439,30 @@ def create_server(
         proving which instructions the client followed. Gated stages must be
         submitted as ``awaiting_human`` and completed only after
         ``approve_video_stage`` approves them.
+
+        ``artifacts`` is keyed by canonical artifact name; for example, the
+        research stage requires ``{"research_brief": {<brief fields>}}``.
+        Do not place the brief's fields directly at the ``artifacts`` level.
         """
         from openmontage.job_api import require_same_workspace
 
-        attribution = resolve_attribution(ctx.headers)
-        snapshot = jobs().get_job(job_id)
-        require_same_workspace(snapshot, attribution)
-        if not idempotency_key.strip():
-            raise ValueError("idempotency_key must be non-empty")
-        return jobs().submit_client_stage(
-            job_id,
-            stage,
-            stage_attempt=stage_attempt,
-            status=status,
-            lease_token=lease_token,
-            idempotency_key=idempotency_key,
-            artifacts=artifacts,
-            metadata=metadata,
-            instruction_provenance=instruction_provenance,
-        ).to_wire()
+        try:
+            attribution = resolve_attribution(ctx.headers)
+            snapshot = jobs().get_job(job_id)
+            require_same_workspace(snapshot, attribution)
+            return jobs().submit_client_stage(
+                job_id,
+                stage,
+                stage_attempt=stage_attempt,
+                status=status,
+                lease_token=lease_token,
+                idempotency_key=idempotency_key,
+                artifacts=artifacts,
+                metadata=metadata,
+                instruction_provenance=instruction_provenance,
+            ).to_wire()
+        except client_stage_errors as exc:
+            return _client_stage_error(exc)
 
     @server.tool()
     def list_video_job_events(

@@ -54,11 +54,13 @@ async def test_mcp_server_publishes_reference_clone_surface():
 
     from openmontage.mcp_server import create_server
 
-    async with Client(create_server()) as client:
+    server = create_server()
+    async with Client(server) as client:
         tools = await client.list_tools()
         resources = await client.list_resources()
 
-    assert {tool.name for tool in tools.tools} == {
+    by_name = {tool.name: tool for tool in tools.tools}
+    assert set(by_name) == {
         "approve_video_stage",
         "cancel_video_job",
         "cleanup_exports",
@@ -80,6 +82,29 @@ async def test_mcp_server_publishes_reference_clone_surface():
         "read_project_file",
         "read_project_image",
     }
+    invocation_description = by_name["invoke_openmontage_tool"].description
+    for required_context in (
+        "begin_client_stage",
+        "submit_client_stage",
+        "job_id",
+        "stage",
+        "stage_attempt",
+        "lease_token",
+        "idempotency_key",
+    ):
+        assert required_context in invocation_description
+        assert required_context in server.instructions
+    normalized_description = " ".join(invocation_description.split())
+    assert (
+        "response's ``jobId``, ``stage``, ``stageAttempt``, and ``leaseToken`` "
+        "map to this tool's ``job_id``, ``stage``, ``stage_attempt``, and "
+        "``lease_token`` arguments"
+    ) in normalized_description
+    assert "zero or more" in invocation_description
+    assert "zero or more" in server.instructions
+    submission_description = by_name["submit_client_stage"].description
+    assert 'artifacts' in submission_description
+    assert 'research_brief' in submission_description
     assert {str(resource.uri) for resource in resources.resources} == {
         "openmontage://reference-clone-guide"
     }

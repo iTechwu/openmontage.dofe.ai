@@ -355,6 +355,17 @@ Use /recreate-video on this Douyin link: <url>. Create an original 9:16 version.
 - `approve_video_stage(job_id, stage, expected_sequence, idempotency_key, approved=true)`:
   approve or reject a pending human gate. `expected_sequence` and `idempotency_key`
   follow the same optimistic-fencing contract as `cancel_video_job`.
+- `begin_client_stage` / `update_client_stage_progress` / `submit_client_stage`:
+  drive each client-owned stage under an exclusive lease. Every non-catalog
+  `invoke_openmontage_tool` call must include the returned `job_id`, `stage`,
+  `stage_attempt`, and `lease_token`, plus a non-empty stable `idempotency_key`.
+  `begin_client_stage` returns these values as `jobId`, `stage`, `stageAttempt`,
+  and `leaseToken`; map them to the snake-case tool arguments. Between begin
+  and submit, call zero or more tools explicitly allowed by that stage; do not
+  invent a tool call for a stage whose tool list is empty. Stage submission keys
+  `artifacts` by canonical artifact name, such as
+  `{"research_brief": {<brief fields>}}`. Calls outside this lifecycle return a
+  structured stage or Job error.
 - `openmontage://reference-clone-guide`: shared agent workflow resource.
 
 The Job tools never accept workspace, employee, conversation, task, invocation,
