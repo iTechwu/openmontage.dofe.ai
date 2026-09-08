@@ -28,7 +28,7 @@ RUN sed -i \
         /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl ffmpeg python3 python3-pip python3-venv tini unzip \
+        ca-certificates curl ffmpeg git python3 python3-pip python3-venv tini unzip \
         libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcups2 libnspr4 libnss3 \
         libxcomposite1 libxdamage1 \
     && rm -rf /var/lib/apt/lists/*

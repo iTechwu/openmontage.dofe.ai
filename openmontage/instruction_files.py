@@ -222,6 +222,21 @@ def read_instruction_file(
     }
 
 
+def _normalize_content_hash(value: str) -> str:
+    """Normalize a content hash to ``sha256:<lowercase hex>`` form.
+
+    Accepts the canonical ``sha256:<hex>`` form as well as the bare-hex form
+    some MCP clients serialize. Returns ``value`` unchanged when neither prefix
+    is recognized so a clear equality comparison still surfaces real drift.
+    """
+    candidate = value.strip()
+    if candidate.lower().startswith("sha256:"):
+        return f"sha256:{candidate.split(':', 1)[1].lower()}"
+    if len(candidate) == 64 and all(ch in "0123456789abcdefABCDEF" for ch in candidate):
+        return f"sha256:{candidate.lower()}"
+    return candidate
+
+
 def verify_instruction_provenance(
     provenance: Any,
     *,
@@ -231,8 +246,13 @@ def verify_instruction_provenance(
 
     Each entry must be ``{"path": <repo-relative path>, "content_hash":
     "sha256:..."}`` and match the file currently on CI — proving the client
-    read the live instructions it claims to have followed. Returns the
-    normalized entries; raises ``InstructionFileError`` on any mismatch.
+    read the live instructions it claims to have followed. The ``content_hash``
+    field is normalized before comparison so MCP clients that strip the
+    ``sha256:`` prefix are accepted; an unrecognized format is rejected as
+    ``INVALID_PROVENANCE``. Returns the normalized entries; raises
+    ``InstructionFileError`` on any mismatch. The error message for a stale
+    mismatch carries both the client-submitted hash and the live server hash so
+    the divergence is debuggable from the response envelope alone.
     """
     if not isinstance(provenance, list):
         raise InstructionFileError(
@@ -252,11 +272,15 @@ def verify_instruction_provenance(
                 "each provenance entry needs string 'path' and 'content_hash'",
             )
         served = read_instruction_file(entry_path, repo_root=repo_root)
-        if served["content_hash"] != entry_hash:
+        served_hash = _normalize_content_hash(served["content_hash"])
+        client_hash = _normalize_content_hash(entry_hash)
+        if served_hash != client_hash:
             raise InstructionFileError(
                 "PROVENANCE_STALE",
                 f"instruction file changed since the client read it: {entry_path}; "
+                f"client_hash={client_hash!r} server_hash={served_hash!r} "
+                f"server_revision={served['repository_revision']!r}; "
                 "re-read it and resubmit",
             )
-        normalized.append({"path": served["relative_path"], "content_hash": entry_hash})
+        normalized.append({"path": served["relative_path"], "content_hash": served_hash})
     return normalized
