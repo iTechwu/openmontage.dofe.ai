@@ -52,16 +52,21 @@ RUN cd remotion-composer \
     && chown -R ${RUNTIME_USER}:${RUNTIME_GROUP} "/home/${RUNTIME_USER}/.cache" "/home/${RUNTIME_USER}/.hyperframes"
 
 COPY --chown=${RUNTIME_USER}:${RUNTIME_GROUP} . .
+ARG OPENMONTAGE_IMAGE_REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/iTechwu/openmontage.dofe.ai" \
+      org.opencontainers.image.revision=${OPENMONTAGE_IMAGE_REVISION}
+
+# Write the build-time revision into the image so instruction provenance can
+# recover it at runtime without depending on a .git directory or the
+# Jenkins deploy stage forwarding an env var. Must run before chmod -R a-w.
+RUN echo "${OPENMONTAGE_IMAGE_REVISION}" > /app/.image_revision
+
 RUN pip install --no-cache-dir --no-deps -e . \
     && mkdir -p /data/projects /data/music_library /data/cache/remotion-webpack \
     && rm -rf /app/remotion-composer/node_modules/.cache \
     && ln -s /data/cache/remotion-webpack /app/remotion-composer/node_modules/.cache \
     && chown -R ${RUNTIME_USER}:${RUNTIME_GROUP} /data \
     && chmod -R a-w /app
-
-ARG OPENMONTAGE_IMAGE_REVISION=unknown
-LABEL org.opencontainers.image.source="https://github.com/iTechwu/openmontage.dofe.ai" \
-      org.opencontainers.image.revision=${OPENMONTAGE_IMAGE_REVISION}
 
 USER ${RUNTIME_USER}
 VOLUME ["/data/projects", "/data/music_library"]

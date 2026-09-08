@@ -74,10 +74,11 @@ def _repository_revision(repo_root: str) -> str:
     repository, and a stale revision would corrupt instruction provenance
     recorded against it. The call costs ~10ms.
 
-    Falls back to ``OPENMONTAGE_IMAGE_REVISION`` when the repository has no
-    ``.git`` directory (the production image strips git history on
-    ``COPY . .``) so downstream audit chains still see the commit hash baked
-    into the image at build time.
+    Falls back to ``OPENMONTAGE_IMAGE_REVISION`` (env var, set by the
+    Jenkins deploy stage) or ``<repo_root>/.image_revision`` (written by the
+    Dockerfile at build time) when no ``.git`` directory is present, so
+    downstream audit chains still see the commit hash baked into the image.
+    An empty string is returned only when none of those sources are usable.
     """
     try:
         result = subprocess.run(
@@ -93,7 +94,14 @@ def _repository_revision(repo_root: str) -> str:
         revision = result.stdout.strip()
         if revision:
             return revision
+
     fallback = os.environ.get("OPENMONTAGE_IMAGE_REVISION", "").strip()
+    if not fallback or fallback == "unknown":
+        revision_file = Path(repo_root) / ".image_revision"
+        try:
+            fallback = revision_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            fallback = ""
     return fallback if fallback and fallback != "unknown" else ""
 
 
