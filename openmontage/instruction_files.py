@@ -73,6 +73,11 @@ def _repository_revision(repo_root: str) -> str:
     Deliberately uncached: the interface promises a live read of the CI
     repository, and a stale revision would corrupt instruction provenance
     recorded against it. The call costs ~10ms.
+
+    Falls back to ``OPENMONTAGE_IMAGE_REVISION`` when the repository has no
+    ``.git`` directory (the production image strips git history on
+    ``COPY . .``) so downstream audit chains still see the commit hash baked
+    into the image at build time.
     """
     try:
         result = subprocess.run(
@@ -83,10 +88,13 @@ def _repository_revision(repo_root: str) -> str:
             timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
-        return ""
-    if result.returncode != 0:
-        return ""
-    return result.stdout.strip()
+        result = None
+    if result is not None and result.returncode == 0:
+        revision = result.stdout.strip()
+        if revision:
+            return revision
+    fallback = os.environ.get("OPENMONTAGE_IMAGE_REVISION", "").strip()
+    return fallback if fallback and fallback != "unknown" else ""
 
 
 def _resolve_within_repo(raw_path: str, root: Path) -> Path:

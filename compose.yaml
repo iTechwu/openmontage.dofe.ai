@@ -20,6 +20,9 @@ x-openmontage-common: &openmontage-common
     OPENMONTAGE_JOB_DB: /data/projects/.openmontage/jobs.sqlite3
     OPENMONTAGE_MCP_HOST: 0.0.0.0
     OPENMONTAGE_MCP_PORT: 8765
+    # Pass the build-arg revision into the runtime so instruction provenance
+    # can fall back to it when the image has no .git directory to read from.
+    OPENMONTAGE_IMAGE_REVISION: ${OPENMONTAGE_IMAGE_REVISION:-unknown}
     OPENMONTAGE_SERVICE_TOKEN: ${OPENMONTAGE_SERVICE_TOKEN:?Set OPENMONTAGE_SERVICE_TOKEN in .env}
     # The public MCP gateway authenticates with the Models API key and passes
     # this signed context to OpenMontage. Keep the service gateway-only so the
