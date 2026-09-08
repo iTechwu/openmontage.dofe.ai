@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from jsonschema import Draft202012Validator
+
 from openmontage.job_service import JobService
 from tools.base_tool import ToolResult
 from tools.tool_registry import registry
@@ -106,6 +108,41 @@ def _gateway_tools_from_lease(lease_row: Any) -> frozenset[str]:
 
 def _canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _contract_error_message(error: Any) -> str:
+    path = ["inputs", *(str(part) for part in error.absolute_path)]
+    if error.validator == "required" and isinstance(error.instance, dict):
+        missing = next(
+            (field for field in error.validator_value if field not in error.instance),
+            None,
+        )
+        if missing is not None:
+            return f"{'.'.join([*path, str(missing)])} is required"
+    location = ".".join(path)
+    if error.validator == "enum":
+        allowed = ", ".join(repr(value) for value in error.validator_value)
+        return f"{location} must be one of: {allowed}"
+    if error.validator == "type":
+        return f"{location} must be of type {error.validator_value}"
+    return f"{location} violates the {error.validator} constraint"
+
+
+def _validate_inputs(tool_name: str, tool: Any, inputs: dict[str, Any]) -> None:
+    schema = getattr(tool, "input_schema", None) or {"type": "object"}
+    errors = sorted(
+        Draft202012Validator(schema).iter_errors(inputs),
+        key=lambda error: (
+            tuple(str(part) for part in error.absolute_path),
+            str(error.validator),
+        ),
+    )
+    if errors:
+        summary = "; ".join(_contract_error_message(error) for error in errors[:3])
+        raise ToolGatewayError(
+            "TOOL_INPUT_INVALID",
+            f"{tool_name} inputs are invalid: {summary}",
+        )
 
 
 def _safe_relative(value: str) -> str:
@@ -292,6 +329,7 @@ class ToolGateway:
                 "TOOL_INPUT_INVALID",
                 f"{tool_name} generation requires a project-relative output_path",
             )
+        _validate_inputs(tool_name, tool, effective_inputs)
         effective_inputs = _rewrite_paths(effective_inputs, project_dir)
         request_hash = hashlib.sha256(_canonical({"operation": operation, "inputs": effective_inputs}).encode()).hexdigest()
         key_args = (job_id, stage, int(stage_attempt), tool_name, idempotency_key)

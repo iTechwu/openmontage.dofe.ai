@@ -96,7 +96,9 @@ class _FakeService:
             "response_json": json.dumps(
                 {
                     "stageContract": {
-                        "gatewayTools": ["image_selector", "video_selector"]
+                        "gatewayTools": [
+                            "image_selector", "video_selector", "video_compose"
+                        ]
                     }
                 }
             )
@@ -179,7 +181,7 @@ def test_generation_requires_explicit_project_output_path(gateway: ToolGateway) 
 def test_tool_not_declared_for_stage_is_rejected(gateway: ToolGateway) -> None:
     with pytest.raises(ToolGatewayError) as exc:
         gateway.invoke(
-            tool_name="video_compose", operation="generate", inputs={},
+            tool_name="audio_mixer", operation="generate", inputs={},
             job_id="job-1", stage="assets", stage_attempt=1,
             lease_token="lease-1", idempotency_key="compose-1",
         )
@@ -211,6 +213,21 @@ class _CapturingTool(BaseTool):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"fake-media")
         return ToolResult(success=True, data={"output_path": str(target)}, artifacts=[str(target)])
+
+
+class _OperationRequiredTool(_CapturingTool):
+    name = "video_compose"
+    input_schema = {
+        "type": "object",
+        "required": ["operation"],
+        "properties": {
+            "operation": {
+                "type": "string",
+                "enum": ["render", "compose"],
+            },
+            "output_path": {"type": "string"},
+        },
+    }
 
 
 class _SingleToolRegistry:
@@ -521,6 +538,28 @@ def test_generate_operation_not_injected_when_tool_enum_rejects_it(
     assert _CapturingTool.received is not None
     # "generate" must NOT leak into a tool whose operation enum rejects it.
     assert "operation" not in _CapturingTool.received
+
+
+def test_generate_rejects_missing_tool_specific_operation_before_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tool = _OperationRequiredTool()
+    gateway = _gateway_with(tool, tmp_path, monkeypatch)
+    _OperationRequiredTool.received = None
+
+    with pytest.raises(ToolGatewayError) as exc_info:
+        gateway.invoke(
+            tool_name="video_compose", operation="generate",
+            inputs={"output_path": "assets/video/one.mp4"},
+            job_id="job-1", stage="assets", stage_attempt=1,
+            lease_token="lease-1", idempotency_key="video-missing-operation",
+        )
+
+    assert exc_info.value.code == "TOOL_INPUT_INVALID"
+    assert exc_info.value.message == (
+        "video_compose inputs are invalid: inputs.operation is required"
+    )
+    assert _OperationRequiredTool.received is None
 
 
 def test_generate_operation_injected_when_tool_enum_accepts_it(
