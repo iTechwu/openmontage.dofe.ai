@@ -158,7 +158,11 @@ def create_server(
             category = "client_stage"
         elif isinstance(error, JobNotFoundError):
             code = "OPENMONTAGE_JOB_NOT_FOUND"
-            message = "OpenMontage Job was not found or is not visible to this workspace"
+            message = (
+                "OpenMontage Job was not found or is not visible to this workspace. "
+                "job_id must be the durable ID returned by submit_video_job; for a "
+                "prepared clone/project ID, use list_project_files/read_project_file."
+            )
             category = "job"
         elif isinstance(error, JobConflictError):
             code = "OPENMONTAGE_JOB_CONFLICT"
