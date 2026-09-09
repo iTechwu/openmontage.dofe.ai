@@ -669,6 +669,35 @@ async def test_mcp_tool_invocation_with_unknown_job_returns_structured_error(
 
 
 @pytest.mark.asyncio
+async def test_mcp_list_video_artifacts_with_project_id_returns_structured_error(
+    tmp_path: Path,
+) -> None:
+    """A reference-clone project ID must not become an opaque MCP tool error."""
+    from mcp import Client
+
+    service = JobService(tmp_path / "jobs.sqlite3")
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
+    ) as client:
+        result = await client.call_tool(
+            "list_video_artifacts",
+            {"job_id": "clone-douyin-7677922010177015066"},
+        )
+
+    assert result.is_error is False
+    assert result.structured_content == {
+        "success": False,
+        "status": "failed",
+        "error": {
+            "code": "OPENMONTAGE_JOB_NOT_FOUND",
+            "category": "job",
+            "message": "OpenMontage Job was not found or is not visible to this workspace",
+        },
+    }
+
+
+@pytest.mark.asyncio
 async def test_mcp_tool_invocation_with_invalid_lease_returns_structured_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -121,6 +121,11 @@ async def test_mcp_server_publishes_reference_clone_surface():
     assert {str(resource.uri) for resource in resources.resources} == {
         "openmontage://reference-clone-guide"
     }
+    artifacts_description = by_name["list_video_artifacts"].description
+    assert "durable Job ID returned by ``submit_video_job``" in artifacts_description
+    assert "reference-clone/project ID" in artifacts_description
+    assert "is not a Job ID" in artifacts_description
+    assert "list_project_files`` and ``read_project_file``" in artifacts_description
 
 
 @pytest.mark.asyncio

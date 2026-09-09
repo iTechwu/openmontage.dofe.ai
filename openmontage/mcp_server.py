@@ -114,7 +114,11 @@ def create_server(
             "the returned stageContract: only call gatewayTools, read every instructionFiles "
             "entry, and map each read result to instruction_provenance as "
             "{\"path\": result.relative_path, \"content_hash\": result.content_hash}. "
-            "Submit artifacts keyed by produces; declaredTools are manifest vocabulary only."
+            "Submit artifacts keyed by produces; declaredTools are manifest vocabulary only. "
+            "Job query tools (get_video_job, list_video_job_events, and "
+            "list_video_artifacts) require the durable Job ID returned by "
+            "submit_video_job; a clone/project ID is not a Job ID. Use "
+            "list_project_files/read_project_file for prepared project files."
         ),
         version="0.3.0",
     )
@@ -335,10 +339,13 @@ def create_server(
         """Return a durable video Job snapshot."""
         from openmontage.job_api import require_same_workspace
 
-        attribution = resolve_attribution(ctx.headers)
-        snapshot = jobs().get_job(job_id)
-        require_same_workspace(snapshot, attribution)
-        return snapshot.to_wire()
+        try:
+            attribution = resolve_attribution(ctx.headers)
+            snapshot = jobs().get_job(job_id)
+            require_same_workspace(snapshot, attribution)
+            return snapshot.to_wire()
+        except client_stage_errors as exc:
+            return _client_stage_error(exc)
 
     @server.tool()
     def cancel_video_job(
@@ -543,31 +550,43 @@ def create_server(
         """Replay ordered Job events after a sequence cursor."""
         from openmontage.job_api import require_same_workspace
 
-        attribution = resolve_attribution(ctx.headers)
-        snapshot = jobs().get_job(job_id)
-        require_same_workspace(snapshot, attribution)
-        if after_sequence < 0:
-            raise ValueError("after_sequence must be non-negative")
-        return {
-            "events": [
-                event.to_wire()
-                for event in jobs().list_events(job_id, after_sequence=after_sequence)
-            ],
-            "lastSequence": snapshot.last_sequence,
-        }
+        try:
+            attribution = resolve_attribution(ctx.headers)
+            snapshot = jobs().get_job(job_id)
+            require_same_workspace(snapshot, attribution)
+            if after_sequence < 0:
+                raise ValueError("after_sequence must be non-negative")
+            return {
+                "events": [
+                    event.to_wire()
+                    for event in jobs().list_events(job_id, after_sequence=after_sequence)
+                ],
+                "lastSequence": snapshot.last_sequence,
+            }
+        except client_stage_errors as exc:
+            return _client_stage_error(exc)
 
     @server.tool()
     def list_video_artifacts(job_id: str, ctx: Context) -> dict[str, Any]:
-        """List durable video outputs published for a Job."""
+        """List durable video outputs published for a Job.
+
+        ``job_id`` must be the durable Job ID returned by ``submit_video_job``.
+        A prepared reference-clone/project ID (for example ``clone-douyin-*``)
+        is not a Job ID; use ``list_project_files`` and ``read_project_file``
+        to inspect that project's analysis files instead.
+        """
         from openmontage.job_api import require_same_workspace
 
-        attribution = resolve_attribution(ctx.headers)
-        snapshot = jobs().get_job(job_id)
-        require_same_workspace(snapshot, attribution)
-        return {
-            "artifacts": [artifact.to_wire() for artifact in snapshot.artifacts],
-            "lastSequence": snapshot.last_sequence,
-        }
+        try:
+            attribution = resolve_attribution(ctx.headers)
+            snapshot = jobs().get_job(job_id)
+            require_same_workspace(snapshot, attribution)
+            return {
+                "artifacts": [artifact.to_wire() for artifact in snapshot.artifacts],
+                "lastSequence": snapshot.last_sequence,
+            }
+        except client_stage_errors as exc:
+            return _client_stage_error(exc)
 
     @server.tool()
     def list_project_files(project_id: str) -> dict[str, Any]:
