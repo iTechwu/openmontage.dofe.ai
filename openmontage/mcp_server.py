@@ -497,13 +497,13 @@ def create_server(
 
     @server.tool()
     def submit_client_stage(
-        job_id: str,
-        stage: str,
-        stage_attempt: int,
         status: str,
-        lease_token: str,
-        idempotency_key: str,
         ctx: Context,
+        job_id: str | None = None,
+        stage: str | None = None,
+        stage_attempt: int | None = None,
+        lease_token: str | None = None,
+        idempotency_key: str | None = None,
         artifacts: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
         instruction_provenance: list[dict[str, str]] | None = None,
@@ -524,10 +524,30 @@ def create_server(
         ``artifacts`` is keyed by canonical artifact name; for example, the
         research stage requires ``{"research_brief": {<brief fields>}}``.
         Do not place the brief's fields directly at the ``artifacts`` level.
+        Copy job_id, stage, stage_attempt and lease_token from begin_client_stage;
+        use a stable, non-empty idempotency_key for retries. Missing lease
+        context returns a structured error without changing the Job.
         """
         from openmontage.job_api import require_same_workspace
 
         try:
+            missing = [
+                name for name, value in (
+                    ("job_id", job_id),
+                    ("stage", stage),
+                    ("stage_attempt", stage_attempt),
+                    ("lease_token", lease_token),
+                    ("idempotency_key", idempotency_key),
+                )
+                if value is None or isinstance(value, str) and not value.strip()
+            ]
+            if missing:
+                raise ClientStageError(
+                    "STAGE_LEASE_CONTEXT_REQUIRED",
+                    "missing " + ", ".join(missing)
+                    + "; copy job_id, stage, stage_attempt and lease_token from "
+                    "begin_client_stage and supply a stable idempotency_key, then retry",
+                )
             attribution = resolve_attribution(ctx.headers)
             snapshot = jobs().get_job(job_id)
             require_same_workspace(snapshot, attribution)

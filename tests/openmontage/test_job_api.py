@@ -1058,6 +1058,34 @@ async def test_mcp_stage_submission_with_invalid_lease_returns_structured_error(
 
 
 @pytest.mark.asyncio
+async def test_mcp_stage_submission_missing_lease_context_returns_actionable_error(
+    tmp_path: Path,
+) -> None:
+    from mcp import Client
+
+    service = JobService(tmp_path / "jobs.sqlite3")
+
+    async with Client(
+        create_server(job_service=service, attribution_resolver=lambda _headers: _attribution())
+    ) as client:
+        result = await client.call_tool(
+            "submit_client_stage",
+            {"status": "completed", "artifacts": {}},
+        )
+
+    assert result.is_error is False
+    assert result.structured_content["error"] == {
+        "code": "STAGE_LEASE_CONTEXT_REQUIRED",
+        "category": "client_stage",
+        "message": (
+            "missing job_id, stage, stage_attempt, lease_token, idempotency_key; "
+            "copy job_id, stage, stage_attempt and lease_token from "
+            "begin_client_stage and supply a stable idempotency_key, then retry"
+        ),
+    }
+
+
+@pytest.mark.asyncio
 async def test_mcp_stage_submission_hides_instruction_read_failure_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
