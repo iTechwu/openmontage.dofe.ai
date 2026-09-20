@@ -24,6 +24,7 @@ def gateway_attempted(headers: Mapping[str, str] | None) -> bool:
             "X-Dofe-Api-Key-Id",
             "X-Dofe-Tenant-Id",
             "X-Dofe-Sso-Team-Id",
+            "X-Dofe-Member-Id",
         )
     )
 
@@ -44,6 +45,7 @@ def gateway_attribution(headers: Mapping[str, str] | None) -> JobAttribution | N
     api_key_id = (_header(headers, "X-Dofe-Api-Key-Id") or "").strip()
     tenant_id = (_header(headers, "X-Dofe-Tenant-Id") or "").strip()
     sso_team_id = (_header(headers, "X-Dofe-Sso-Team-Id") or "").strip()
+    member_id = (_header(headers, "X-Dofe-Member-Id") or "").strip()
     authorization = (_header(headers, "Authorization") or "").strip()
     if not api_key_id or not tenant_id or not sso_team_id or not _bearer_token(authorization):
         return None
@@ -54,7 +56,7 @@ def gateway_attribution(headers: Mapping[str, str] | None) -> JobAttribution | N
     )
     return JobAttribution(
         workspace_id=f"tenant:{tenant_id}",
-        employee_id=f"mcp-key:{api_key_id}",
+        employee_id=member_id or f"mcp-key:{api_key_id}",
         runtime_id=GATEWAY_RUNTIME_ID,
         root_task_id=f"mcp:{api_key_id}",
         conversation_id=request_id,
