@@ -1,8 +1,8 @@
 services:
   openmontage-mcp:
     environment:
-      DOFE_MODEL_BASE_URL: https://ixicai.cn/api
+      DOFE_MODEL_BASE_URL: https://ai.hozonauto.com/api
 
   openmontage-cli:
     environment:
-      DOFE_MODEL_BASE_URL: https://ixicai.cn/api
+      DOFE_MODEL_BASE_URL: https://ai.hozonauto.com/api

@@ -28,7 +28,7 @@ class CheckpointPolicy(str, Enum):
 class LLMConfig(BaseModel):
     provider: str = "dofe"
     protocol: str = "openai"
-    base_url: str = "https://ixicai.cn/api"
+    base_url: str = "https://ai.hozonauto.com/api"
     api_key_env: str = "DOFE_MODEL_API_KEY"
     model: Optional[str] = None
     temperature: float = 0.7
