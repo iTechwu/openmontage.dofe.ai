@@ -464,9 +464,14 @@ async def test_mcp_submit_accepts_authenticated_gateway_without_job_credential_b
     service = JobService(tmp_path / "jobs.sqlite3")
     monkeypatch.setenv("OPENMONTAGE_MCP_GATEWAY_SECRET", "gateway-secret")
     monkeypatch.delenv("OPENMONTAGE_MODEL_CREDENTIAL_BASE_URL", raising=False)
+    from tools.dofe.mcp_delegation import delegation_context
+    from tests.openmontage.g12_helpers import delegated, stub_models
+    value = delegated(api_key_id="key-submit", tenant_id="tenant-submit", sso_team_id="team-submit", request_id="request-submit")
+    stub_models(monkeypatch, value)
     caller_model_key = "sk-models-user-must-not-persist"
     attribution = gateway_attribution({
-        "Authorization": f"Bearer {caller_model_key}",
+        "X-Dofe-Mcp-Delegation-Ref": value.delegation_ref,
+        "X-Dofe-Mcp-Delegation-Version": "1",
         "X-Dofe-Mcp-Gateway-Secret": "gateway-secret",
         "X-Dofe-Auth-Verified": "models-api-key-v1",
         "X-Dofe-Api-Key-Id": "key-submit",
@@ -482,7 +487,8 @@ async def test_mcp_submit_accepts_authenticated_gateway_without_job_credential_b
             attribution_resolver=lambda _headers: attribution,
         )
     ) as client:
-        result = await client.call_tool("submit_video_job", _request())
+        with delegation_context(value):
+            result = await client.call_tool("submit_video_job", _request())
 
     assert result.is_error is False
     assert result.structured_content["status"] == "QUEUED"

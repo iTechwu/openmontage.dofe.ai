@@ -371,7 +371,8 @@ def _error_response(error: Exception, req_id: str = "") -> JSONResponse:
             payload, status_code=status, headers={"Cache-Control": "no-store"}
         )
 
-    if isinstance(error, TrustedContextError):
+    from tools.dofe.mcp_delegation import McpDelegationError
+    if isinstance(error, (TrustedContextError, McpDelegationError)):
         return respond(401, body("OPENMONTAGE_UNAUTHORIZED"))
     if isinstance(error, JobNotFoundError):
         return respond(404, body("OPENMONTAGE_JOB_NOT_FOUND"))

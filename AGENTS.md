@@ -22,3 +22,10 @@ There are no instructions in this file. All instructions are in AGENT_GUIDE.md.
 - 该文件必须纳入 Git 跟踪，**禁止写入 .gitignore**；配置变更随代码一起提交评审。
 - 本仓库 dev 版是唯一上游：`docker-helm.dofe.ai` 的部署副本必须随每次变更从本文件同步，唯一允许差异是环境行（`baseUrl`、`frontendUrl`、`domain`、`subDomain`、`apiSubDomain`、zones 桶名）。
 - 线上部署的 `config.local.yaml` 与开发环境保持一致；变更后经 Jenkins 重新部署并重启对应服务容器。
+
+
+## MCP G12 发布边界
+
+本仓库的 Models 委托改动属于协调发布单元，不得单独部署。必须遵循
+`AGENT_GUIDE.md` 的「MCP 委托与调用者计费边界」：Models 兼容 API、网关投影与
+OpenMontage 共同版本验收后统一开启；旧未绑定 Job 只读，付费续跑关闭；不回退项目 Key。

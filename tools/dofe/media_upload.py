@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import mimetypes
 import time
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Any
 import requests
 
 from . import config as cfg
+from .mcp_delegation import current_delegation, models_base_url
 
 
 class DofeMediaUploadError(RuntimeError):
@@ -29,14 +31,24 @@ class DofeMediaUploadClient:
         base_url: str | None = None,
         session: Any | None = None,
     ) -> None:
+        self.mcp_delegation = current_delegation()
         self.secret = secret if secret is not None else cfg.dofe_internal_api_secret()
-        self.tenant_id = tenant_id if tenant_id is not None else cfg.dofe_tenant_id()
-        self.base_url = (base_url or cfg.dofe_internal_base_url()).rstrip("/")
+        self.tenant_id = self.mcp_delegation.tenant_id if self.mcp_delegation else (tenant_id if tenant_id is not None else cfg.dofe_tenant_id())
+        self.base_url = models_base_url() if self.mcp_delegation else (base_url or cfg.dofe_internal_base_url()).rstrip("/")
         self.session = session if session is not None else requests.Session()
         if session is None:
             self.session.verify = cfg.dofe_ca_bundle()
 
     def _headers(self) -> dict[str, str]:
+        if self.mcp_delegation:
+            return {"Accept": "application/json", **self.mcp_delegation.headers("POST", "/internal/media/upload") }
+        proxy_token = os.environ.get("DOFE_MCP_PROXY_TOKEN", "")
+        if proxy_token:
+            from urllib.parse import urlsplit
+            parsed = urlsplit(self.base_url)
+            if parsed.scheme != "http" or parsed.hostname != "127.0.0.1":
+                raise ValueError("Local Models proxy origin is invalid")
+            return {"Authorization": f"Bearer {proxy_token}", "Accept": "application/json"}
         if not self.secret:
             raise DofeMediaUploadError(
                 "INTERNAL_API_SECRET is not configured for AIRouter media upload"
@@ -72,6 +84,7 @@ class DofeMediaUploadClient:
                     data={"tenant_id": self.tenant_id, "asset_type": asset_type},
                     files={"file": (source.name, handle, mime_type)},
                     timeout=(cfg.connect_timeout(), cfg.create_read_timeout()),
+                    allow_redirects=False,
                 )
         except requests.RequestException as exc:
             raise DofeMediaUploadError(f"AIRouter media upload failed: {exc}") from exc

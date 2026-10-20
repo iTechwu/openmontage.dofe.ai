@@ -19,10 +19,11 @@ from typing import Any, Callable, Protocol, Sequence
 from lib.checkpoint import CheckpointValidationError, read_checkpoint
 from lib.pipeline_loader import get_stage_skill, load_pipeline_readonly
 from openmontage.contracts import JobSnapshot
-from openmontage.delegation_proxy import DelegationSigningProxy
+from openmontage.delegation_proxy import DelegationSigningProxy, McpDelegationProxy
 from openmontage.invocation_store import ModelInvocationStore
 from tools.dofe.client import DofeClient
 from tools.dofe.delegation import DelegatedModelCredential
+from tools.dofe.mcp_delegation import McpDelegation
 from tools.dofe.errors import DofeError
 from tools.dofe.models import validate_catalog_alias
 
@@ -166,7 +167,7 @@ class PipelineExecutor(Protocol):
         self,
         assignment: StageAssignment,
         *,
-        credential: DelegatedModelCredential | None = None,
+        credential: DelegatedModelCredential | McpDelegation | None = None,
         cancellation_requested: Callable[[], bool] | None = None,
     ) -> PipelineExecutionResult:
         """Execute one stage and return the checkpoint-backed outcome."""
@@ -181,7 +182,7 @@ class AgentCommandPipelineExecutor:
         *,
         timeout_seconds: float = 3600,
         invocation_store: ModelInvocationStore | None = None,
-        agent_model_resolver: Callable[[DelegatedModelCredential], str] | None = None,
+        agent_model_resolver: Callable[[DelegatedModelCredential | McpDelegation], str] | None = None,
     ) -> None:
         self.command = _validate_command(command)
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
@@ -197,7 +198,7 @@ class AgentCommandPipelineExecutor:
         cls,
         *,
         invocation_store: ModelInvocationStore | None = None,
-        agent_model_resolver: Callable[[DelegatedModelCredential], str] | None = None,
+        agent_model_resolver: Callable[[DelegatedModelCredential | McpDelegation], str] | None = None,
     ) -> "AgentCommandPipelineExecutor":
         raw = os.environ.get("OPENMONTAGE_AGENT_EXECUTOR_JSON", "")
         try:
@@ -228,14 +229,15 @@ class AgentCommandPipelineExecutor:
         self,
         assignment: StageAssignment,
         *,
-        credential: DelegatedModelCredential | None = None,
+        credential: DelegatedModelCredential | McpDelegation | None = None,
         cancellation_requested: Callable[[], bool] | None = None,
     ) -> PipelineExecutionResult:
         configured_model_key = os.environ.get("DOFE_MODEL_API_KEY", "").strip()
         sensitive_values = tuple(
             value
             for value in (
-                credential.api_key if credential is not None else "",
+                credential.proxy_token if isinstance(credential, McpDelegation) else credential.api_key if credential is not None else "",
+                credential.delegation_ref if isinstance(credential, McpDelegation) else "",
                 configured_model_key,
             )
             if value
@@ -315,7 +317,8 @@ class AgentCommandPipelineExecutor:
                     cancellation_requested=cancellation_requested,
                 )
             else:
-                with DelegationSigningProxy(
+                proxy_type = McpDelegationProxy if isinstance(credential, McpDelegation) else DelegationSigningProxy
+                with proxy_type(
                     credential,
                     invocation_store=self.invocation_store,
                     job_id=assignment.job_id,
@@ -618,7 +621,7 @@ def _is_codex_exec_command(command: Sequence[str]) -> bool:
     return True
 
 
-def _resolve_delegated_agent_model(credential: DelegatedModelCredential) -> str:
+def _resolve_delegated_agent_model(credential: DelegatedModelCredential | McpDelegation) -> str:
     """Return a tenant-catalog-verified model id for the delegated Codex executor.
 
     The candidate is read from ``OPENMONTAGE_AGENT_MODEL_ID`` and must be visible
@@ -633,10 +636,9 @@ def _resolve_delegated_agent_model(credential: DelegatedModelCredential) -> str:
             "requires a tenant-catalog-verified model before any paid task"
         )
     try:
-        catalog = DofeClient(
-            api_key=credential.api_key,
-            base_url=credential.models_base_url,
-        ).list_models()
+        client = (DofeClient(mcp_delegation=credential) if isinstance(credential, McpDelegation)
+                  else DofeClient(api_key=credential.api_key, base_url=credential.models_base_url))
+        catalog = client.list_models()
         return validate_catalog_alias(candidate, catalog)
     except DofeError as exc:
         raise PipelineExecutionError(

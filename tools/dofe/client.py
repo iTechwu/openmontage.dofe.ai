@@ -41,6 +41,7 @@ from .errors import (
 )
 from .media import is_https_url, sanitize_for_log
 from .delegation import delegated_credential_from_environment
+from .mcp_delegation import McpDelegation, current_delegation, models_base_url
 
 # Terminal task statuses — polling stops here.
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled", "expired"}
@@ -70,9 +71,11 @@ class DofeClient:
         max_rate_retries: int = 3,
         max_5xx_retries: int = 3,
         max_network_retries: int = 2,
+        mcp_delegation: McpDelegation | None = None,
     ) -> None:
-        self.api_key = api_key if api_key is not None else cfg.dofe_api_key()
-        self.base_url = (base_url or cfg.dofe_base_url()).rstrip("/")
+        self.mcp_delegation = mcp_delegation or current_delegation()
+        self.api_key = None if self.mcp_delegation else (api_key if api_key is not None else cfg.dofe_api_key())
+        self.base_url = models_base_url() if self.mcp_delegation else (base_url or cfg.dofe_base_url()).rstrip("/")
         try:
             self.delegation = (
                 delegated_credential_from_environment(
@@ -227,17 +230,19 @@ class DofeClient:
         accept_raw_success: bool = False,
         logical_call_id: str | None = None,
     ) -> dict[str, Any]:
-        url = self._url(path)
+        url = self.mcp_delegation.url(path) if self.mcp_delegation else self._url(path)
         timeout = (self._connect_timeout, read_timeout or self._read_timeout)
         rate_attempts = 0
         server_attempts = 0
         network_attempts = 0
-        request_headers = self._headers(logical_call_id=logical_call_id)
+        request_headers = ({"Accept": "application/json", "Content-Type": "application/json",
+            **self.mcp_delegation.headers(method, path, body=json)} if self.mcp_delegation
+            else self._headers(logical_call_id=logical_call_id))
 
         while True:
             try:
                 response = self.session.request(
-                    method, url, headers=request_headers, timeout=timeout, json=json, params=params,
+                    method, url, headers=request_headers, timeout=timeout, json=json, params=params, allow_redirects=False,
                 )
             except requests.RequestException as exc:
                 if allow_retry and network_attempts < self._max_network_retries:

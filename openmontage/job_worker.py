@@ -40,6 +40,7 @@ from openmontage.pipeline_executor import (
     StageAssignment,
 )
 from tools.dofe.delegation import DelegatedModelCredential
+from tools.dofe.mcp_delegation import McpDelegation, McpDelegationError
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -391,11 +392,19 @@ class JobWorker:
             projects_dir=self.projects_dir,
             local_inputs=local_inputs,
         )
-        credential: DelegatedModelCredential | None = None
+        credential: DelegatedModelCredential | McpDelegation | None = None
         requires_credential = _executor_requires_model_credential(
             self.executor,
             assignment,
         )
+        if requires_credential and latest.attribution.runtime_id == GATEWAY_RUNTIME_ID:
+            try:
+                credential = self.service.model_delegation(latest.job_id, stage=stage.code,
+                    invocation_seed=f"{self._stage(latest, stage.code).attempt}")
+            except McpDelegationError:
+                return self._terminal_failure(heartbeat, stage=stage.code,
+                    code="OPENMONTAGE_MODEL_DELEGATION_UNAVAILABLE",
+                    message="Caller authorization expired or was revoked; reauthorization is required", now=now)
         if (
             self.model_credential_bridge is not None
             and requires_credential

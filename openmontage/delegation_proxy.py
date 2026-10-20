@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 import hashlib
+import hmac
 import json
 import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,6 +17,7 @@ import requests
 
 from openmontage.invocation_store import InvocationRequestConflictError, ModelInvocationStore
 from tools.dofe.delegation import DelegatedModelCredential
+from tools.dofe.mcp_delegation import McpDelegation, McpDelegationError, ModelsDelegationClient, models_base_url
 
 
 _HOP_HEADERS = {
@@ -262,7 +264,7 @@ def _send_response(
 class DelegationSigningProxy:
     def __init__(
         self,
-        credential: DelegatedModelCredential,
+        credential: DelegatedModelCredential | McpDelegation,
         *,
         invocation_store: ModelInvocationStore | None = None,
         job_id: str | None = None,
@@ -271,10 +273,10 @@ class DelegationSigningProxy:
     ) -> None:
         self.credential = credential
         self.invocation_store = invocation_store
-        self.job_id = job_id or credential.external_job_id
-        self.stage = stage or credential.pipeline_stage
+        self.job_id = job_id or (credential.job_id if isinstance(credential, McpDelegation) else credential.external_job_id)
+        self.stage = stage or (credential.stage if isinstance(credential, McpDelegation) else credential.pipeline_stage)
         self.stage_attempt = stage_attempt
-        parsed = urlparse(credential.models_base_url)
+        parsed = urlparse(models_base_url() if isinstance(credential, McpDelegation) else credential.models_base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError("Delegated models base URL is invalid")
         self._upstream_origin = f"{parsed.scheme}://{parsed.netloc}"
@@ -363,6 +365,16 @@ class DelegationSigningProxy:
                 succeeded=False,
             )
 
+    def _validate_incoming(self, handler: BaseHTTPRequestHandler) -> None:
+        return None
+
+    def _upstream_request(self, handler: BaseHTTPRequestHandler, invocation_id: str):
+        assert isinstance(self.credential, DelegatedModelCredential)
+        return f"{self._upstream_origin}{handler.path}", {
+            "Authorization": f"Bearer {self.credential.api_key}",
+            **self.credential.signed_headers(model_invocation_id=invocation_id),
+        }
+
     def _forward(self, handler: BaseHTTPRequestHandler) -> None:
         response_cached = False
         response_started = False
@@ -377,6 +389,7 @@ class DelegationSigningProxy:
         response_bytes_read = 0
         response_attempted = False
         try:
+            self._validate_incoming(handler)
             length = int(handler.headers.get("Content-Length", "0"))
             if length < 0 or length > _MAX_REQUEST_BYTES:
                 handler.send_error(413)
@@ -409,7 +422,7 @@ class DelegationSigningProxy:
                 replay_key_source = "content_fingerprint"
             if self.invocation_store is None:
                 invocation_id = "om-" + hashlib.sha256(
-                    f"{self.credential.external_job_id}\n{self.credential.pipeline_stage}\n{seed}".encode()
+                    f"{self.job_id}\n{self.stage}\n{seed}".encode()
                 ).hexdigest()[:32]
             else:
                 record = self.invocation_store.get_or_create(
@@ -474,12 +487,13 @@ class DelegationSigningProxy:
                 for key, value in handler.headers.items()
                 if key.lower() not in _HOP_HEADERS
             }
-            headers["Authorization"] = f"Bearer {self.credential.api_key}"
+            url, authenticated_headers = self._upstream_request(handler, invocation_id)
+            headers = {key: value for key, value in headers.items() if not key.lower().startswith("x-dofe-")}
+            headers.update(authenticated_headers)
             headers["Accept-Encoding"] = _UPSTREAM_ACCEPT_ENCODING
-            headers.update(self.credential.signed_headers(model_invocation_id=invocation_id))
             upstream = requests.request(
                 handler.command,
-                f"{self._upstream_origin}{handler.path}",
+                url,
                 headers=headers,
                 data=body,
                 stream=True,
@@ -654,6 +668,8 @@ class DelegationSigningProxy:
                     invocation_id,
                     "succeeded" if upstream.status_code < 400 else "failed",
                 )
+        except McpDelegationError:
+            handler.send_error(403, "Models delegation refused")
         except InvocationRequestConflictError as exc:
             handler.send_error(409, str(exc))
         except Exception as exc:
@@ -728,3 +744,27 @@ class DelegationSigningProxy:
                 "replay_key_source": replay_key_source,
             },
         )
+
+
+class McpDelegationProxy(DelegationSigningProxy):
+    """Reuse replay/stream transport with a separate G12 auth and fixed operation boundary."""
+
+    def _validate_incoming(self, handler: BaseHTTPRequestHandler) -> None:
+        assert isinstance(self.credential, McpDelegation)
+        if not hmac.compare_digest(handler.headers.get("Authorization", ""), f"Bearer {self.credential.proxy_token}"):
+            raise McpDelegationError("Local Models proxy authentication failed")
+        path = handler.path.removeprefix(self._upstream_prefix)
+        if not handler.path.startswith(self._upstream_prefix + "/"):
+            raise McpDelegationError("Invalid local Models proxy path")
+        # Revocation also invalidates local replay; no cached response bypasses live caller authorization.
+        current = ModelsDelegationClient().introspect(self.credential.delegation_ref)
+        if (current.job_id != self.credential.job_id or current.api_key_id != self.credential.api_key_id
+            or current.tenant_id != self.credential.tenant_id or current.allowed_operations != self.credential.allowed_operations):
+            raise McpDelegationError("Models proxy delegation identity changed")
+        # Check scope before replay lookup as well as before a network request.
+        self.credential.headers(handler.command, path, invocation_id="validate")
+
+    def _upstream_request(self, handler: BaseHTTPRequestHandler, invocation_id: str):
+        assert isinstance(self.credential, McpDelegation)
+        path = handler.path.removeprefix(self._upstream_prefix)
+        return self.credential.url(path), self.credential.headers(handler.command, path, invocation_id=invocation_id)
