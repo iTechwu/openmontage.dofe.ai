@@ -117,9 +117,13 @@ class McpGatewayAuthMiddleware:
             await self.app(scope, receive, send)
             return
         # Reject a forged edge envelope before consuming Models verification resources.
+        # A delegated envelope must also arrive credential-free: the gateway consumes
+        # the member bearer, so a leftover Authorization means the caller did not come
+        # through the gateway's delegated path (mirrors tools' double check).
         configured = os.environ.get("OPENMONTAGE_MCP_GATEWAY_SECRET", "").strip()
         provided = (_header(headers, "X-Dofe-Mcp-Gateway-Secret") or "").strip()
         if (not configured or not hmac.compare_digest(configured, provided)
+            or (_header(headers, "Authorization") or "").strip() != ""
             or _header(headers, "X-Dofe-Auth-Verified") != GATEWAY_MARKER
             or _header(headers, "X-Dofe-Mcp-Delegation-Version") != "1"
             or re.fullmatch(r"[a-f0-9]{64}", _header(headers, "X-Dofe-Mcp-Delegation-Ref") or "") is None):

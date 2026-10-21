@@ -60,6 +60,23 @@ def test_verified_gateway_member_survives_key_rotation(monkeypatch) -> None:
     assert first.root_task_id != rotated.root_task_id
 
 
+def test_delegated_envelope_with_leftover_bearer_is_rejected(monkeypatch) -> None:
+    # G4 深度防御：网关委托路径必须消耗成员 bearer；委托信封携带 Authorization
+    # 即说明未经过网关委托路径（对齐 tools 的双保险校验）。
+    monkeypatch.setenv("OPENMONTAGE_MCP_GATEWAY_SECRET", "gateway-secret")
+    client = TestClient(build_http_app(
+        job_service=None,
+        attribution_resolver=TrustedAttributionResolver("service-token"),
+    ))
+    response = client.post(
+        "/mcp",
+        headers={**_headers(), "X-Dofe-Mcp-Delegation-Ref": "d" * 64,
+                 "Authorization": "Bearer sk-leftover"},
+        json={},
+    )
+    assert response.status_code == 401
+
+
 def test_member_header_does_not_bypass_gateway_auth(monkeypatch) -> None:
     monkeypatch.setenv("OPENMONTAGE_MCP_GATEWAY_SECRET", "gateway-secret")
     client = TestClient(build_http_app(
