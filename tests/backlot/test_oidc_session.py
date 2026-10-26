@@ -344,3 +344,4 @@ def test_http_unconfirmed_logout_keeps_persistent_opaque_recovery_cookie(manager
     assert "Max-Age=2592000" in header and "HttpOnly" in header and "Secure" in header
     assert manager[0].vault.get(cookie)["logout_pending"]["access_token"]
     assert http.get("/api/library").status_code == 401
+    assert http.get("/auth/status").json()["logoutPending"] is True

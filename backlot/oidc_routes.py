@@ -128,7 +128,16 @@ def install_oidc(app, *, legacy_enabled=False, sessions=None):
             return JSONResponse({"error": "OPERATION_ALREADY_DISPATCHED"}, status_code=409)
         except AuthenticationExpired:
             response = JSONResponse({"error": "OPENMONTAGE_UNAUTHORIZED"}, status_code=401)
-            response.delete_cookie(COOKIE, path="/", secure=True, httponly=True, samesite="lax")
+            try:
+                retained = await asyncio.to_thread(sessions.vault.get, cookie) if cookie else None
+            except VaultUnavailable:
+                return JSONResponse({"error": "AUTH_UNAVAILABLE"}, status_code=503)
+            if retained and retained.get("logout_pending"):
+                # Concurrent business polls must not erase the only correlator
+                # needed to finish an already suppressed scoped logout.
+                set_cookie(response, COOKIE, cookie)
+            else:
+                clear_cookie(response, COOKIE)
             return response
         except (AuthenticationUnavailable, VaultUnavailable):
             return JSONResponse({"error": "AUTH_UNAVAILABLE"}, status_code=503)
