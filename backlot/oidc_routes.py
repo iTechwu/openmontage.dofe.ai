@@ -15,7 +15,7 @@ from fastapi import Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 from backlot.oidc_session import (AuthenticationExpired, AuthenticationUnavailable,
-                                 CookieRenewalRequired, OidcConfig, OidcSessions, OperationBusy)
+                                 CookieRenewalRequired, OidcConfig, OidcSessions, OperationBusy, UnsupportedLogoutScope)
 from backlot.session_vault import VaultUnavailable
 
 COOKIE = "__Host-dofe_montage_sid"
@@ -233,6 +233,8 @@ def install_oidc(app, *, legacy_enabled=False, sessions=None):
             response = JSONResponse(result, headers={"Cache-Control": "no-store"})
             if result.get("loggedOut"):
                 clear_cookie(response, COOKIE)
+        except UnsupportedLogoutScope:
+            return JSONResponse({"error": "UNSUPPORTED_LOGOUT_SCOPE"}, status_code=400)
         except (AuthenticationExpired, AuthenticationUnavailable, VaultUnavailable):
             # Revocation of a family alone is not proof that this scope ran.
             response = JSONResponse({"loggedOut": False, "serverConfirmed": False}, status_code=503)

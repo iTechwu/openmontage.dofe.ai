@@ -23,6 +23,10 @@ class AuthenticationExpired(RuntimeError):
     pass
 
 
+class UnsupportedLogoutScope(AuthenticationExpired):
+    pass
+
+
 class AuthenticationUnavailable(RuntimeError):
     pass
 
@@ -251,8 +255,9 @@ class OidcSessions:
 
     def _authenticate(self, cookie, session, pending, renewals=0):
         token = session["tokens"]
-        if pending["phase"] == "authenticated" and token["access_expires_at"] <= time.time() * 1000 + 5000:
-            # Cookie confirmation may take longer than the AT lifetime. Renew
+        if pending["phase"] == "authenticated" and (token["access_expires_at"] <= time.time() * 1000 + 5000
+                or token["session_context"] == "browser" and pending.get("authenticated_at", 0) <= time.time() - 110):
+            # Cookie confirmation may outlive its own 120s window or the AT. Renew
             # authentication with a new durable sub-operation, retaining the
             # browser's logical operation so its business action still runs once.
             pending["refresh_operation_id"] = str(uuid.uuid4())
@@ -267,6 +272,7 @@ class OidcSessions:
                 raise AuthenticationExpired("Session generation mismatch")
             session["tokens"] = token = replacement
             pending["phase"] = "authenticated"
+            pending["authenticated_at"] = time.time()
             self.save(cookie, session)
         if token["access_expires_at"] <= time.time() * 1000 + 5000:
             # A long-offline recovery returns the original AT with remaining
@@ -307,6 +313,8 @@ class OidcSessions:
             if not session:
                 return {"loggedOut": True, "session_context": "native"}
             token = session["tokens"]
+            if token["session_context"] == "browser" and scope == "client":
+                raise UnsupportedLogoutScope("Browser client-only logout is not supported")
             pending = session.setdefault("logout_pending", {"scope": scope, "operation_id": str(uuid.uuid4()),
                 "request_digest": hashlib.sha256(("logout:" + scope).encode()).hexdigest(),
                 "access_token": token["access_token"], "access_expires_at": token["access_expires_at"]})

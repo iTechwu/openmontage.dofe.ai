@@ -383,3 +383,46 @@ def test_long_offline_rotation_recovery_persists_rt_then_uses_a_distinct_op_befo
     assert resumed[0] == old_op and resumed[1] != old_op
     assert result["completed"] == [old_op]
     assert "request_pending" not in result
+
+
+def test_browser_pending_cookie_confirmation_recovers_after_its_window_before_at_expiry(manager, monkeypatch):
+    service, client, cookie = manager
+    client.context = "browser"
+    session = service.vault.get(cookie)
+    session["tokens"]["session_context"] = "browser"
+    service.save(cookie, session)
+    business = str(uuid.uuid4())
+    with pytest.raises(CookieRenewalRequired) as first:
+        service.prepare(cookie, digest("mutation not dispatched"), business)
+    future = time.time() + 125
+    monkeypatch.setattr(time, "time", lambda: future)
+    original = client.operation
+    def operation(path, body):
+        if path.endswith("confirmation"):
+            assert body["operation_id"] != first.value.operation_id
+        return original(path, body)
+    client.operation = operation
+    with pytest.raises(CookieRenewalRequired) as fresh:
+        service.prepare(cookie, digest("mutation not dispatched"), business)
+    assert client.generation == 2
+    assert fresh.value.operation_id != business
+    client.confirmed.add(fresh.value.operation_id)
+    result = service.prepare(cookie, digest("mutation not dispatched"), business)
+    assert result["completed"] == [business]
+    assert client.generation == 2
+
+
+def test_browser_client_scope_logout_rejects_before_creating_intent_or_revoking(manager):
+    http, identity, cookie = app_client(manager)
+    service = manager[0]
+    identity.context = "browser"
+    current = service.vault.get(cookie)
+    current["tokens"]["session_context"] = "browser"
+    service.save(cookie, current)
+    http.cookies.set(COOKIE, cookie)
+    response = http.post("/auth/logout", json={"scope":"client"}, headers={"origin":"https://montage.example"})
+    assert response.status_code == 400
+    assert response.json()["error"] == "UNSUPPORTED_LOGOUT_SCOPE"
+    assert not response.headers.get_list("set-cookie")
+    assert not service.vault.get(cookie).get("logout_pending")
+    assert identity.calls == []
