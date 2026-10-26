@@ -108,3 +108,18 @@ export const STAGE_ICONS = {
   awaiting_human: "◈",
   failed: "✕",
 };
+
+// RP metadata is a display hint only and never counts as business activity.
+// Historical Models-key embeds and unauthenticated development have no RP hint.
+(async () => {
+  const response = await fetch(appURL('/auth/status'), {cache:'no-store'});
+  if (!response.ok || !(await response.json()).sessionHint) return;
+  const button = document.createElement('button');
+  button.className = 'auth-exit';
+  button.textContent = '退出登录';
+  button.onclick = async () => {
+    const module = await import(appURL('/auth/logout-client.js'));
+    await module.logoutFromUI(button);
+  };
+  document.body.append(button);
+})().catch(() => {});

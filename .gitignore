@@ -104,3 +104,6 @@ venv/
 
 # Backlot local cache (thumbnails)
 .backlot/
+
+# Private persistent RP state (deployment provisions its own local volume).
+.openmontage-auth/

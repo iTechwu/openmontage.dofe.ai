@@ -77,7 +77,8 @@ def _env_int(name: str, default: int) -> int:
 def is_dofe_enabled() -> bool:
     """True when the ``DOFE_ENABLED`` master switch is on."""
 
-    return _env_bool("DOFE_ENABLED")
+    from .mcp_delegation import current_delegation
+    return current_delegation() is not None or _env_bool("DOFE_ENABLED")
 
 
 def model_api_policy_error(tool: "BaseTool") -> str | None:
@@ -111,6 +112,9 @@ def model_api_tool_allowed(tool: "BaseTool") -> bool:
 
 
 def dofe_api_key() -> str | None:
+    from .mcp_delegation import current_delegation
+    if current_delegation() is not None:
+        return None
     raw = os.environ.get("DOFE_MODEL_API_KEY") or os.environ.get("DOFE_API_KEY")
     return raw.strip() if raw and raw.strip() else None
 
@@ -144,6 +148,10 @@ def dofe_internal_api_secret() -> str | None:
 
 
 def dofe_tenant_id() -> str | None:
+    from .mcp_delegation import current_delegation
+    delegated = current_delegation()
+    if delegated is not None:
+        return delegated.tenant_id
     raw = os.environ.get("DOFE_TENANT_ID")
     return raw.strip() if raw and raw.strip() else None
 

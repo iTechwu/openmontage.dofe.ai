@@ -76,6 +76,7 @@ class _FakeService:
         self.projects_dir = root
         self.snapshot = SimpleNamespace(
             workflow=SimpleNamespace(name="animation"),
+            attribution=SimpleNamespace(runtime_id="test-runtime"),
             status="RUNNING",
         )
         self.db = _FakeDb()

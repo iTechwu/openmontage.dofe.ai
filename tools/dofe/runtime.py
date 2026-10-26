@@ -322,7 +322,8 @@ def _run_dofe_generation_impl(tool: Any, inputs: dict[str, Any]) -> ToolResult:
     """
 
     api_key = cfg.dofe_api_key()
-    if not api_key:
+    from .mcp_delegation import current_delegation
+    if not api_key and current_delegation() is None:
         return ToolResult(
             success=False,
             error="DOFE_MODEL_API_KEY / DOFE_API_KEY is not set. "

@@ -356,6 +356,13 @@ class JobService:
         with self._connect() as connection:
             connection.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS openmontage_mcp_delegation (
+                    job_id TEXT PRIMARY KEY,
+                    delegation_ref TEXT NOT NULL,
+                    api_key_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL,
+                    sso_team_id TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS openmontage_job (
                     job_id TEXT PRIMARY KEY,
                     workspace_id TEXT NOT NULL,
@@ -603,7 +610,9 @@ class JobService:
             workflow = WorkflowDefinition.from_pipeline(request.workflow)
             now = _now()
             snapshot = JobSnapshot(
-                job_id=f"om_job_{uuid4().hex}",
+                # A crash after Models claim but before SQLite commit must retry the same job identity.
+                job_id=("om_job_" + hashlib.sha256(f"{attribution.workspace_id}:{request.client_request_id}".encode()).hexdigest()[:32]
+                        if attribution.runtime_id == "mcp-gateway" else f"om_job_{uuid4().hex}"),
                 status=JobStatus.QUEUED,
                 workflow=workflow,
                 attribution=attribution,
@@ -624,6 +633,14 @@ class JobService:
                 created_at=now,
                 updated_at=now,
             )
+            if attribution.runtime_id == "mcp-gateway":
+                from tools.dofe.mcp_delegation import current_delegation, ModelsDelegationClient, McpDelegationError
+                delegated = current_delegation()
+                if delegated is None or attribution.workspace_id != f"tenant:{delegated.tenant_id}":
+                    raise McpDelegationError("Gateway Job requires a verified Models delegation")
+                claimed = ModelsDelegationClient().claim(delegated, snapshot.job_id, attribution.source_invocation_id)
+                connection.execute("INSERT INTO openmontage_mcp_delegation VALUES (?, ?, ?, ?, ?)",
+                    (snapshot.job_id, claimed.delegation_ref, claimed.api_key_id, claimed.tenant_id, claimed.sso_team_id))
             connection.execute(
                 """
                 INSERT INTO openmontage_job (
@@ -649,6 +666,20 @@ class JobService:
             )
         self._export_workspace_map()
         return created
+
+    def model_delegation(self, job_id: str, *, caller=None, stage: str = "", invocation_seed: str = ""):
+        """Server-private persisted reference; never exported in a Job snapshot or event."""
+        from tools.dofe.mcp_delegation import ModelsDelegationClient, McpDelegationError
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM openmontage_mcp_delegation WHERE job_id=?", (job_id,)).fetchone()
+        if row is None:
+            raise McpDelegationError("Gateway Job has no Models delegation; reauthorization is required")
+        delegated = ModelsDelegationClient().introspect(row["delegation_ref"])
+        if (delegated.mode != "job" or delegated.job_id != job_id or delegated.api_key_id != row["api_key_id"]
+            or delegated.tenant_id != row["tenant_id"] or delegated.sso_team_id != row["sso_team_id"]
+            or caller is not None and (caller.api_key_id != delegated.api_key_id or caller.tenant_id != delegated.tenant_id)):
+            raise McpDelegationError("Models job delegation identity mismatch")
+        return delegated.scoped(stage=stage, invocation_seed=invocation_seed)
 
     def get_job(self, job_id: str) -> JobSnapshot:
         with self._connect() as connection:

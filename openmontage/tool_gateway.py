@@ -354,7 +354,17 @@ class ToolGateway:
             )
 
         try:
-            result = tool.execute(effective_inputs)
+            from tools.dofe.mcp_delegation import current_delegation, delegation_context, McpDelegationError
+            snapshot = self.service.get_job(job_id)
+            delegated = None
+            if snapshot.attribution.runtime_id == "mcp-gateway":
+                caller = current_delegation()
+                if caller is None:
+                    raise McpDelegationError("Gateway execution requires caller delegation")
+                delegated = self.service.model_delegation(job_id, caller=caller, stage=stage,
+                    invocation_seed=f"{stage_attempt}:{tool_name}:{idempotency_key}")
+            with delegation_context(delegated):
+                result = tool.execute(effective_inputs)
             if not isinstance(result, ToolResult):
                 raise ToolGatewayError("TOOL_RESULT_INVALID", "tool did not return ToolResult")
             response = self._wire_result(tool_name, operation, result, project_dir)

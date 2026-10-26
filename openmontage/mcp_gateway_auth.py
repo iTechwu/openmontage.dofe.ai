@@ -6,6 +6,11 @@ import hmac
 import json
 import os
 import uuid
+import re
+from contextvars import ContextVar
+
+import anyio
+from tools.dofe.mcp_delegation import ModelsDelegationClient, McpDelegationError, current_delegation, delegation_context
 from collections.abc import Mapping
 from typing import Any
 
@@ -13,6 +18,7 @@ from openmontage.contracts import JobAttribution
 
 GATEWAY_MARKER = "models-api-key-v1"
 GATEWAY_RUNTIME_ID = "mcp-gateway"
+_legacy_readonly: ContextVar[bool] = ContextVar("montage_legacy_readonly", default=False)
 
 
 def gateway_attempted(headers: Mapping[str, str] | None) -> bool:
@@ -25,6 +31,8 @@ def gateway_attempted(headers: Mapping[str, str] | None) -> bool:
             "X-Dofe-Tenant-Id",
             "X-Dofe-Sso-Team-Id",
             "X-Dofe-Member-Id",
+            "X-Dofe-Mcp-Delegation-Ref",
+            "X-Dofe-Mcp-Delegation-Version",
         )
     )
 
@@ -46,14 +54,28 @@ def gateway_attribution(headers: Mapping[str, str] | None) -> JobAttribution | N
     tenant_id = (_header(headers, "X-Dofe-Tenant-Id") or "").strip()
     sso_team_id = (_header(headers, "X-Dofe-Sso-Team-Id") or "").strip()
     member_id = (_header(headers, "X-Dofe-Member-Id") or "").strip()
-    authorization = (_header(headers, "Authorization") or "").strip()
-    if not api_key_id or not tenant_id or not sso_team_id or not _bearer_token(authorization):
+    if _legacy_readonly.get():
+        if not api_key_id or not tenant_id or not sso_team_id or not _bearer_token(_header(headers, "Authorization") or ""):
+            return None
+        request_id = (_header(headers, "X-Request-Id") or "").strip() or f"mcp-{uuid.uuid4().hex}"
+        return JobAttribution(workspace_id=f"tenant:{tenant_id}", employee_id=member_id or f"mcp-key:{api_key_id}",
+            runtime_id=GATEWAY_RUNTIME_ID, root_task_id=f"mcp:{api_key_id}", conversation_id=request_id,
+            source_invocation_id=request_id, trace_id=request_id)
+    ref = (_header(headers, "X-Dofe-Mcp-Delegation-Ref") or "").strip()
+    if not api_key_id or not tenant_id or not sso_team_id or (_header(headers, "X-Dofe-Mcp-Delegation-Version") or "") != "1":
+        return None
+    try:
+        delegated = current_delegation()
+        if delegated is None or delegated.delegation_ref != ref:
+            delegated = ModelsDelegationClient().introspect(ref)
+        delegated.ensure_current()
+        if (delegated.api_key_id != api_key_id or delegated.tenant_id != tenant_id
+            or delegated.sso_team_id != sso_team_id or (delegated.member_id or "") != member_id):
+            return None
+    except McpDelegationError:
         return None
 
-    request_id = (
-        (_header(headers, "X-Request-Id") or _header(headers, "X-Trace-Id") or "").strip()
-        or f"mcp-{uuid.uuid4().hex}"
-    )
+    request_id = delegated.request_id
     return JobAttribution(
         workspace_id=f"tenant:{tenant_id}",
         employee_id=member_id or f"mcp-key:{api_key_id}",
@@ -73,8 +95,19 @@ class McpGatewayAuthMiddleware:
         self.gateway_only = gateway_only
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope.get("type") != "http" or scope.get("path") not in {"/mcp", "/mcp/"}:
+        if scope.get("type") != "http":
             await self.app(scope, receive, send)
+            return
+        path = scope.get("path", "")
+        if path not in {"/mcp", "/mcp/"}:
+            # Frozen dashboard REST routes stay read-only. This switch is server-owned and never a client header.
+            readonly = scope.get("method") == "GET" and (path in {"/api/v1/overview", "/api/v1/series", "/api/v1/jobs"}
+                or re.fullmatch(r"/api/v1/jobs/[A-Za-z0-9_-]+(?:/events|/artifacts)?", path) is not None)
+            token = _legacy_readonly.set(readonly)
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                _legacy_readonly.reset(token)
             return
         headers = _scope_headers(scope)
         if not gateway_attempted(headers):
@@ -83,10 +116,32 @@ class McpGatewayAuthMiddleware:
                 return
             await self.app(scope, receive, send)
             return
-        if gateway_attribution(headers) is None:
+        # Reject a forged edge envelope before consuming Models verification resources.
+        # A delegated envelope must also arrive credential-free: the gateway consumes
+        # the member bearer, so a leftover Authorization means the caller did not come
+        # through the gateway's delegated path (mirrors tools' double check).
+        configured = os.environ.get("OPENMONTAGE_MCP_GATEWAY_SECRET", "").strip()
+        provided = (_header(headers, "X-Dofe-Mcp-Gateway-Secret") or "").strip()
+        if (not configured or not hmac.compare_digest(configured, provided)
+            or (_header(headers, "Authorization") or "").strip() != ""
+            or _header(headers, "X-Dofe-Auth-Verified") != GATEWAY_MARKER
+            or _header(headers, "X-Dofe-Mcp-Delegation-Version") != "1"
+            or re.fullmatch(r"[a-f0-9]{64}", _header(headers, "X-Dofe-Mcp-Delegation-Ref") or "") is None):
             await _unauthorized(send)
             return
-        await self.app(scope, receive, send)
+        try:
+            delegated = await anyio.to_thread.run_sync(
+                ModelsDelegationClient().introspect,
+                (_header(headers, "X-Dofe-Mcp-Delegation-Ref") or "").strip(),
+            )
+        except McpDelegationError:
+            await _unauthorized(send)
+            return
+        with delegation_context(delegated):
+            if gateway_attribution(headers) is None:
+                await _unauthorized(send)
+                return
+            await self.app(scope, receive, send)
 
 
 def _scope_headers(scope: dict[str, Any]) -> dict[str, str]:

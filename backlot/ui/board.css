@@ -1059,3 +1059,5 @@ body:not(.first) .approval-review { animation: none; }
   .approval-review-foot button { width: 100%; }
   .approval-status { white-space: normal; }
 }
+
+.auth-exit { position:fixed; right:16px; bottom:16px; z-index:1000; padding:8px 12px; cursor:pointer; }

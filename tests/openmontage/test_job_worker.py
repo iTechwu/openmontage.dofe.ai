@@ -33,6 +33,8 @@ from openmontage.pipeline_executor import (
     StageAssignment,
 )
 from tools.dofe.delegation import DelegatedModelCredential
+from tools.dofe.mcp_delegation import delegation_context, McpDelegation, ModelsDelegationClient, McpDelegationError
+from tests.openmontage.g12_helpers import delegated, stub_models
 from tests.contracts.test_phase0_contracts import sample_artifact
 
 
@@ -54,7 +56,8 @@ def _attribution() -> JobAttribution:
 def _gateway_attribution(monkeypatch: pytest.MonkeyPatch) -> JobAttribution:
     monkeypatch.setenv("OPENMONTAGE_MCP_GATEWAY_SECRET", "gateway-secret")
     attribution = gateway_attribution({
-        "Authorization": "Bearer sk-models-user",
+        "X-Dofe-Mcp-Delegation-Ref": "a" * 64,
+        "X-Dofe-Mcp-Delegation-Version": "1",
         "X-Dofe-Mcp-Gateway-Secret": "gateway-secret",
         "X-Dofe-Auth-Verified": "models-api-key-v1",
         "X-Dofe-Api-Key-Id": "key-worker",
@@ -346,15 +349,18 @@ def test_worker_executes_gateway_job_without_per_job_credential_bridge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = JobService(tmp_path / "jobs.sqlite3")
-    job = service.create_job(
-        _request(request_id="gateway-without-credential"),
-        _gateway_attribution(monkeypatch),
-    )
+    value = delegated(api_key_id="key-worker", tenant_id="tenant-worker", sso_team_id="team-worker", request_id="request-worker")
+    stub_models(monkeypatch, value)
+    with delegation_context(value):
+        job = service.create_job(
+            _request(request_id="gateway-without-credential"),
+            _gateway_attribution(monkeypatch),
+        )
     executor = FakeExecutor(["completed"])
 
     class UnexpectedCredentialBridge:
         def issue(self, **_kwargs):
-            raise AssertionError("Gateway jobs must use the configured service model key")
+            raise AssertionError("Gateway jobs must use Models G12, never the old bridge or configured service key")
 
     result = _worker(
         service,
@@ -366,7 +372,9 @@ def test_worker_executes_gateway_job_without_per_job_credential_bridge(
     assert result is not None and result.outcome == "stage_completed"
     assert service.get_job(job.job_id).status == JobStatus.RUNNING
     assert len(executor.assignments) == 1
-    assert executor.credentials == [None]
+    assert len(executor.credentials) == 1
+    assert isinstance(executor.credentials[0], McpDelegation)
+    assert executor.credentials[0].job_id == job.job_id
 
 
 def test_worker_skips_model_credential_for_credential_free_executor(tmp_path: Path) -> None:

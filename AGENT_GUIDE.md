@@ -734,3 +734,26 @@ The `.agents/skills/` directory is large. When you're not coming in through a to
 - Do not present a single unavailable tool in isolation. Always show the full capability picture: "X of Y providers configured for this capability."
 - Do not skip the Provider Menu at preflight. The user must see what they have AND what they could unlock.
 - Do not change provider, model, or render path without telling the user first and getting approval when the change is material.
+
+
+## MCP 委托与调用者计费边界（2026-10-21）
+
+公共 MCP 入口只通过 `https://ai.hozonauto.com/mcp/montage`。网关消费成员 Models Key；
+OpenMontage 仅接收 G12 `delegationRef`，以服务 HMAC 向 Models introspect，校验 audience、
+route、原 key/tenant/SSO team 身份后才执行。Hub 的 MCP 元数据不授予任何租户权限。
+创建 Job 时将 request 委托原子 claim 为同一个 Job 的委托，引用仅存私有数据库表，
+不得进入 Job snapshot、事件、日志或子进程环境。后台执行、媒体任务、计价和上传使用此
+委托；过期、撤销或缺失时关闭调用，不得回退项目 Key 或旧 managed-runtime 凭据。
+服务 HMAC 与委托引用只留在父进程；CLI 子进程只得到本机代理口令。模型/媒体/目录
+请求在 Models 的精确 internal allowlist 执行，并保留调用者 key/tenant 的计费归属。
+本仓库开发仍允许既有显式 standalone 模式；它不能成为 gateway Job 的回退路径。
+架构、迁移与发布门禁见 `../docker-helm.dofe.ai/docs/1020/struct-opz/`。
+
+
+G12 是协调切换单元，**不能独立部署本服务**。先发布兼容的 Models migration/API（委托
+开关保持关闭），准备已支持 G12 的网关与 OpenMontage 版本，维护窗口内停止新付费请求，
+部署共同版本后打开 Models 委托开关并验收；网关必须收到有效 ref/version 才清除原
+Authorization。任何失败保持新付费入口关闭，不以项目 Key 恢复可用性。
+历史没有 Models 委托绑定的 gateway Job 仍可只读查询；后续付费执行直接失败并提示
+重新授权/重新提交，绝不按现有租户信息自动补造委托。本轮不导入历史原始 Key。
+现存 Dashboard 的精确 GET REST 路由保留旧网关鉴权；旧 POST REST 不获兼容授权。
