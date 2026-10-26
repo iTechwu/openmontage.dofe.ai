@@ -228,6 +228,12 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Backlot", docs_url=None, redoc_url=None, lifespan=_lifespan)
     base_path = _base_path()
     auth_url = os.environ.get("OPENMONTAGE_BACKLOT_AUTH_URL", "").strip()
+    oidc_enabled = os.environ.get("OPENMONTAGE_OIDC_ENABLED", "false").lower() == "true"
+    legacy_enabled = os.environ.get("OPENMONTAGE_LEGACY_EMBED_ENABLED", "false").lower() == "true"
+    if oidc_enabled:
+        if base_path:
+            raise RuntimeError("OIDC Backlot must use a dedicated origin root")
+        from backlot.oidc_routes import install_oidc
     secure_cookie = os.environ.get(
         "OPENMONTAGE_BACKLOT_SECURE_COOKIE", "true"
     ).lower() not in {"0", "false", "no"}
@@ -253,7 +259,10 @@ def create_app() -> FastAPI:
 
     def _request_workspace(request: Request) -> str | None:
         """Session workspace in auth mode; None means dev mode (no scoping)."""
-        if not auth_url:
+        workspace = getattr(request.state, "oidc_workspace", None)
+        if workspace is not None:
+            return workspace
+        if not auth_url and not oidc_enabled:
             return None
         return session_workspace(request.cookies.get("openmontage_backlot_session"))
 
@@ -263,18 +272,16 @@ def create_app() -> FastAPI:
         Fails closed as 404 (not 403) so a foreign project id is
         indistinguishable from an unknown one.
         """
-        if not auth_url:
+        if not auth_url and not oidc_enabled:
             return
-        workspace = session_workspace(
-            request.cookies.get("openmontage_backlot_session")
-        )
+        workspace = _request_workspace(request)
         if workspace is None or workspace_map.workspace_of(project_id) != workspace:
             raise HTTPException(status_code=404, detail="unknown project")
 
     def _workspace_accepts(workspace: str | None) -> Callable[[str], bool]:
         """SSE predicate: dev mode sees all changes; auth mode sees only the
         session workspace's projects (nothing at all without a workspace)."""
-        if not auth_url:
+        if not auth_url and not oidc_enabled:
             return lambda _project_id: True
         if workspace is None:
             return lambda _project_id: False
@@ -285,7 +292,9 @@ def create_app() -> FastAPI:
         async def require_models_session(request: Request, call_next):
             path = request.url.path
             if (
-                path == "/api/health"
+                getattr(request.state, "oidc_workspace", None) is not None
+                or path.startswith("/auth/") and oidc_enabled
+                or path == "/api/health"
                 or path == "/auth"
                 or path == "/auth/session"
                 or session_is_valid(request.cookies.get("openmontage_backlot_session"))
@@ -298,12 +307,14 @@ def create_app() -> FastAPI:
                 status_code=401,
             )
 
-        @app.get("/auth")
+        @app.get("/auth/legacy" if oidc_enabled else "/auth")
         async def auth_page() -> HTMLResponse:
             return _auth_html(base_path)
 
         @app.post("/auth/session")
         async def create_auth_session(request: Request) -> Response:
+            if oidc_enabled and not legacy_enabled:
+                return JSONResponse({"error": "legacy_embed_disabled"}, status_code=403)
             try:
                 payload = await request.json()
             except (json.JSONDecodeError, ValueError):
@@ -380,6 +391,9 @@ def create_app() -> FastAPI:
                 while True:
                     if await request.is_disconnected():
                         return
+                    alive = getattr(request.state, "oidc_session_alive", None)
+                    if alive is not None and not await alive():
+                        return
                     try:
                         await asyncio.wait_for(q.get(), timeout=SSE_HEARTBEAT_SECONDS)
                     except asyncio.TimeoutError:
@@ -410,6 +424,9 @@ def create_app() -> FastAPI:
                 yield _sse({"type": "hello"})
                 while True:
                     if await request.is_disconnected():
+                        return
+                    alive = getattr(request.state, "oidc_session_alive", None)
+                    if alive is not None and not await alive():
                         return
                     try:
                         changed = await asyncio.wait_for(q.get(), timeout=SSE_HEARTBEAT_SECONDS)
@@ -507,6 +524,9 @@ def create_app() -> FastAPI:
         ):
             response.headers["Cache-Control"] = "no-cache"
         return response
+
+    if oidc_enabled:
+        install_oidc(app, legacy_enabled=legacy_enabled)
 
     return app
 

@@ -84,9 +84,14 @@ class SessionVault:
     def put(self, identity: str, value: dict, expires: float, *, kind: str = "session", sid: str | None = None, family: str | None = None):
         encrypted = self.cipher.encrypt(json.dumps(value, separators=(",", ":")).encode())
         with self.connection() as db:
-            db.execute("INSERT INTO rp_state(id,kind,sid,family,expires,value) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET expires=excluded.expires,value=excluded.value,sid=excluded.sid,family=excluded.family", (
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DELETE FROM rp_state WHERE expires<=?", (time.time(),))
+            if sid and kind != "logout" and db.execute("SELECT 1 FROM rp_state WHERE id=? AND expires>?", (self.digest("revoked:" + sid), time.time())).fetchone():
+                raise VaultUnavailable("Session has been revoked")
+            db.execute("INSERT INTO rp_state(id,kind,sid,family,expires,value) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET expires=excluded.expires,value=excluded.value,sid=excluded.sid,family=excluded.family,kind=excluded.kind", (
                 self.digest(identity), kind, self.digest(sid) if sid else None,
                 self.digest(family) if family else None, expires, encrypted))
+            db.commit()
 
     def consume(self, identity: str) -> dict | None:
         with self.lock(identity):
@@ -99,5 +104,10 @@ class SessionVault:
             db.execute("DELETE FROM rp_state WHERE id=?", (self.digest(identity),))
 
     def revoke_sid(self, sid: str):
+        # A concurrent in-flight refresh cannot resurrect a back-channel logout.
         with self.connection() as db:
-            db.execute("DELETE FROM rp_state WHERE sid=?", (self.digest(sid),))
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DELETE FROM rp_state WHERE sid=? AND kind!='logout'", (self.digest(sid),))
+            db.execute("INSERT OR REPLACE INTO rp_state(id,kind,expires,value) VALUES(?,?,?,?)", (
+                self.digest("revoked:" + sid), "revocation", time.time() + 31 * 86400, self.cipher.encrypt(b"{}")))
+            db.commit()
