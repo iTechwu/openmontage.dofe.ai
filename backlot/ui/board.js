@@ -16,7 +16,7 @@ const app = document.getElementById("app");
 const modal = document.getElementById("modal");
 const player = document.getElementById("player");
 
-const THEME_KEY = "backlot.theme";
+const THEME_KEY = location.pathname.startsWith("/hz/montage/") ? "hz.montage.backlot.theme" : "backlot.theme";
 let currentTheme = localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark";
 let state = null;
 let selectedStage = null;   // stage drawer open for this stage name

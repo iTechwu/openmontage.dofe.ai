@@ -2,7 +2,7 @@ import { appURL, el, fmtAgo, getJSON, subscribe, thumbURL } from "./lib.js";
 import { label, pipelineLabel } from "./i18n.js";
 
 const grid = document.getElementById("grid");
-const THEME_KEY = "backlot.theme";
+const THEME_KEY = location.pathname.startsWith("/hz/montage/") ? "hz.montage.backlot.theme" : "backlot.theme";
 let currentTheme = localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark";
 
 function applyTheme(theme) {

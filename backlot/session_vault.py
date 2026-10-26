@@ -5,6 +5,8 @@ OS family locks serialize rotation across workers, including network recovery.
 """
 from __future__ import annotations
 
+import base64
+import hmac
 import fcntl
 import hashlib
 import json
@@ -22,9 +24,13 @@ class VaultUnavailable(RuntimeError):
 
 
 class SessionVault:
-    def __init__(self, path: Path, encryption_key: str):
+    def __init__(self, path: Path, encryption_key: str, *, namespace: str = "", binding: str = ""):
+        self.namespace, self.binding = namespace, binding
         self.path = path
-        self.cipher = Fernet(encryption_key.encode("ascii"))
+        key = encryption_key.encode("ascii")
+        if namespace:
+            key = base64.urlsafe_b64encode(hmac.new(base64.urlsafe_b64decode(key), ("openmontage-realm-v1:" + namespace + ":" + binding).encode(), hashlib.sha256).digest())
+        self.cipher = Fernet(key)
         path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         if path.is_symlink():
             raise VaultUnavailable("Session database must not be a symlink")
@@ -43,6 +49,9 @@ class SessionVault:
     def digest(value: str) -> str:
         return hashlib.sha256(value.encode()).hexdigest()
 
+    def record_id(self, identity):
+        return self.digest(self.namespace + ":" + identity if self.namespace else identity)
+
     @contextmanager
     def connection(self):
         db = sqlite3.connect(self.path, timeout=15, isolation_level=None)
@@ -54,7 +63,7 @@ class SessionVault:
 
     @contextmanager
     def lock(self, identity: str):
-        descriptor = os.open(self.locks / self.digest(identity), os.O_CREAT | os.O_RDWR, 0o600)
+        descriptor = os.open(self.locks / self.record_id(identity), os.O_CREAT | os.O_RDWR, 0o600)
         deadline = time.monotonic() + 20
         try:
             while True:
@@ -72,24 +81,29 @@ class SessionVault:
 
     def get(self, identity: str, *, allow_expired: bool = False) -> dict | None:
         with self.connection() as db:
-            row = db.execute("SELECT expires,value FROM rp_state WHERE id=?", (self.digest(identity),)).fetchone()
+            row = db.execute("SELECT expires,value FROM rp_state WHERE id=?", (self.record_id(identity),)).fetchone()
         if row is None or not allow_expired and row[0] <= time.time():
             return None
         try:
             value = json.loads(self.cipher.decrypt(row[1]))
+            if self.namespace:
+                if not isinstance(value, dict) or value.get("realm_binding") != self.binding or value.get("record") != self.record_id(identity):
+                    raise ValueError("Invalid realm binding")
+                value = value.get("payload")
             return value if isinstance(value, dict) else None
         except (InvalidToken, ValueError, TypeError) as exc:
             raise VaultUnavailable("Session state cannot be verified") from exc
 
     def put(self, identity: str, value: dict, expires: float, *, kind: str = "session", sid: str | None = None, family: str | None = None):
-        encrypted = self.cipher.encrypt(json.dumps(value, separators=(",", ":")).encode())
+        payload = {"realm_binding": self.binding, "record": self.record_id(identity), "payload": value} if self.namespace else value
+        encrypted = self.cipher.encrypt(json.dumps(payload, separators=(",", ":")).encode())
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute("DELETE FROM rp_state WHERE expires<=?", (time.time(),))
             if sid and kind != "logout" and db.execute("SELECT 1 FROM rp_state WHERE id=? AND expires>?", (self.digest("revoked:" + sid), time.time())).fetchone():
                 raise VaultUnavailable("Session has been revoked")
             db.execute("INSERT INTO rp_state(id,kind,sid,family,expires,value) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET expires=excluded.expires,value=excluded.value,sid=excluded.sid,family=excluded.family,kind=excluded.kind", (
-                self.digest(identity), kind, self.digest(sid) if sid else None,
+                self.record_id(identity), kind, self.digest(sid) if sid else None,
                 self.digest(family) if family else None, expires, encrypted))
             db.commit()
 
@@ -101,7 +115,7 @@ class SessionVault:
 
     def delete(self, identity: str):
         with self.connection() as db:
-            db.execute("DELETE FROM rp_state WHERE id=?", (self.digest(identity),))
+            db.execute("DELETE FROM rp_state WHERE id=?", (self.record_id(identity),))
 
     def revoke_sid(self, sid: str):
         # A concurrent in-flight refresh cannot resurrect a back-channel logout.
