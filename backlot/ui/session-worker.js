@@ -19,9 +19,11 @@ async function confirm(ticket) {
 }
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
-  if (url.origin !== self.location.origin || url.pathname.startsWith('/auth') ||
-      url.pathname.startsWith('/static/') || url.pathname.startsWith('/ui/') ||
-      url.pathname.endsWith('/events') || url.pathname === '/api/health' || url.pathname === '/favicon.ico') return;
+  if (url.origin !== self.location.origin || !url.pathname.startsWith(APP_BASE + '/')) return;
+  const path = url.pathname.slice(APP_BASE.length);
+  if (path.startsWith('/auth') ||
+      path.startsWith('/static/') || path.startsWith('/ui/') ||
+      path.endsWith('/events') || path === '/api/health' || path === '/favicon.ico') return;
   event.respondWith((async () => {
     const headers = new Headers(event.request.headers);
     headers.set('x-dofe-operation-id', crypto.randomUUID());
