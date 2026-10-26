@@ -181,9 +181,13 @@ class OidcClient:
 
 
 class OidcSessions:
-    def __init__(self, config: OidcConfig, client=None):
+    def __init__(self, config: OidcConfig, client=None, *, realm=None):
+        from backlot.browser_realm import canonical
+        self.realm = realm or canonical(config)
         self.config, self.client = config, client or OidcClient(config)
-        self.vault = SessionVault(config.session_db, config.session_key)
+        binding = "|".join((config.issuer, config.client_id, self.realm.id, self.realm.base))
+        self.vault = SessionVault(config.session_db, config.session_key,
+                                  namespace=self.realm.id if self.realm.id != "canonical" else "", binding=binding)
 
     def save(self, cookie, session):
         token = session["tokens"]
@@ -214,7 +218,8 @@ class OidcSessions:
                 if not pending.get("tokens"):
                     raise AuthenticationExpired("Bootstrap session is no longer active")
             if not pending:
-                tokens = token_response(self.client.operation("/auth/session/v2/bootstrap-exchange", {"ticket": ticket}))
+                tokens = token_response(self.client.operation("/auth/session/v2/bootstrap-exchange", {"ticket": ticket,
+                    "target_redirect_uri": self.realm.base + "/auth/callback"}))
                 pending = {"tokens": tokens, "cookie": secrets.token_urlsafe(32)}
                 self.vault.put(key, pending, time.time() + 120, kind="bootstrap")
             cookie, session = self.create(pending["tokens"], cookie=pending["cookie"])
@@ -388,4 +393,5 @@ class OidcSessions:
                  "redirect_uri": redirect_uri, "state": state, "nonce": nonce, "code_challenge": challenge, "code_challenge_method": "S256"}
         if not interactive:
             query["prompt"] = "none"
-        return state, self.client.discovery()["authorization_endpoint"] + "?" + urlencode(query)
+        endpoint = self.realm.identity + "/oauth/authorize" if self.realm.id == "hz" else self.client.discovery()["authorization_endpoint"]
+        return state, endpoint + "?" + urlencode(query)
