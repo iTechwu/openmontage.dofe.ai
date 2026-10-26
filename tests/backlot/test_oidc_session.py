@@ -345,3 +345,41 @@ def test_http_unconfirmed_logout_keeps_persistent_opaque_recovery_cookie(manager
     assert manager[0].vault.get(cookie)["logout_pending"]["access_token"]
     assert http.get("/api/library").status_code == 401
     assert http.get("/auth/status").json()["logoutPending"] is True
+
+
+@pytest.mark.parametrize("context", ["native", "browser"])
+def test_long_offline_rotation_recovery_persists_rt_then_uses_a_distinct_op_before_dispatch(manager, monkeypatch, context):
+    service, client, cookie = manager
+    client.context = context
+    current = service.vault.get(cookie)
+    current["tokens"]["session_context"] = context
+    service.save(cookie, current)
+    client.lost = True
+    with pytest.raises(AuthenticationUnavailable):
+        service.prepare(cookie, digest("accepted user request"), str(uuid.uuid4()))
+    pending = service.vault.get(cookie)["request_pending"]
+    old_op = pending["operation_id"]
+    saved = client.operations[old_op]
+    client.operations[old_op] = token_response({**saved, "expires_in": 0})
+    future = time.time() + 2 * 86400
+    monkeypatch.setattr(time, "time", lambda: future)
+    original = client.token
+    resumed = []
+    def token(body):
+        resumed.append(body["operation_id"])
+        if len(resumed) == 2:
+            assert service.vault.get(cookie)["tokens"]["refresh_token"] == "rt-1"
+        return original(body)
+    client.token = token
+    restarted = OidcSessions(service.config, client)
+    if context == "browser":
+        with pytest.raises(CookieRenewalRequired) as gate:
+            restarted.prepare(cookie, digest("accepted user request"), old_op)
+        assert gate.value.operation_id != old_op
+        client.confirmed.add(gate.value.operation_id)
+    result = restarted.prepare(cookie, digest("accepted user request"), old_op)
+    assert result["tokens"]["access_token"] == "at-2"
+    assert result["tokens"]["access_expires_at"] > future * 1000
+    assert resumed[0] == old_op and resumed[1] != old_op
+    assert result["completed"] == [old_op]
+    assert "request_pending" not in result

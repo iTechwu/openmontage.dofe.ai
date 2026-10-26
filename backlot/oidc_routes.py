@@ -68,8 +68,8 @@ def install_oidc(app, *, legacy_enabled=False, sessions=None):
         except ValueError as exc:
             raise AuthenticationExpired("Invalid request") from exc
 
-    def begin_login(request, next_path, interactive=False):
-        state, target = sessions.authorization(config.public_origin + "/auth/callback", local_path(next_path), interactive)
+    async def begin_login(request, next_path, interactive=False):
+        state, target = await asyncio.to_thread(sessions.authorization, config.public_origin + "/auth/callback", local_path(next_path), interactive)
         response = RedirectResponse(target, status_code=303, headers={"Cache-Control": "no-store"})
         set_cookie(response, STATE_COOKIE, state, 300)
         return response
@@ -86,7 +86,7 @@ def install_oidc(app, *, legacy_enabled=False, sessions=None):
             if request.method == "GET" and (path == "/" or path.startswith("/p/")):
                 if request.cookies.get(SUPPRESS_COOKIE):
                     return RedirectResponse("/auth", status_code=303)
-                return begin_login(request, str(request.url.path) + ("?" + request.url.query if request.url.query else ""))
+                return await begin_login(request, str(request.url.path) + ("?" + request.url.query if request.url.query else ""))
             return JSONResponse({"error": "OPENMONTAGE_UNAUTHORIZED"}, status_code=401)
         try:
             site = request.headers.get("sec-fetch-site")
@@ -157,7 +157,7 @@ def install_oidc(app, *, legacy_enabled=False, sessions=None):
                 await asyncio.to_thread(sessions.logout, previous_cookie, previous["logout_pending"]["scope"])
                 if previous["tokens"]["session_context"] == "browser":
                     await asyncio.to_thread(sessions.finish_logout, previous_cookie)
-            response = begin_login(request, value.get("next", "/"), True)
+            response = await begin_login(request, value.get("next", "/"), True)
             # fetch cannot follow a cross-origin authorization redirect reliably.
             target = response.headers["location"]
             result = JSONResponse({"url": target}, headers={"Cache-Control": "no-store"})
@@ -183,7 +183,7 @@ def install_oidc(app, *, legacy_enabled=False, sessions=None):
         try:
             if request.query_params.get("error"):
                 if not transaction["interactive"] and not request.cookies.get(SUPPRESS_COOKIE):
-                    return begin_login(request, transaction["next"], True)
+                    return await begin_login(request, transaction["next"], True)
                 raise AuthenticationExpired("Authorization was not completed")
             code = request.query_params.get("code", "")
             if not code or len(code) > 4096:
@@ -271,7 +271,7 @@ def install_oidc(app, *, legacy_enabled=False, sessions=None):
             from urllib.parse import parse_qs
             token = parse_qs(body.decode()).get("logout_token", [""])[0]
             header = jwt.get_unverified_header(token)
-            jwks = await asyncio.to_thread(sessions.client.request, "GET", sessions.client.discovery()["jwks_uri"])
+            jwks = await asyncio.to_thread(lambda: sessions.client.request("GET", sessions.client.discovery()["jwks_uri"]))
             keys = [key for key in jwks.get("keys", []) if key.get("kid") == header.get("kid") and key.get("kty") == "RSA"]
             if header.get("alg") != "RS256" or len(keys) != 1:
                 raise ValueError()

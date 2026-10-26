@@ -70,12 +70,12 @@ class OidcConfig:
 def token_response(value: dict) -> dict:
     strings = ("access_token", "refresh_token", "session_id", "family_id")
     numbers = ("refresh_generation", "idle_expires_at", "refresh_expires_at", "auth_epoch")
-    if (not isinstance(value, dict) or value.get("session_version") != "2" or value.get("expires_in") != 300
+    if (not isinstance(value, dict) or value.get("session_version") != "2" or (not isinstance(value.get("expires_in"), int) or isinstance(value.get("expires_in"), bool) or not 0 <= value["expires_in"] <= 300)
             or any(not isinstance(value.get(name), str) or not value[name] for name in strings)
             or any(not isinstance(value.get(name), int) or isinstance(value[name], bool) for name in numbers)
             or value.get("session_context") not in {"native", "browser"}):
         raise AuthenticationUnavailable("Invalid session-v2 response")
-    expires_at = int(time.time() * 1000) + 300000
+    expires_at = int(time.time() * 1000) + value["expires_in"] * 1000
     try:
         # This only shortens a scheduling hint from the trusted token response;
         # it never authenticates a claim (live introspection does that).
@@ -249,7 +249,7 @@ class OidcSessions:
             self.save(cookie, session)
             return session
 
-    def _authenticate(self, cookie, session, pending):
+    def _authenticate(self, cookie, session, pending, renewals=0):
         token = session["tokens"]
         if pending["phase"] == "authenticated" and token["access_expires_at"] <= time.time() * 1000 + 5000:
             # Cookie confirmation may take longer than the AT lifetime. Renew
@@ -268,6 +268,13 @@ class OidcSessions:
             session["tokens"] = token = replacement
             pending["phase"] = "authenticated"
             self.save(cookie, session)
+        if token["access_expires_at"] <= time.time() * 1000 + 5000:
+            # A long-offline recovery returns the original AT with remaining
+            # expires_in=0. Its RT is already durable above. A distinct auth
+            # operation now obtains a live AT for this still-pending business.
+            if renewals >= 2:
+                raise AuthenticationUnavailable("A live access token is unavailable")
+            return self._authenticate(cookie, session, pending, renewals + 1)
         if token["session_context"] == "browser":
             body = {name: token[name] for name in ("session_id", "family_id")}
             body.update(operation_id=operation_id, request_digest=digest)
