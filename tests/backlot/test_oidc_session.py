@@ -136,6 +136,142 @@ def test_browser_cookie_confirmation_is_mandatory_and_does_not_rotate_again_on_r
     assert "request_pending" not in service.vault.get(cookie)
 
 
+def test_browser_concurrent_request_cannot_consume_another_requests_dispatch(manager):
+    from backlot.oidc_session import OperationBusy
+    service, client, cookie = manager
+    client.context = "browser"
+    session = service.vault.get(cookie)
+    session["tokens"]["session_context"] = "browser"
+    service.save(cookie, session)
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    with pytest.raises(CookieRenewalRequired):
+        service.prepare(cookie, digest("business A"), first)
+    client.confirmed.add(first)
+    with pytest.raises(CookieRenewalRequired):
+        service.prepare(cookie, digest("business B"), second)
+
+    # B reached the server before A's browser retried after confirmation.
+    # Restarting the worker must retain A's permission to dispatch once.
+    restarted = OidcSessions(service.config, client)
+    client.confirmed.add(second)
+    restarted.prepare(cookie, digest("business A"), first)
+    restarted.prepare(cookie, digest("business B"), second)
+    assert client.generation == 2
+    assert service.vault.get(cookie)["completed"] == [first, second]
+    for operation, body in ((first, "business A"), (second, "business B")):
+        with pytest.raises(OperationBusy):
+            restarted.prepare(cookie, digest(body), operation)
+
+
+def test_pending_operation_digest_cannot_be_changed_before_dispatch(manager):
+    from backlot.oidc_session import OperationBusy
+    service, client, cookie = manager
+    client.context = "browser"
+    session = service.vault.get(cookie)
+    session["tokens"]["session_context"] = "browser"
+    service.save(cookie, session)
+    operation = str(uuid.uuid4())
+    with pytest.raises(CookieRenewalRequired):
+        service.prepare(cookie, digest("approved request bytes"), operation)
+    client.confirmed.add(operation)
+    with pytest.raises(OperationBusy):
+        service.prepare(cookie, digest("different request bytes"), operation)
+    assert client.generation == 1
+    assert service.vault.get(cookie)["request_pending"]["request_digest"] == digest("approved request bytes")
+    service.prepare(cookie, digest("approved request bytes"), operation)
+
+
+@pytest.mark.parametrize("changed", ["digest", "revocation"])
+def test_saved_authentication_intent_rechecks_request_and_live_authority(manager, changed):
+    from backlot.oidc_session import OperationBusy
+    service, client, cookie = manager
+    client.context = "browser"
+    session = service.vault.get(cookie)
+    session["tokens"]["session_context"] = "browser"
+    service.save(cookie, session)
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    with pytest.raises(CookieRenewalRequired):
+        service.prepare(cookie, digest("first"), first)
+    client.confirmed.add(first)
+    with pytest.raises(CookieRenewalRequired):
+        service.prepare(cookie, digest("second"), second)
+    client.confirmed.add(second)
+    if changed == "revocation":
+        client.active = False
+    with pytest.raises(AuthenticationExpired if changed == "revocation" else OperationBusy):
+        service.prepare(cookie, digest("changed" if changed == "digest" else "first"), first)
+    assert first not in service.vault.get(cookie)["completed"]
+    assert client.generation == 2
+
+
+def test_authenticated_intent_capacity_rejects_new_operation_without_evicting_owners(manager):
+    from backlot.oidc_session import OperationBusy
+    service, client, cookie = manager
+    owners = [str(uuid.uuid4()) for _ in range(65)]
+    live_identity = client.identity
+    # Authentication is durable before the dependency fails; recovering with a
+    # different owner must retain every original request without dispatching it.
+    for operation in owners:
+        next_generation = client.generation + 1
+
+        def identity(token, unavailable_generation=next_generation):
+            if token["refresh_generation"] == unavailable_generation:
+                raise AuthenticationUnavailable()
+            return live_identity(token)
+
+        client.identity = identity
+        with pytest.raises(AuthenticationUnavailable):
+            service.prepare(cookie, digest(operation), operation)
+    client.identity = live_identity
+    before = service.vault.get(cookie)
+    assert len(before["authenticated_requests"]) == 64
+    with pytest.raises(OperationBusy) as rejected:
+        service.prepare(cookie, digest("new"), str(uuid.uuid4()))
+    assert rejected.value.code == "AUTHENTICATION_CAPACITY_EXCEEDED"
+    assert service.vault.get(cookie) == before
+    owner = next(iter(before["authenticated_requests"]))
+    service.prepare(cookie, digest(owner), owner)
+    assert owner in service.vault.get(cookie)["completed"]
+
+
+def test_http_crossed_cookie_confirmation_dispatches_each_write_once(manager):
+    service, identity, cookie = manager
+    identity.context = "browser"
+    current = service.vault.get(cookie)
+    current["tokens"]["session_context"] = "browser"
+    service.save(cookie, current)
+    app, dispatched = FastAPI(), []
+
+    @app.post("/api/mutation")
+    async def mutation(request: Request):
+        dispatched.append(await request.body())
+        return {"ok": True}
+
+    install_oidc(app, sessions=service)
+    http = TestClient(app, base_url=service.config.public_origin)
+    http.cookies.set(COOKIE, cookie)
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+
+    def request(operation, body):
+        return http.post("/api/mutation", content=body, headers={
+            "origin": service.config.public_origin, "sec-fetch-site": "same-origin",
+            "x-dofe-operation-id": operation})
+
+    assert request(first, b"write A").status_code == 409
+    identity.confirmed.add(first)
+    assert request(second, b"write B").status_code == 409
+    identity.confirmed.add(second)
+    assert dispatched == []
+    changed = request(first, b"changed write A")
+    assert changed.status_code == 409
+    assert changed.json() == {"error": "OPERATION_CONFLICT"}
+    assert request(first, b"write A").status_code == 200
+    assert request(first, b"write A").status_code == 409
+    assert request(second, b"write B").status_code == 200
+    assert request(second, b"write B").status_code == 409
+    assert dispatched == [b"write A", b"write B"]
+
+
 def test_logout_suppression_survives_network_error_and_blocks_business(manager):
     service, client, cookie = manager
     def unavailable(*_):

@@ -38,7 +38,9 @@ class CookieRenewalRequired(RuntimeError):
 
 
 class OperationBusy(RuntimeError):
-    pass
+    def __init__(self, message, *, code="OPERATION_ALREADY_DISPATCHED"):
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -238,20 +240,31 @@ class OidcSessions:
                 raise AuthenticationExpired("No application session")
             if operation_id in session.get("completed", []):
                 raise OperationBusy("A dispatched business operation cannot be replayed")
-            # Drain an abandoned authentication intent before accepting this
-            # request. Only authentication is recovered; its old business action
-            # is never dispatched. Browser cookie confirmation stays mandatory.
+            # Recover the single RT writer without claiming that another
+            # request's business action ran. Its owner may still be waiting for
+            # cookie confirmation, so keep its digest and authentication intent.
+            waiting = session.get("authenticated_requests", {})
             pending = session.get("request_pending")
-            if pending and (pending["operation_id"] != operation_id or pending["request_digest"] != digest):
+            previous = waiting.get(operation_id) or (
+                pending if pending and pending["operation_id"] == operation_id else None)
+            if previous and previous["request_digest"] != digest:
+                raise OperationBusy("Operation request bytes changed", code="OPERATION_CONFLICT")
+            if pending and pending["operation_id"] != operation_id:
+                # Never evict an unexecuted owner to admit a new request. An
+                # existing owner can still swap into the writer slot and drain.
+                if len(waiting) >= 64 and operation_id not in waiting:
+                    raise OperationBusy("Too many pending authentication operations", code="AUTHENTICATION_CAPACITY_EXCEEDED")
                 self._authenticate(cookie, session, pending)
-                session["completed"] = (session.get("completed", []) + [pending["operation_id"]])[-64:]
-                del session["request_pending"]
-                self.save(cookie, session)
+                waiting = session.setdefault("authenticated_requests", {})
+                waiting[pending["operation_id"]] = pending
                 pending = None
             if not pending:
-                pending = {"operation_id": operation_id, "request_digest": digest, "phase": "rotation_pending"}
+                pending = waiting.pop(operation_id, None) or {
+                    "operation_id": operation_id, "request_digest": digest, "phase": "rotation_pending"}
                 session["request_pending"] = pending
                 self.save(cookie, session)
+            # A saved authentication intent never caches active identity. Check
+            # confirmation and current SSO/tenant authority again for its owner.
             self._authenticate(cookie, session, pending)
             session["completed"] = (session.get("completed", []) + [operation_id])[-64:]
             del session["request_pending"]

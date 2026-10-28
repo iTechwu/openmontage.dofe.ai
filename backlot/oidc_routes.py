@@ -169,8 +169,8 @@ def install_oidc(app, *, legacy_enabled=False, sessions=None):
             if "x-dofe-operation-id" not in request.headers and request.headers.get("accept", "").find("text/html") >= 0:
                 return bridge_page(str(request.url.path) + ("?" + request.url.query if request.url.query else ""), realm.prefix)
             return JSONResponse({"error": "COOKIE_RENEWAL_REQUIRED", "operation_id": exc.operation_id, "ticket": exc.ticket}, status_code=409, headers={"Cache-Control": "no-store"})
-        except OperationBusy:
-            return JSONResponse({"error": "OPERATION_ALREADY_DISPATCHED"}, status_code=409)
+        except OperationBusy as exc:
+            return JSONResponse({"error": exc.code}, status_code=409)
         except AuthenticationExpired:
             response = JSONResponse({"error": "OPENMONTAGE_UNAUTHORIZED"}, status_code=401)
             try:
