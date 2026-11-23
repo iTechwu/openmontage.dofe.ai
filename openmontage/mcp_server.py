@@ -7,7 +7,7 @@ import os
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, StrictInt
+from pydantic import Field, StrictInt, ValidationError
 
 from openmontage.contracts import (
     ClientRequestId,
@@ -25,8 +25,10 @@ from openmontage.tool_schema import publish_flat_tool_schemas
 
 try:
     from mcp.server.mcpserver.context import Context
+    from mcp.server.mcpserver.exceptions import ToolError
 except ImportError:  # pragma: no cover - create_server reports the actionable dependency error
     Context = Any  # type: ignore[misc,assignment]
+    ToolError = RuntimeError  # type: ignore[misc,assignment]
 
 
 class StageContractError(RuntimeError):
@@ -84,11 +86,13 @@ def create_server(
     except ImportError as exc:
         raise RuntimeError("Install MCP support with: pip install 'mcp>=2,<3'") from exc
 
+    from openmontage.contracts import WorkflowConfigurationError
     from openmontage.job_service import (
         ClientStageError,
         JobConflictError,
         JobNotFoundError,
         JobStateError,
+        JobSubmissionError,
     )
 
     client_stage_errors = (
@@ -337,7 +341,19 @@ def create_server(
             output=output,
             budget=budget,
         )
-        return jobs().create_job(request, attribution).to_wire()
+        job_submission_errors = (
+            WorkflowConfigurationError,
+            JobSubmissionError,
+            JobConflictError,
+            ValidationError,
+            ValueError,
+        )
+        try:
+            return jobs().create_job(request, attribution).to_wire()
+        except job_submission_errors as exc:
+            # ToolError keeps the actionable domain message in the is_error
+            # result; any other exception is masked as a generic tool crash.
+            raise ToolError(str(exc)) from exc
 
     @server.tool()
     def get_video_job(job_id: str, ctx: Context) -> dict[str, Any]:
