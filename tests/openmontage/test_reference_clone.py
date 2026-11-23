@@ -71,8 +71,8 @@ def test_prepare_creates_agent_ready_airouter_project(monkeypatch, tmp_path):
     assert result["model_routing"] == {
         "policy": "dofe_airouter_only",
         "provider": "dofe",
-        "base_url": "https://ixicai.cn/api",
-        "catalog_endpoint": "https://ixicai.cn/api/v1/models",
+        "base_url": "https://ai.hozonauto.com/api",
+        "catalog_endpoint": "https://ai.hozonauto.com/api/v1/models",
         "direct_provider_fallback": False,
     }
     assert result["preflight"]["airouter"]["status"] == "blocked"

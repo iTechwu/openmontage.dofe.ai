@@ -3,7 +3,7 @@
   "summary": "Codex CLI has no per-call model-request identity, so DelegationSigningProxy combines the durable content fingerprint with a stable occurrence ordinal. Sequential and concurrent distinct calls receive different invocation IDs, and deterministic stage restarts replay every occurrence in order. A native Codex per-call identity would remove the remaining call-order assumption.",
   "pinned_codex_version": "0.146.0",
   "capability_present": false,
-  "probed_at": "2026-08-07",
+  "probed_at": "2026-11-23",
   "probe_method": "Behavioral probe. The probe runs the pinned codex binary non-interactively (codex exec) with a dummy credential against a loopback mock OpenAI Responses upstream that records every request, and observes the ACTUAL wire surface Codex sends on /responses: the set of request header names and request body field names. This sees the real protocol, including request-layer headers that a static struct-size check is blind to (a request-level Idempotency-Key header would never change ModelProviderInfo's element count). The probe asserts the observed surface equals this audited baseline; any new or removed name fails the probe and forces a manual audit before KB-001 can be touched. This deliberately replaces the prior struct element-count probe: element-count could not see request-layer additions, was blind to add+delete pairs, and could trip on unrelated struct changes, so its 'exact / zero-false-positive' claim did not hold. Element-count is no longer used.",
   "behavioral_probe_baseline": {
     "request_header_names": [
@@ -37,7 +37,7 @@
   "behavioral_probe_scope": "The probe compares sorted SETS of header names and body field names, excluding the per-request transport headers host and content-length. A value-only change (e.g. the version string inside user-agent on a pin bump, or a new session id value) does NOT trip the probe — only a new or removed NAME does. When a name appears, the failure message names it so the auditor can decide whether it carries per-call identity. Per-call VARIATION (an existing field gaining per-call semantics without a name change) is not machine-detectable from a name set; it is covered by the manual audit that every pin bump triggers (the strict CI job re-runs this probe against the new binary). The probe runs only under OPENMONTAGE_CODEX_PROBE_STRICT=1 (dedicated CI job that installs the pinned Codex); generic CI without Codex skips it while the manifest invariants run unconditionally.",
   "unblock_condition": "Codex model-provider config or the model request carries a value that varies per call (per-call header interpolation, or a stable per-call Idempotency-Key on the Responses request), confirmed by observing Codex's actual request surface. When the behavioral probe detects a new identity-carrying header/field, run the manual per-call-variation audit; only then remove the content_fingerprint fallback in openmontage/delegation_proxy.py and close KB-001.",
   "fallback_location": "openmontage/delegation_proxy.py content_fingerprint replay-key branch",
-  "next_review_by": "2026-11-07",
+  "next_review_by": "2027-02-20",
   "external_tracker": {
     "status": "PENDING",
     "upstream": "https://github.com/openai/codex",

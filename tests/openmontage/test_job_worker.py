@@ -593,9 +593,12 @@ def test_worker_pauses_at_approval_and_resumes_with_latest_job_snapshot(
     completed = service.get_job(job.job_id)
 
     assert completed_result is not None
-    assert completed_result.outcome == "stage_completed"
+    # Approval recovery reconciles the awaiting_human checkpoint WITHOUT
+    # re-running the executor (same reuse semantics as the client-stage
+    # driver): no duplicate paid execution after a human gate.
+    assert completed_result.outcome == "stage_reconciled"
     assert completed.stages[0].status == StageStatus.SUCCEEDED
-    assert executor.assignments[1].job_snapshot["stages"][0]["approvalStatus"] == "APPROVED"
+    assert len(executor.assignments) == 1
 
 
 def test_worker_retries_executor_error_then_completes_same_running_stage(

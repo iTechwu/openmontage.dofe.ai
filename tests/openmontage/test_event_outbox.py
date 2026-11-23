@@ -502,16 +502,19 @@ def test_publisher_from_environment_requires_a_complete_bridge_configuration(
     monkeypatch.delenv("OPENMONTAGE_EVENT_ENDPOINT", raising=False)
     monkeypatch.delenv("OPENMONTAGE_EVENT_SIGNING_SECRET", raising=False)
 
-    with pytest.raises(ValueError, match="OPENMONTAGE_EVENT_ENDPOINT"):
-        OutboxPublisher.from_environment(service)
+    # Opt-in bridge (d1620ee): OpenMontage is a pure MCP producer; without an
+    # endpoint the bridge is disabled and the control plane polls job state.
+    assert OutboxPublisher.from_environment(service) is None
 
     monkeypatch.setenv("OPENMONTAGE_EVENT_ENDPOINT", "https://agentspace.internal/events")
+    # An endpoint without a signing secret is a half-configured bridge: refuse.
     with pytest.raises(ValueError, match="OPENMONTAGE_EVENT_SIGNING_SECRET"):
         OutboxPublisher.from_environment(service)
 
     monkeypatch.setenv("OPENMONTAGE_EVENT_SIGNING_SECRET", "bridge-secret")
     publisher = OutboxPublisher.from_environment(service)
 
+    assert publisher is not None
     assert publisher.endpoint == "https://agentspace.internal/events"
 
 
