@@ -31,7 +31,7 @@ Quick routing for common animation-pipeline needs:
 |-------|----------|---------|
 | Schema | `schemas/artifacts/asset_manifest.schema.json` | Artifact validation |
 | Prior artifacts | `state.artifacts["scene_plan"]["scene_plan"]`, `state.artifacts["script"]["script"]`, `state.artifacts["proposal"]["proposal_packet"]` | Tool path and beat map |
-| Tools | `tts_selector`, `image_selector`, `video_selector`, `math_animate`, `diagram_gen`, `code_snippet`, `music_gen` — selectors auto-discover all available providers from the registry | Asset production options |
+| Tools | `tts_selector`, `image_selector`, `video_selector`, `math_animate`, `diagram_gen`, `code_snippet`, `threejs_world`, `music_gen`, `fal_elevenlabs_music` — selectors auto-discover all available providers from the registry | Asset production options |
 | Playbook | Active style playbook | Visual consistency |
 
 For a selected Seedance model, follow
@@ -51,6 +51,13 @@ Prefer the lowest-variance useful path:
 - `code_snippet` for code scenes,
 - `math_animate` for real math motion,
 - provided artwork before new generation.
+
+For a real 3D environment, read `skills/creative/3d-world-generation.md` and
+the tool's `threejs-world-generation` Layer 3 skill, then use
+`threejs_world` before any image or video generator. Build the cinematic
+workspace plus a semantic or wireframe diagnostic pass. Register the editable
+workspace as `type: "3d_world"`; snapshots belong in the assets review, while
+the final MP4 belongs to compose.
 
 ### 1b. Sample Preview (Prevents Wasted Spend)
 
@@ -86,8 +93,6 @@ When `animation_mode == "image_animation"`, each scene needs **2-3 images** for 
 5. **Composition JSON** — each scene gets `type: "anime_scene"` with `images: ["path/a.png", "path/b.png"]` plus camera motion, particle type, and lighting config.
 
 **Cost estimation:** 2-3 images per scene × $0.03-0.13/image depending on provider.
-
-**Reference:** See `projects/mori-no-seishin/generate_images.py` for the proven batch generation pattern.
 
 6. **Copy to Remotion public directory** — After generating all images, copy them to `remotion-composer/public/<project-name>/` so Remotion can access them via `staticFile()`. Image paths in the composition JSON are relative to this directory:
    ```

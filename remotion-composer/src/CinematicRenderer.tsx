@@ -1,4 +1,5 @@
 import React from "react";
+import { loadSpaceGrotesk } from "./lib/localFonts";
 import {
   AbsoluteFill,
   Audio,
@@ -14,11 +15,10 @@ import {
 import { CinematicRendererProps, CinematicTone, CinematicVideoScene } from "./cinematic/types";
 import { CaptionOverlay } from "./components/CaptionOverlay";
 import { resolveAsset } from "./lib/resolveAsset";
-import { spaceGroteskFamily } from "./localFonts";
 
 const FPS = 30;
 
-const fontFamily = spaceGroteskFamily;
+const { fontFamily } = loadSpaceGrotesk(["400", "500", "700"]);
 
 const toneGradient = (tone: CinematicTone) => {
   switch (tone) {
@@ -117,6 +117,8 @@ const SignalTexture: React.FC<{
   lineCount: number;
 }> = ({ accent, intensity, lineCount }) => {
   const frame = useCurrentFrame();
+  // The frame width, not a hardcoded 1920: odd lines sit on the right edge.
+  const { width: frameWidth } = useVideoConfig();
 
   return (
     <AbsoluteFill style={{ pointerEvents: "none" }}>
@@ -125,7 +127,7 @@ const SignalTexture: React.FC<{
         const opacity = (0.025 + pulse * 0.07) * intensity;
         const width = 18 + ((index * 37) % 56);
         const top = 140 + index * 42;
-        const left = index % 2 === 0 ? 0 : 1920 - width;
+        const left = index % 2 === 0 ? 0 : frameWidth - width;
 
         return (
           <div
@@ -382,7 +384,7 @@ const TitleCard: React.FC<{
   );
 };
 
-const Soundtrack: React.FC<{
+export const Soundtrack: React.FC<{
   src: string;
   volume: number;
   trimBeforeSeconds?: number;
@@ -460,6 +462,7 @@ export const CinematicRenderer: React.FC<CinematicRendererProps> = ({
   soundtrack,
   music,
   captions,
+  captionProps,
 }) => {
   return (
     <AbsoluteFill style={{ backgroundColor: "#000000" }}>
@@ -519,6 +522,7 @@ export const CinematicRenderer: React.FC<CinematicRendererProps> = ({
           color={captions.color ?? "#F8FAFC"}
           highlightColor={captions.highlightColor ?? "#FBBF24"}
           backgroundColor={captions.backgroundColor ?? "rgba(0, 0, 0, 0.6)"}
+          {...captionProps}
         />
       ) : null}
     </AbsoluteFill>

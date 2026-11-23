@@ -23,7 +23,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from .base import Candidate, SearchFilters
+from .base import Candidate, SearchFilters, stable_url_id
 
 _log = logging.getLogger(__name__)
 
@@ -103,7 +103,7 @@ class NOAASource:
                 out.append(
                     Candidate(
                         source=self.name,
-                        source_id=f"noaa_{hash(href) & 0xFFFFFFFF:08x}",
+                        source_id=stable_url_id(href),
                         source_url=href,
                         download_url=href,  # Resolved in download()
                         kind="video",
@@ -119,7 +119,10 @@ class NOAASource:
                 )
 
         except Exception as e:
+            # Contract: an empty list means "nothing matched", so a
+            # transport failure has to propagate. See `base.StockSource`.
             _log.warning("NOAA search failed: %s", e)
+            raise
 
         return out
 

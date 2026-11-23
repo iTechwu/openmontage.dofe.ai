@@ -9,6 +9,7 @@ import {
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
+import { loadSpaceGrotesk } from "./lib/localFonts";
 import { TextCard } from "./components/TextCard";
 import { StatCard } from "./components/StatCard";
 import { CalloutBox } from "./components/CalloutBox";
@@ -18,7 +19,7 @@ import { LineChart } from "./components/charts/LineChart";
 import { PieChart } from "./components/charts/PieChart";
 import { KPIGrid } from "./components/charts/KPIGrid";
 import { ProgressBar } from "./components/ProgressBar";
-import { CaptionOverlay, WordCaption } from "./components/CaptionOverlay";
+import { CaptionOverlay, CaptionProps, WordCaption } from "./components/CaptionOverlay";
 import { SectionTitle } from "./components/SectionTitle";
 import { StatReveal } from "./components/StatReveal";
 import { HeroTitle } from "./components/HeroTitle";
@@ -32,9 +33,9 @@ import { ProviderChip } from "./components/ProviderChip";
 import { resolveAsset } from "./lib/resolveAsset";
 import type { ParticleType } from "./components/ParticleOverlay";
 import { resolveTheme, type ThemeConfig, DEFAULT_THEME } from "./Root";
-import { spaceGroteskFamily } from "./localFonts";
 
-const fontFamily = spaceGroteskFamily;
+// Load Space Grotesk font for cinematic typography
+const { fontFamily } = loadSpaceGrotesk(["400", "700"]);
 
 // ---------------------------------------------------------------------------
 // Animated Background — Gradient Mesh + Floating Orbs
@@ -53,6 +54,19 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } {
 function isLightColor(hex: string): boolean {
   const { r, g, b } = hexToRgb(hex);
   return (r * 299 + g * 587 + b * 114) / 1000 > 128;
+}
+
+// Scrim painted behind a hero title. It has to wash *away* from the theme's
+// text color: a dark scrim under a light theme's dark text drops the pair to
+// ~3.4:1, which is the same legibility bug in reverse.
+function heroScrim(theme: ThemeConfig): string {
+  const { r, g, b } = hexToRgb(
+    isLightColor(theme.backgroundColor) ? "#FFFFFF" : "#0F172A"
+  );
+  return (
+    `radial-gradient(ellipse at center, rgba(${r},${g},${b},0.35) 0%, ` +
+    `rgba(${r},${g},${b},0.55) 100%)`
+  );
 }
 
 // Darken/lighten a color by mixing toward black or white
@@ -216,6 +230,7 @@ interface Cut {
   heroSubtitle?: string;
   // Styling overrides
   backgroundColor?: string;
+  cardBackgroundColor?: string; // Inner card surface (comparison, kpi_grid); defaults to theme.surfaceColor
   backgroundImage?: string; // AI-generated or stock image rendered behind the component
   backgroundVideo?: string; // Video clip rendered behind the component (takes priority over backgroundImage)
   backgroundVideoStart?: number; // Seek position in seconds for background video (default 0)
@@ -223,6 +238,7 @@ interface Cut {
   color?: string;
   accentColor?: string;
   fontSize?: number;
+  titleFontSize?: number;
   // Animation & transitions
   animation?: string;
   transition_in?: string;
@@ -289,6 +305,13 @@ export interface ExplainerProps {
   cuts: Cut[];
   overlays?: Overlay[];
   captions?: WordCaption[];
+  // Optional caption layout overrides (e.g. bigger, fewer words, raised for 9:16 shorts)
+  captionStyle?: {
+    wordsPerPage?: number;
+    fontSize?: number;
+    bottomOffset?: number;
+  };
+  captionProps?: CaptionProps; // extra CaptionOverlay props, applied last
   audio?: AudioConfig;
 }
 
@@ -589,6 +612,7 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
         text={cut.text} type={cut.callout_type} title={cut.title}
         borderColor={accent} backgroundColor={cut.backgroundColor || theme.surfaceColor}
         textColor={textColor} containerBackgroundColor={bgColor}
+        fontSize={cut.fontSize} titleFontSize={cut.titleFontSize}
       />
     );
   }
@@ -598,12 +622,20 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
         leftLabel={cut.leftLabel} rightLabel={cut.rightLabel}
         leftValue={cut.leftValue} rightValue={cut.rightValue}
         title={cut.title} backgroundColor={bgColor} textColor={textColor}
+        cardBackgroundColor={cut.cardBackgroundColor || theme.surfaceColor}
       />
     );
   }
   if (cut.type === "hero_title" && cut.text) {
     return maybeWrapWithBg(
-      <HeroTitle title={cut.text} subtitle={cut.heroSubtitle || cut.subtitle} />
+      <HeroTitle
+        title={cut.text}
+        subtitle={cut.heroSubtitle || cut.subtitle}
+        accentColor={accent}
+        textColor={textColor}
+        subtitleColor={theme.mutedTextColor}
+        scrimBackground={heroScrim(theme)}
+      />
     );
   }
   if (cut.type === "terminal_scene" && cut.steps) {
@@ -636,6 +668,7 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
         data={cut.chartData} title={cut.title} colors={cut.chartColors || theme.chartColors}
         animationStyle={(cut.chartAnimation as any) || "grow-up"}
         showGrid={cut.showGrid} showValues={cut.showValues} backgroundColor={bgColor}
+        textColor={textColor}
       />
     );
   }
@@ -646,6 +679,7 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
         animationStyle={(cut.chartAnimation as any) || "draw"}
         showGrid={cut.showGrid} showMarkers={cut.showMarkers} showLegend={cut.showLegend}
         xLabel={cut.xLabel} yLabel={cut.yLabel} backgroundColor={bgColor}
+        textColor={textColor}
       />
     );
   }
@@ -656,6 +690,7 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
         animationStyle={(cut.chartAnimation as any) || "expand"}
         donut={cut.donut} centerLabel={cut.centerLabel} centerValue={cut.centerValue}
         showLegend={cut.showLegend} backgroundColor={bgColor}
+        textColor={textColor}
       />
     );
   }
@@ -665,6 +700,8 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
         metrics={cut.chartData} title={cut.title} columns={cut.columns}
         colors={cut.chartColors || theme.chartColors} animationStyle={(cut.chartAnimation as any) || "count-up"}
         backgroundColor={bgColor}
+        cardBackgroundColor={cut.cardBackgroundColor || theme.surfaceColor}
+        textColor={textColor}
       />
     );
   }
@@ -681,6 +718,9 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
           <div style={{
             position: "absolute", top: 120, fontSize: 48, fontWeight: 700,
             color: textColor, textAlign: "center", width: "100%",
+            // ProgressBar renders an opaque full-frame AbsoluteFill after this
+            // node, so the title needs to be lifted above it to stay visible.
+            zIndex: 1,
           }}>
             {cut.title}
           </div>
@@ -748,13 +788,17 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
 // Overlay renderer
 // ---------------------------------------------------------------------------
 
-const OverlayRenderer: React.FC<{ overlay: Overlay }> = ({ overlay }) => {
+const OverlayRenderer: React.FC<{ overlay: Overlay; theme: ThemeConfig }> = ({
+  overlay,
+  theme,
+}) => {
   if (overlay.type === "section_title") {
     return (
       <SectionTitle
         title={overlay.text ?? ""}
         subtitle={overlay.subtitle}
-        accentColor={overlay.accentColor}
+        accentColor={overlay.accentColor || theme.accentColor}
+        textColor={theme.textColor}
         position={(overlay.position as any) || "top-left"}
       />
     );
@@ -764,13 +808,23 @@ const OverlayRenderer: React.FC<{ overlay: Overlay }> = ({ overlay }) => {
       <StatReveal
         stat={overlay.text ?? ""}
         label={overlay.subtitle}
-        accentColor={overlay.accentColor}
+        accentColor={overlay.accentColor || theme.accentColor}
+        textColor={theme.textColor}
         position={(overlay.position as any) || "bottom-right"}
       />
     );
   }
   if (overlay.type === "hero_title") {
-    return <HeroTitle title={overlay.text ?? ""} subtitle={overlay.subtitle} />;
+    return (
+      <HeroTitle
+        title={overlay.text ?? ""}
+        subtitle={overlay.subtitle}
+        accentColor={overlay.accentColor || theme.accentColor}
+        textColor={theme.textColor}
+        subtitleColor={theme.mutedTextColor}
+        scrimBackground={heroScrim(theme)}
+      />
+    );
   }
   if (overlay.type === "provider_chip" && overlay.providers) {
     return (
@@ -823,7 +877,7 @@ export const Explainer: React.FC<ExplainerProps> = (props) => {
 
         return (
           <Sequence key={`overlay-${i}`} from={from} durationInFrames={duration}>
-            <OverlayRenderer overlay={overlay} />
+            <OverlayRenderer overlay={overlay} theme={theme} />
           </Sequence>
         );
       })}
@@ -832,10 +886,13 @@ export const Explainer: React.FC<ExplainerProps> = (props) => {
       {captions && captions.length > 0 && (
         <CaptionOverlay
           words={captions}
-          wordsPerPage={6}
-          fontSize={42}
+          wordsPerPage={props.captionStyle?.wordsPerPage ?? 6}
+          fontSize={props.captionStyle?.fontSize ?? 42}
+          bottomOffset={props.captionStyle?.bottomOffset ?? 80}
+          color={theme.textColor}
           highlightColor={theme.captionHighlightColor}
           backgroundColor={theme.captionBackgroundColor}
+          {...props.captionProps}
         />
       )}
 

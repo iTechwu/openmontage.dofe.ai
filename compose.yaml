@@ -104,6 +104,9 @@ services:
       OPENMONTAGE_BACKLOT_BASE_PATH: ${OPENMONTAGE_BACKLOT_BASE_PATH-/montage}
       OPENMONTAGE_BACKLOT_AUTH_URL: ${OPENMONTAGE_BACKLOT_AUTH_URL:-https://ai.hozonauto.com/api/internal/mcp/auth-context}
       OPENMONTAGE_BACKLOT_SECURE_COOKIE: "true"
+      # TrustedHostMiddleware allowlist; unset falls back to loopback-only.
+      # The reverse proxy must forward a Host this list accepts.
+      OPENMONTAGE_BACKLOT_ALLOWED_HOSTS: ${OPENMONTAGE_BACKLOT_ALLOWED_HOSTS:-montage.hozonauto.com}
       OPENMONTAGE_OIDC_ENABLED: ${OPENMONTAGE_OIDC_ENABLED:-false}
       OPENMONTAGE_LEGACY_EMBED_ENABLED: ${OPENMONTAGE_LEGACY_EMBED_ENABLED:-false}
       OPENMONTAGE_OIDC_SESSION_DB: /srv/openmontage-auth/sessions.db

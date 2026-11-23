@@ -97,7 +97,11 @@ function renderSlate(s) {
   return el("header", { class: "slate" },
     el("div", { class: "clapper" }),
     el("div", {},
-      el("a", { class: "wordmark", href: appURL("/"), style: "text-decoration:none" }, "Backlot"),
+      el("a", {
+        class: "wordmark", style: "text-decoration:none",
+        href: s.series ? `${appURL("/")}?${new URLSearchParams({ series: s.series })}` : appURL("/"),
+        title: s.series ? `返回系列 ${s.series}` : "返回项目库",
+      }, s.series ? `Backlot / ${s.series}` : "Backlot"),
       el("h1", {}, s.title),
     ),
     ...chips,

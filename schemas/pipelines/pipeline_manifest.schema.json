@@ -40,7 +40,7 @@
     },
     "production_modes": {
       "type": "array",
-      "description": "Alternative production paths supported by a pipeline.",
+      "description": "Mutually exclusive ways this pipeline can be produced. The agent picks one at the idea stage and records it in the brief; the stage director skill reads it to constrain later choices (see skills/pipelines/screen-demo/idea-director.md).",
       "items": {
         "type": "object",
         "required": ["name", "description", "required_tools", "best_for"],
@@ -52,11 +52,30 @@
             "pattern": "^[a-z][a-z0-9_]*$"
           },
           "description": { "type": "string", "minLength": 1 },
-          "required_tools": { "type": "array", "items": { "type": "string" } },
-          "optional_tools": { "type": "array", "items": { "type": "string" } },
-          "scene_type": { "type": "string", "minLength": 1 },
-          "agent_skills": { "type": "array", "items": { "type": "string" } },
-          "best_for": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+          "required_tools": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Tools that must be available for this mode to be viable"
+          },
+          "optional_tools": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "scene_type": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Remotion cut.type this mode composes, when it synthesizes rather than captures"
+          },
+          "agent_skills": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Layer 3 skills to read before producing in this mode"
+          },
+          "best_for": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1
+          }
         },
         "additionalProperties": false
       },

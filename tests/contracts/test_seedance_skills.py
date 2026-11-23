@@ -157,7 +157,7 @@ def test_seedance_provider_tools_load_full_production_skill_chain(tool_class):
 @pytest.mark.parametrize("tool_class", [RunwayVideo, HiggsFieldVideo])
 def test_multi_model_gateways_only_expose_seedance_skills_for_seedance(tool_class):
     tool = tool_class()
-    assert tool.agent_skills_for({"model": "seedance_2.0"})[:5] == list(SKILL_NAMES)
+    assert tool.agent_skills_for({"model": "seedance2"})[:5] == list(SKILL_NAMES)
     assert tool.agent_skills_for({"model": "kling_3.0"}) == ["ai-video-gen"]
 
 
@@ -176,7 +176,7 @@ def test_dofe_gateway_selects_skills_from_model_alias(monkeypatch):
 def test_selector_exposes_input_aware_skills_in_execution_context():
     tool = RunwayVideo()
     native_inputs = VideoSelector._adapt_inputs_for_tool(tool, {"model_name": "gen4_turbo"})
-    seedance_inputs = VideoSelector._adapt_inputs_for_tool(tool, {"model": "seedance_2.0"})
+    seedance_inputs = VideoSelector._adapt_inputs_for_tool(tool, {"model": "seedance2"})
     native = VideoSelector._tool_context_payload(tool, native_inputs)
     seedance = VideoSelector._tool_context_payload(tool, seedance_inputs)
 
@@ -247,12 +247,15 @@ def test_selector_passes_local_first_frame_through_seedance_contract(
 
 def test_selector_filters_providers_that_contradict_explicit_aspect_ratio():
     selector = VideoSelector()
+    # Upstream Runway now also ships 21:9, so 4:3 (Runway yes, Higgsfield
+    # no) is the discriminating ratio: the provider whose enum contradicts
+    # the explicit aspect_ratio must be filtered out.
     candidates = selector._filter_candidates(
-        {"operation": "text_to_video", "aspect_ratio": "21:9"},
+        {"operation": "text_to_video", "aspect_ratio": "4:3"},
         [RunwayVideo(), HiggsFieldVideo()],
     )
 
-    assert [tool.name for tool in candidates] == ["higgsfield_video"]
+    assert [tool.name for tool in candidates] == ["runway_video"]
 
 
 def test_selector_filters_providers_that_contradict_explicit_model():
@@ -271,7 +274,7 @@ def test_provider_preflight_distinguishes_declared_contract_from_live_verificati
         {
             "prompt": "A car enters frame.",
             "operation": "text_to_video",
-            "model": "seedance_2.0",
+            "model": "seedance2",
             "duration": 5,
             "ratio": "16:9",
         },
@@ -289,7 +292,7 @@ def test_provider_preflight_blocks_undeclared_prompt_token_syntax(monkeypatch):
         {
             "prompt": "Use the vehicle reference.",
             "operation": "image_to_video",
-            "model": "seedance_2.0",
+            "model": "seedance2",
             "duration": 5,
             "ratio": "16:9",
             "image_url": "https://example.com/car.png",
@@ -313,7 +316,7 @@ def test_runtime_provider_preflight_matches_asset_contract(monkeypatch):
         {
             "prompt": "A car enters frame.",
             "operation": "text_to_video",
-            "model": "seedance_2.0",
+            "model": "seedance2",
             "duration": 5,
             "ratio": "16:9",
             "execution_scope": "sample",
@@ -346,7 +349,7 @@ def test_selector_preflight_resolves_provider_without_generation(monkeypatch):
             "prompt": "A car enters frame.",
             "operation": "preflight",
             "target_operation": "image_to_video",
-            "model": "seedance_2.0",
+            "model": "seedance2",
             "duration": "5",
             "aspect_ratio": "16:9",
             "reference_image_url": "https://example.com/car.png",
@@ -384,7 +387,7 @@ def test_selector_blocks_unverified_batch_before_provider_execution(monkeypatch)
         {
             "prompt": "A car enters frame.",
             "operation": "text_to_video",
-            "model": "seedance_2.0",
+            "model": "seedance2",
             "duration": "5",
             "aspect_ratio": "16:9",
             "execution_scope": "batch",

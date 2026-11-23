@@ -10,11 +10,11 @@ import {
   useVideoConfig,
 } from "remotion";
 import React from "react";
+import { loadPlayfair } from "./lib/localFonts";
 import { resolveAsset } from "./lib/resolveAsset";
-import { playfairDisplayFamily } from "./localFonts";
 
-const playfairFamily = playfairDisplayFamily;
-const playfairItalic = playfairDisplayFamily;
+const { fontFamily: playfairFamily } = loadPlayfair("normal", ["400", "700"]);
+const { fontFamily: playfairItalic } = loadPlayfair("italic", ["400", "700"]);
 
 export type CollageTransition =
   | "pop"

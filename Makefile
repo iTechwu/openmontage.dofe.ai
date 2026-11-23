@@ -2,12 +2,15 @@ PYTHON_VERSION ?= 3.10
 VENV_DIR ?= .venv
 BASE_PYTHON ?= $(shell command -v python$(PYTHON_VERSION) 2>/dev/null || command -v python3 2>/dev/null || command -v python 2>/dev/null)
 IMAGE_REVISION ?= $(shell git rev-parse --verify HEAD 2>/dev/null || printf unknown)
+# RUN_PYTHON is quoted at every use below: the checkout path may contain
+# spaces, and unquoted it word-splits in sh, which makes ensure-venv
+# misreport a perfectly good interpreter as a missing one.
 RUN_PYTHON = $(shell for dir in "$$VIRTUAL_ENV" "$$CONDA_PREFIX" "$(VENV_DIR)"; do if [ -n "$$dir" ] && [ -x "$$dir/bin/python" ]; then printf "%s/bin/python" "$$dir"; exit 0; elif [ -n "$$dir" ] && [ -x "$$dir/Scripts/python.exe" ]; then printf "%s/Scripts/python.exe" "$$dir"; exit 0; fi; done; if [ "$(OS)" = "Windows_NT" ]; then printf "%s/Scripts/python.exe" "$(VENV_DIR)"; else printf "%s/bin/python" "$(VENV_DIR)"; fi)
-PIP = $(RUN_PYTHON) -m pip
+PIP = "$(RUN_PYTHON)" -m pip
 
 .DEFAULT_GOAL := setup
 
-.PHONY: setup install install-dev install-gpu install-runtimes runtimes-doctor test test-contracts lint clean preflight demo demo-list hyperframes-doctor hyperframes-warm venv ensure-venv docker-build docker-up docker-down
+.PHONY: setup install install-dev install-gpu install-runtimes runtimes-doctor bootstrap test test-contracts lint clean preflight demo demo-list hyperframes-doctor hyperframes-warm venv ensure-venv docker-build docker-up docker-down
 
 # ---- Virtual environment ----
 
@@ -37,13 +40,13 @@ ensure-venv:
 			exit 1; \
 		}; \
 	fi
-	@$(RUN_PYTHON) -c "import sys; required=tuple(map(int, '$(PYTHON_VERSION)'.split('.')[:2])); raise SystemExit(0 if sys.version_info[:2] >= required else 1)" || { \
+	@"$(RUN_PYTHON)" -c "import sys; required=tuple(map(int, '$(PYTHON_VERSION)'.split('.')[:2])); raise SystemExit(0 if sys.version_info[:2] >= required else 1)" || { \
 		echo "ERROR: OpenMontage requires Python $(PYTHON_VERSION)+."; \
-		echo "Current interpreter is $$($(RUN_PYTHON) -c 'import sys; print(\".\".join(map(str, sys.version_info[:3])))' 2>/dev/null || echo unavailable): $(RUN_PYTHON)"; \
+		echo "Current interpreter is $$("$(RUN_PYTHON)" -c 'import sys; print(\".\".join(map(str, sys.version_info[:3])))' 2>/dev/null || echo unavailable): $(RUN_PYTHON)"; \
 		echo "Activate a compatible environment or remove it so make can create $(VENV_DIR)."; \
 		exit 1; \
 	}
-	@$(RUN_PYTHON) -m pip --version >/dev/null 2>&1 || $(RUN_PYTHON) -m ensurepip --upgrade >/dev/null
+	@"$(RUN_PYTHON)" -m pip --version >/dev/null 2>&1 || "$(RUN_PYTHON)" -m ensurepip --upgrade >/dev/null
 
 venv: ensure-venv
 	@echo "==> Virtual environment ready."
@@ -52,7 +55,12 @@ venv: ensure-venv
 
 # ---- One-command setup ----
 
-setup: ensure-venv
+# pip bundles its own certifi; upgrading the application dependency is not enough.
+# Keep this out of ensure-venv so test/demo commands do not install packages.
+bootstrap: ensure-venv
+	$(PIP) install 'pip>=26.2.2'
+
+setup: bootstrap
 	@echo "==> Installing Python dependencies..."
 	$(PIP) install -r requirements.txt
 	@echo ""
@@ -61,7 +69,7 @@ setup: ensure-venv
 	@echo "==> Installing free offline TTS (Piper)..."
 	$(PIP) install piper-tts || echo "  [skip] piper-tts install failed — TTS will use cloud providers instead"
 	@echo ""
-	$(RUN_PYTHON) -c "import shutil, os; e=os.path.exists('.env'); shutil.copy('.env.example','.env') if not e else None; print('==> Created .env from .env.example — add your API keys there.' if not e else '==> .env already exists — skipping.')"
+	"$(RUN_PYTHON)" -c "import shutil, os; e=os.path.exists('.env'); shutil.copy('.env.example','.env') if not e else None; print('==> Created .env from .env.example — add your API keys there.' if not e else '==> .env already exists — skipping.')"
 	@echo ""
 	@echo "Done! Open this project in your AI coding assistant and start creating."
 	@echo "  Optional: add API keys to .env to unlock cloud providers."
@@ -70,13 +78,13 @@ setup: ensure-venv
 
 # ---- Individual installs ----
 
-install: ensure-venv
+install: bootstrap
 	$(PIP) install -r requirements.txt
 
-install-dev: ensure-venv
+install-dev: bootstrap
 	$(PIP) install -r requirements-dev.txt
 
-install-gpu: ensure-venv
+install-gpu: bootstrap
 	$(PIP) install -r requirements-gpu.txt
 	$(PIP) install diffusers transformers accelerate
 
@@ -94,25 +102,25 @@ install-runtimes:
 # ---- Testing ----
 
 test: ensure-venv
-	$(RUN_PYTHON) -m pytest tests/ -v
+	"$(RUN_PYTHON)" -m pytest tests/ -v
 
 test-contracts: ensure-venv
-	$(RUN_PYTHON) -m pytest tests/contracts/ -v
+	"$(RUN_PYTHON)" -m pytest tests/contracts/ -v
 
 # ---- Utilities ----
 
 preflight: ensure-venv
-	$(RUN_PYTHON) -c "from tools.tool_registry import registry; import json; registry.discover(); print(json.dumps(registry.provider_menu(), indent=2))"
+	"$(RUN_PYTHON)" -c "from tools.tool_registry import registry; import json; registry.discover(); print(json.dumps(registry.provider_menu(), indent=2))"
 
 hyperframes-doctor: ensure-venv
-	@echo "==> Probing project-local HyperFrames runtime..."
-	$(RUN_PYTHON) -c "from tools.video.hyperframes_compose import HyperFramesCompose; import json, sys; r=HyperFramesCompose().execute({'operation':'doctor'}); print(json.dumps(r.data, indent=2)); print('OK' if r.success else f'FAIL: {r.error}'); sys.exit(0 if r.success else 1)"
+	@echo "==> Probing HyperFrames runtime (node/ffmpeg/npx + hyperframes doctor)..."
+	"$(RUN_PYTHON)" -c "from tools.video.hyperframes_compose import HyperFramesCompose; r=HyperFramesCompose().execute({'operation':'doctor'}); import json; print(json.dumps(r.data, indent=2)); print('OK' if r.success else f'FAIL: {r.error}')"
 
 runtimes-doctor: ensure-venv
 	@echo "==> Verifying Remotion package versions..."
 	cd remotion-composer && npm run runtime:remotion
 	@$(MAKE) --no-print-directory hyperframes-doctor
-	@$(RUN_PYTHON) -c "from tools.video.video_compose import VideoCompose; e=VideoCompose().get_info()['render_engines']; missing=[name for name in ('remotion','hyperframes') if not e.get(name)]; print(f'==> OpenMontage composition runtimes: {e}'); raise SystemExit(f'Unavailable runtimes: {missing}' if missing else 0)"
+	@"$(RUN_PYTHON)" -c "from tools.video.video_compose import VideoCompose; e=VideoCompose().get_info()['render_engines']; missing=[name for name in ('remotion','hyperframes') if not e.get(name)]; print(f'==> OpenMontage composition runtimes: {e}'); raise SystemExit(f'Unavailable runtimes: {missing}' if missing else 0)"
 
 # Backwards-compatible alias. Runtime installation is now lockfile-based.
 hyperframes-warm: install-runtimes
@@ -122,16 +130,16 @@ demo: ensure-venv
 	@echo "==> Rendering zero-key demo videos (no API keys needed)..."
 	@echo "    These use only Remotion components — animated charts, text, data viz."
 	@echo ""
-	$(RUN_PYTHON) render_demo.py
+	"$(RUN_PYTHON)" render_demo.py
 
 demo-list: ensure-venv
-	$(RUN_PYTHON) render_demo.py --list
+	"$(RUN_PYTHON)" render_demo.py --list
 
 lint: ensure-venv
-	$(RUN_PYTHON) -m py_compile tools/base_tool.py
-	$(RUN_PYTHON) -m py_compile tools/tool_registry.py
-	$(RUN_PYTHON) -m py_compile tools/cost_tracker.py
-	$(RUN_PYTHON) -m py_compile tools/analysis/composition_validator.py
+	"$(RUN_PYTHON)" -m py_compile tools/base_tool.py
+	"$(RUN_PYTHON)" -m py_compile tools/tool_registry.py
+	"$(RUN_PYTHON)" -m py_compile tools/cost_tracker.py
+	"$(RUN_PYTHON)" -m py_compile tools/analysis/composition_validator.py
 
 clean:
 	$(BASE_PYTHON) -c "import pathlib, shutil; excluded=[pathlib.Path('$(VENV_DIR)'), pathlib.Path('venv')]; skip=lambda p: any(p == root or root in p.parents for root in excluded); roots=[p for p in pathlib.Path('.').rglob('__pycache__') if not skip(p)]; [shutil.rmtree(p) for p in roots]; files=[p for p in pathlib.Path('.').rglob('*.pyc') if not skip(p)]; [p.unlink() for p in files]"

@@ -38,7 +38,7 @@ def client(projects_root, monkeypatch):
         return None
 
     monkeypatch.setattr(server_mod, "_watch_projects", no_watch)
-    with TestClient(server_mod.create_app()) as c:
+    with TestClient(server_mod.create_app(), base_url="http://127.0.0.1:4750") as c:
         yield c
 
 
@@ -102,7 +102,7 @@ class TestBacklotServerApi:
         monkeypatch.setattr(server_mod, "_watch_projects", no_watch)
         monkeypatch.setenv("OPENMONTAGE_BACKLOT_BASE_PATH", "/montage/")
 
-        with TestClient(server_mod.create_app()) as prefixed_client:
+        with TestClient(server_mod.create_app(), base_url="http://127.0.0.1:4750") as prefixed_client:
             library = prefixed_client.get("/")
             board = prefixed_client.get("/p/film")
 
@@ -134,7 +134,7 @@ class TestBacklotServerApi:
             lambda api_key, auth_url: "tenant-a" if api_key == "valid-key" else None,
         )
 
-        with TestClient(server_mod.create_app(), follow_redirects=False) as auth_client:
+        with TestClient(server_mod.create_app(), follow_redirects=False, base_url="http://127.0.0.1:4750") as auth_client:
             page = auth_client.get("/")
             api = auth_client.get("/api/projects")
             rejected = auth_client.post("/auth/session", json={"apiKey": "bad-key"})
@@ -220,6 +220,57 @@ class TestBacklotServerApi:
         assert passthrough.content == b"hello"
 
 
+class TestBacklotHostValidation:
+    @pytest.mark.parametrize(
+        "host",
+        ["127.0.0.1", "127.0.0.1:4750", "127.0.0.1:8080", "localhost", "localhost:4750"],
+    )
+    def test_accepts_local_hosts(self, client, host):
+        response = client.get("/api/health", headers={"Host": host})
+        assert response.status_code == 200
+        assert response.json() == {"ok": True, "app": "backlot"}
+
+    @pytest.mark.parametrize(
+        "host",
+        ["attacker.example", "attacker.example:4750", "127.0.0.1.attacker.example", "evil.localhost"],
+    )
+    def test_rejects_foreign_hosts(self, client, host):
+        response = client.get("/api/health", headers={"Host": host})
+        assert response.status_code == 400
+        assert response.text == "Invalid host header"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "/",
+            "/p/film",
+            "/ui/board.js",
+            "/api/projects",
+            "/api/project/film/state",
+            "/api/project/film/events",
+            "/api/library/events",
+            "/media/film/artifacts/note.txt",
+            "/thumb/film/assets/images/sc1.png",
+        ],
+    )
+    def test_rejects_foreign_host_across_routes(self, client, projects_root, url):
+        project = _make_project(projects_root, "film")
+        (project / "artifacts" / "note.txt").write_text("private", encoding="utf-8")
+        _write_png(project / "assets" / "images" / "sc1.png")
+
+        response = client.get(url, headers={"Host": "attacker.example:4750"})
+
+        assert response.status_code == 400
+        assert response.text == "Invalid host header"
+
+    def test_forwarded_host_does_not_bypass_validation(self, client):
+        response = client.get(
+            "/api/health",
+            headers={"Host": "attacker.example", "X-Forwarded-Host": "localhost"},
+        )
+        assert response.status_code == 400
+
+
 class TestBacklotPerformanceBudgets:
     def test_projects_and_state_stay_within_loose_budgets(self, client, projects_root):
         for i in range(25):
@@ -299,7 +350,7 @@ class TestBacklotWorkspaceIsolation:
             "_validate_models_api_key",
             lambda api_key, auth_url: api_key.removeprefix("key-for-") or None,
         )
-        with TestClient(server_mod.create_app(), follow_redirects=False) as instance:
+        with TestClient(server_mod.create_app(), follow_redirects=False, base_url="http://127.0.0.1:4750") as instance:
             yield instance
 
     def _session(self, client, tenant):

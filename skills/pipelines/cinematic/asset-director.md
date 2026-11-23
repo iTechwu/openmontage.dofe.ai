@@ -52,6 +52,20 @@ Video generation MUST go through the DoFe Models gateway (`dofe_video` / `https:
 - If video_selector ever selects an external provider, force preferred_provider=dofe_video (or a dofe provider) and re-run.
 ## Process
 
+### Explicit 3D-world path
+
+When the approved delivery promise is a continuous, free-viewpoint 3D world,
+`threejs_world` satisfies semantic planning and browser-native motion: it creates
+a real scene graph and time-driven camera, not a still-image fallback. Read
+`skills/creative/3d-world-generation.md` and `.agents/skills/threejs-world-generation/SKILL.md`,
+build into `projects/<id>/hyperframes/`, and review global, regional, walk,
+semantic, and wireframe views before the assets gate. Keep
+`render_runtime="hyperframes"` and `composition_mode="atelier"` locked for a
+browser-native deliverable. For reference-grade video, lock Blender as the 3D
+renderer and `render_runtime="ffmpeg"` solely as the image-sequence/audio packager.
+
+For hero/reference-driven work, `quality_tier="production"` is mandatory. Install licensed catalogs with `threejs_asset_catalog`, generate unique meshes with Atlas/fal when useful, assemble and render in Blender, and reject the asset gate if dominant primitives, flat untextured ground, low regional object density, or obvious repetition remain. `blockout` exists only for layout/camera approval.
+
 ### 1. Prioritize Source Selects
 
 Start with:

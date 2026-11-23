@@ -1,3 +1,5 @@
+[English](README.md) | [Português (Brasil)](README_pt-BR.md) | [Español](README_es.md) | **简体中文**
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/monty-dark.svg">
@@ -33,6 +35,7 @@
 
 <p align="center">
   <a href="https://www.youtube.com/@OpenMontage"><img src="https://img.shields.io/badge/YouTube-%40OpenMontage-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube"></a>
+  <a href="https://www.instagram.com/openmontageinc/"><img src="https://img.shields.io/badge/Instagram-%40openmontageinc-E4405F?style=for-the-badge&logo=instagram&logoColor=white" alt="Instagram @openmontageinc"></a>
   <a href="https://x.com/calesthioailabs"><img src="https://img.shields.io/badge/X-%40calesthioailabs-111111?style=for-the-badge&logo=x&logoColor=white" alt="X"></a>
   <a href="https://github.com/calesthio/OpenMontage/discussions"><img src="https://img.shields.io/badge/Community-GitHub%20Discussions-0b1220?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Discussions"></a>
 </p>
@@ -116,7 +119,7 @@ OpenMontage 可以从 **YouTube 视频、Short、Reel、TikTok 或本地片段**
 
 - **Python 3.10+** — [python.org](https://www.python.org/downloads/)
 - **FFmpeg** — `brew install ffmpeg` / `sudo apt install ffmpeg` / [ffmpeg.org](https://ffmpeg.org/download.html)
-- **Node.js 18+** — [nodejs.org](https://nodejs.org/)
+- **Node.js** — 使用已修复的 22.x（22.23.4+）、24.x（24.22.1+）或 26.x（26.12.1+）版本；`.node-version` 选择 22.23.4 — [nodejs.org](https://nodejs.org/)
 - **一款 AI 编程助手** — Claude Code、Cursor、Copilot、Windsurf 或 Codex
 
 ### 安装与运行
@@ -141,11 +144,13 @@ make setup
 
 就是这么简单。智能体会通过实时网络搜索研究您的主题，生成 AI 图像，撰写并配音带有语音指导的脚本，自动寻找免版税的背景音乐，烧录词级字幕，并渲染最终视频。在您看到任何内容之前，系统会运行多点自我审查——ffprobe 验证、帧采样、音频电平分析、交付承诺验证以及字幕检查。每一个提供商的选择都会在 7 个维度上进行评分，并附有可审计的决策日志。每一个创意决定都需要您的批准。
 
-> **没有 `make`？** macOS/Linux：`python3 -m venv .venv && source .venv/bin/activate && python -m pip install -r requirements.txt && cd remotion-composer && npm install && cd .. && python -m pip install piper-tts && cp .env.example .env`
+> **没有 `make`？** macOS/Linux：`python3 -m venv .venv && source .venv/bin/activate && python -m pip install 'pip>=26.2.2' && python -m pip install -r requirements.txt && cd remotion-composer && npm install && cd .. && python -m pip install piper-tts && cp .env.example .env`
 >
-> Windows PowerShell：`py -3 -m venv .venv; .\.venv\Scripts\Activate.ps1; python -m pip install -r requirements.txt; cd remotion-composer; npm install; cd ..; python -m pip install piper-tts; Copy-Item .env.example .env`
+> Windows PowerShell：`py -3 -m venv .venv; .\.venv\Scripts\Activate.ps1; python -m pip install 'pip>=26.2.2'; python -m pip install -r requirements.txt; cd remotion-composer; npm install; cd ..; python -m pip install piper-tts; Copy-Item .env.example .env`
 >
 > **Windows:** 如果 `npm install` 报错 `ERR_INVALID_ARG_TYPE`，请改用 `npx --yes npm install`。
+
+已有环境：激活项目虚拟环境，运行 `python -m pip install --upgrade 'pip>=26.2.2' 'certifi>=2026.10.19'`，然后重启长期运行的 Python 进程。这些版本针对 [eMudhra 中间 CA 私钥泄露](https://emudhra.we-have-a-problem.com/) 更新了应用 CA 包以及 pip 单独内置的 CA 包。操作系统的证书库也需要更新，因为 pip 可能使用系统证书；自定义 CA 包需单独维护。后续运行 `make install` 或 `make install-dev` 会保证 Python 包达到最低修复版本。
 
 ### 如果你是正在阅读本文的 OpenClaw 智能体，恭喜你：你可能通过了图灵测试
 
@@ -203,6 +208,7 @@ XAI_API_KEY=your-key           # xAI Grok 图像编辑/生成 + Grok 视频生�
 GOOGLE_API_KEY=your-key        # Google Imagen 图像、Google TTS（700+ 种声音）
 
 # 更多视频提供商:
+ARK_API_KEY=your-key           # 火山方舟直连 — Seedance 2.0 Standard/Fast/Mini
 HEYGEN_API_KEY=your-key        # HeyGen — 汇集 VEO、Sora、Runway、Kling 的统一网关
 RUNWAY_API_KEY=your-key        # Runway Gen-4 直连
 ```
@@ -215,7 +221,7 @@ make install-gpu
 
 # 然后添加到 .env:
 VIDEO_GEN_LOCAL_ENABLED=true
-VIDEO_GEN_LOCAL_MODEL=wan2.1-1.3b  # 或 wan2.1-14b, hunyuan-1.5, ltx2-local, cogvideo-5b
+VIDEO_GEN_LOCAL_MODEL=wan2.2-ti2v-5b  # 或 wan2.1-1.3b, wan2.1-14b, hunyuan-1.5, ltx2-local, cogvideo-5b
 ```
 
 </details>
@@ -433,11 +439,12 @@ OpenMontage/
 > **包含定价与免费额度的完整设置指南：** [`docs/PROVIDERS.md`](docs/PROVIDERS.md)
 
 <details>
-<summary><strong>视频生成 — 14 家提供商</strong></summary>
+<summary><strong>视频生成 — 15 家提供商</strong></summary>
 
 | 提供商 | 类型 | 备注 |
 |----------|------|-------|
 | **Kling** | 云端 API | 高质量，速度快 |
+| **Seedance 2.0（火山方舟）** | 云端 API | 独立的 `seedance_ark` 官方直连接口 |
 | **Runway Gen-4** | 云端 API | 电影级质量，Gen-3 Alpha Turbo / Gen-4 Turbo / Gen-4 Aleph |
 | **Google Veo 3** | 云端 API | 长篇幅，电影级。通过 fal.ai 或 HeyGen 接入。 |
 | **Grok Imagine Video** | 云端 API | 强大的基于参考图的视频和 xAI 原生短视频生成 |

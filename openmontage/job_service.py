@@ -1995,6 +1995,24 @@ class JobService:
             )
             from lib.checkpoint import CheckpointValidationError, write_checkpoint
 
+            # Upstream checkpoint contract: a completed proposal checkpoint
+            # carries the human decision inside the packet. Approval recovery
+            # reuses the gated artifacts verbatim, so sync the decision here
+            # instead of re-running the paid stage handler.
+            if (
+                stage_code == "proposal"
+                and status == "completed"
+                and stage.approval_status == ApprovalStatus.APPROVED
+                and isinstance(artifacts.get("proposal_packet"), dict)
+            ):
+                packet = artifacts["proposal_packet"]
+                approval = packet.get("approval")
+                if not isinstance(approval, dict):
+                    approval = {}
+                    packet["approval"] = approval
+                if approval.get("status") not in {"approved", "approved_with_changes"}:
+                    approval["status"] = "approved"
+
             checkpoint_metadata = {
                 **(metadata or {}),
                 "stage_attempt": stage_attempt,

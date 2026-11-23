@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import pkgutil
+from collections.abc import Iterable
 from types import ModuleType
 from typing import Any, Optional
 
@@ -125,7 +126,7 @@ class ToolRegistry:
                     if match:
                         value = value[: match.start()]
                     value = value.strip()
-                if key and key not in os.environ:
+                if key and (key not in os.environ or not os.environ[key].strip()):
                     os.environ[key] = value
 
     def discover(self, package_name: str = "tools") -> list[str]:
@@ -188,6 +189,42 @@ class ToolRegistry:
         return [
             t for t in self._tools.values()
             if t.capability == capability and _tool_visible(t)
+        ]
+
+    def capability_coverage(self, tool_names: Iterable[str]) -> dict[str, dict[str, int]]:
+        """Count available concrete providers for capabilities touched by tools.
+
+        Selector tools identify a capability but are excluded from its provider
+        totals. Unknown tool names are ignored so stale optional manifest entries
+        do not hide coverage for tools that are still registered.
+        """
+        self.ensure_discovered()
+        capabilities = {
+            tool.capability
+            for name in tool_names
+            if (tool := self._tools.get(name)) is not None
+        }
+        coverage: dict[str, dict[str, int]] = {}
+        for capability in sorted(capabilities):
+            providers = [
+                tool
+                for tool in self._tools.values()
+                if tool.capability == capability and tool.provider != "selector"
+            ]
+            coverage[capability] = {
+                "available": sum(
+                    tool.get_status() == ToolStatus.AVAILABLE for tool in providers
+                ),
+                "total": len(providers),
+            }
+        return coverage
+
+    def uncovered_capabilities(self, tool_names: Iterable[str]) -> list[str]:
+        """Return touched capability families with no available provider."""
+        return [
+            capability
+            for capability, counts in self.capability_coverage(tool_names).items()
+            if counts["available"] == 0
         ]
 
     def get_by_provider(self, provider: str) -> list[BaseTool]:
@@ -436,6 +473,15 @@ class ToolRegistry:
             rc = hf_info.get("hyperframes_runtime") or {}
             for reason in rc.get("reasons") or []:
                 runtime_warnings.append(f"hyperframes: {reason}")
+
+        diagram_gen = self._tools.get("diagram_gen")
+        if diagram_gen is not None:
+            operation_statuses = diagram_gen.get_info().get("operation_statuses") or {}
+            if operation_statuses.get("mermaid") != "available":
+                runtime_warnings.append(
+                    "diagram_gen: Mermaid CLI (mmdc) is unavailable; install with "
+                    "npm install -g @mermaid-js/mermaid-cli"
+                )
 
         # Capabilities rollup (configured/total + provider lists).
         # When a provider has multiple tools (e.g. seedance-fal and

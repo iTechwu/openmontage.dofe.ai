@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -29,7 +30,14 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 
-from backlot.state import PROJECTS_DIR, REPO_ROOT, list_projects, load_board_state, summarize_project
+from backlot.state import (
+    PROJECTS_DIR,
+    REPO_ROOT,
+    list_projects,
+    load_board_state,
+    series_from_disk,
+    summarize_project,
+)
 from backlot.workspace_map import WorkspaceMap
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
@@ -158,6 +166,7 @@ def _cached_summaries() -> list[dict]:
             except Exception:
                 cached = {
                     "project_id": entry.name, "title": entry.name,
+                    "series": series_from_disk(entry),
                     "pipeline_type": "unknown", "has_pipeline_state": False,
                     "poster": None, "live": False, "last_activity": 0,
                     "active_stage": None, "awaiting_human": False,
@@ -528,6 +537,30 @@ def create_app() -> FastAPI:
     if oidc_enabled:
         install_oidc(app, legacy_enabled=legacy_enabled)
 
+    # Loopback binding alone does not prevent browser DNS-rebinding requests.
+    # Default keeps upstream's loopback-only protection; deployments that
+    # serve Backlot behind a reverse proxy at a public origin override with
+    # OPENMONTAGE_BACKLOT_ALLOWED_HOSTS (comma-separated host names, "*" allowed).
+    allowed_hosts = [
+        h.strip()
+        for h in os.environ.get("OPENMONTAGE_BACKLOT_ALLOWED_HOSTS", "").split(",")
+        if h.strip()
+    ] or ["127.0.0.1", "localhost"]
+    if oidc_enabled:
+        # An OIDC deployment serves a dedicated public origin behind a proxy;
+        # that origin's host is by definition an expected Host header. Read
+        # the effective config (tests may patch from_environment), not the
+        # raw env.
+        from urllib.parse import urlparse
+
+        sessions = getattr(app.state, "oidc_sessions", None)
+        public_origin = getattr(getattr(sessions, "config", None), "public_origin", "")
+        origin_host = urlparse(public_origin).hostname
+        if origin_host and origin_host not in allowed_hosts:
+            allowed_hosts.append(origin_host)
+    app.add_middleware(
+        TrustedHostMiddleware, allowed_hosts=allowed_hosts, www_redirect=False,
+    )
     return app
 
 

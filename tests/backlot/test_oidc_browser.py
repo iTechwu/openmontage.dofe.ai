@@ -9,6 +9,7 @@ import threading
 import time
 from dataclasses import replace
 
+import pytest
 import requests
 import uvicorn
 from cryptography import x509
@@ -23,6 +24,32 @@ from playwright.sync_api import sync_playwright
 from backlot.oidc_routes import COOKIE, install_oidc
 from backlot.oidc_session import OidcSessions
 from test_oidc_session import manager  # noqa: F401 - shared isolated vault fixture
+
+# tools.dofe.client injects truststore into the ssl module process-wide at
+# import time, and modules imported (or lazily importing it) before these
+# tests run trigger that injection. truststore's SSLContext cannot serve
+# uvicorn TLS: Chromium gets ERR_CONNECTION_RESET on the loopback IdP/edge
+# servers below. Restore the stdlib classes around each test and re-inject
+# afterwards so the rest of the session sees the usual state.
+
+
+@pytest.fixture(autouse=True)
+def _stdlib_ssl_for_local_tls_servers():
+    import ssl
+
+    try:
+        import truststore
+    except ImportError:  # pragma: no cover
+        yield
+        return
+    injected = ssl.SSLContext.__module__.startswith("truststore")
+    if injected:
+        truststore.extract_from_ssl()
+    try:
+        yield
+    finally:
+        if injected:
+            truststore.inject_into_ssl()
 
 
 def port():

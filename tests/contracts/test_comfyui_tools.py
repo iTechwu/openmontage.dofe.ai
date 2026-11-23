@@ -6,6 +6,8 @@ schemas, status reporting, and cost estimates.
 """
 
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -17,13 +19,14 @@ from tools.base_tool import (
     ToolStatus,
     ToolTier,
 )
+from tools.audio.comfyui_music import ComfyUIMusic
 from tools.graphics.comfyui_image import ComfyUIImage
 from tools.graphics.image_selector import ImageSelector
 from tools.tool_registry import ToolRegistry
 from tools.video.video_selector import VideoSelector
 from tools.video.comfyui_video import ComfyUIVideo
 
-TOOLS = [ComfyUIImage, ComfyUIVideo]
+TOOLS = [ComfyUIImage, ComfyUIVideo, ComfyUIMusic]
 WORKFLOW_DIR = Path(__file__).resolve().parent.parent.parent / "tools" / "_comfyui" / "workflows"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -136,6 +139,7 @@ EXPECTED_WORKFLOWS = [
     "flux2-txt2img.json",
     "wan22-i2v-4step.json",
     "wan22-t2v-4step.json",
+    "ace-step-1-t2a.json",
 ]
 
 
@@ -174,6 +178,60 @@ def test_t2v_workflow_has_templated_nodes():
     assert "16" in w  # SaveVideo (output)
 
 
+def test_t2v_workflow_latent_is_temporal_not_an_image_batch():
+    """A video model needs a video latent. This is not pedantry.
+
+    Node 11 was an ``EmptyLatentImage`` with ``batch_size`` set to the frame
+    count from the workflow's first commit until it was found by inspection.
+    That asks for N unrelated images rather than one N-frame video, and the
+    resulting mp4 has the right frame count, the right duration, the right
+    codec and a clean ffprobe -- it just strobes. Every structural test in this
+    file passed the whole time, because they checked that nodes existed rather
+    than what they were.
+
+    ComfyUI's own ``video_wan2_2_14B_t2v`` template uses
+    ``EmptyHunyuanLatentVideo``; the i2v sibling in this directory has always
+    used ``WanImageToVideo`` correctly.
+    """
+    with open(WORKFLOW_DIR / "wan22-t2v-4step.json") as f:
+        w = json.load(f)
+    latent = w["11"]
+    assert latent["class_type"] != "EmptyLatentImage", (
+        "node 11 is an image latent; output will be unrelated stills that "
+        "strobe inside a structurally valid mp4"
+    )
+    assert latent["class_type"] in {
+        "EmptyHunyuanLatentVideo",
+        "Wan22ImageToVideoLatent",
+        "WanImageToVideo",
+    }, f"unexpected latent node {latent['class_type']!r}"
+    inputs = latent["inputs"]
+    assert "length" in inputs, "a temporal latent carries the frame count in `length`"
+    assert inputs["length"] > 1, "a single-frame latent is not a video"
+    assert inputs.get("batch_size", 1) == 1, (
+        "batch_size is how many separate clips to generate, not how many "
+        "frames each has -- setting it to the frame count is the original bug"
+    )
+
+
+def test_t2v_builder_patches_frame_count_into_length_not_batch_size():
+    """The builder must not put the frame count back where it does not belong.
+
+    Fixing the workflow alone is not enough: ``_build_t2v`` patches node 11 on
+    every call, so a builder still writing ``batch_size: num_frames`` would
+    reintroduce the bug against a corrected workflow.
+    """
+    from tools.video.comfyui_video import ComfyUIVideo
+
+    workflow, _ = ComfyUIVideo()._build_t2v(
+        {"prompt": "x", "width": 832, "height": 480, "num_frames": 81},
+        seed=1,
+        output_path=Path("out.mp4"),
+    )
+    assert workflow["11"]["inputs"]["length"] == 81
+    assert workflow["11"]["inputs"]["batch_size"] == 1
+
+
 def test_t2v_workflow_uses_14b_compatible_vae():
     with open(WORKFLOW_DIR / "wan22-t2v-4step.json") as f:
         w = json.load(f)
@@ -199,6 +257,29 @@ class TestClientHelpers:
         w = ComfyUIClient.load_workflow(WORKFLOW_DIR / "flux2-txt2img.json")
         assert isinstance(w, dict)
         assert "1" in w
+
+    def test_load_workflow_reads_utf8_non_ascii_content(self, monkeypatch, tmp_path):
+        from tools._comfyui.client import ComfyUIClient
+
+        workflow = {"1": {"inputs": {"text": "\u955c\u5934\u7f13\u6162\u63a8\u8fdb"}}}
+        workflow_path = tmp_path / "workflow.json"
+        workflow_path.write_text(
+            json.dumps(workflow, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        real_open = open
+        encoding = None
+
+        def tracked_open(*args, **kwargs):
+            nonlocal encoding
+            encoding = kwargs.get("encoding")
+            return real_open(*args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", tracked_open)
+
+        assert ComfyUIClient.load_workflow(workflow_path) == workflow
+        assert encoding == "utf-8"
 
     def test_patch_workflow(self):
         from tools._comfyui.client import ComfyUIClient
@@ -282,6 +363,73 @@ class TestClientHelpers:
             "folder_type": "temp",
         }
 
+    def test_poll_timeout_carries_prompt_id_for_recovery(self, monkeypatch):
+        from tools._comfyui.client import ComfyUIClient, ComfyUIError
+
+        client = ComfyUIClient("http://comfy.test")
+        monkeypatch.setattr(
+            "tools._comfyui.client.requests.get",
+            lambda *a, **k: type("R", (), {
+                "raise_for_status": lambda self: None,
+                "json": lambda self: {},
+            })(),
+        )
+        monkeypatch.setattr("tools._comfyui.client.time.sleep", lambda s: None)
+
+        with pytest.raises(ComfyUIError) as excinfo:
+            client.poll("prompt-timeout-1", timeout=0, interval=0)
+
+        assert excinfo.value.prompt_id == "prompt-timeout-1"
+        assert "prompt-timeout-1" in str(excinfo.value)
+
+    def test_generate_resume_prompt_id_skips_resubmit(self, monkeypatch, tmp_path):
+        from tools._comfyui.client import ComfyUIClient
+        import sys
+
+        client = ComfyUIClient("http://comfy.test")
+
+        def fail_submit(workflow):
+            raise AssertionError("submit() should not be called when resuming")
+
+        monkeypatch.setattr(client, "submit", fail_submit)
+        _install_fake_websocket(monkeypatch, frames=[])
+        monkeypatch.setattr(
+            sys.modules["websocket"],
+            "create_connection",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("resumed jobs must use history polling")
+            ),
+        )
+        monkeypatch.setattr(client, "poll", lambda prompt_id, **kwargs: {
+            "outputs": {"9": {"images": [{
+                "filename": "resumed.png", "subfolder": "", "type": "output",
+            }]}}
+        })
+        monkeypatch.setattr(client, "download", lambda filename, subfolder, dest, folder_type="output": Path(dest))
+
+        paths = client.generate(
+            {"9": {"inputs": {}}}, "9", tmp_path / "out.png",
+            resume_prompt_id="already-running-id",
+        )
+        assert paths == [tmp_path / "out.png"]
+
+    def test_generate_reads_audio_key_from_savaudio_node(self, monkeypatch, tmp_path):
+        """The native SaveAudio node writes outputs under "audio", not
+        "images"/"gifs" -- comfyui_music depends on this being handled."""
+        from tools._comfyui.client import ComfyUIClient
+
+        client = ComfyUIClient("http://comfy.test")
+        monkeypatch.setattr(client, "submit", lambda workflow: "p1")
+        monkeypatch.setattr(client, "poll", lambda prompt_id, **kwargs: {
+            "outputs": {"9": {"audio": [{
+                "filename": "track.flac", "subfolder": "", "type": "output",
+            }]}}
+        })
+        monkeypatch.setattr(client, "download", lambda filename, subfolder, dest, folder_type="output": Path(dest))
+
+        paths = client.generate({"9": {"inputs": {}}}, "9", tmp_path / "out.flac")
+        assert paths == [tmp_path / "out.flac"]
+
     def test_is_default_url_when_env_not_set(self, monkeypatch):
         from tools._comfyui.client import ComfyUIClient
         monkeypatch.delenv("COMFYUI_SERVER_URL", raising=False)
@@ -310,6 +458,290 @@ class TestClientHelpers:
         assert "myhost:9999" in msg
         assert "COMFYUI_SERVER_URL" not in msg
 
+    def test_submit_includes_client_id_for_websocket_targeting(self, monkeypatch):
+        from tools._comfyui.client import ComfyUIClient
+
+        client = ComfyUIClient("http://comfy.test")
+        seen = {}
+
+        def fake_post(url, json=None, timeout=None):
+            seen.update(json)
+            return type("R", (), {
+                "raise_for_status": lambda self: None,
+                "json": lambda self: {"prompt_id": "abc"},
+            })()
+
+        monkeypatch.setattr("tools._comfyui.client.requests.post", fake_post)
+        client.submit({"1": {"inputs": {}}})
+        assert seen["client_id"] == client.client_id
+
+
+class TestMultiServer:
+
+    def test_capability_env_var_takes_priority_over_shared(self, monkeypatch):
+        from tools._comfyui.client import ComfyUIClient
+
+        monkeypatch.setenv("COMFYUI_SERVER_URL", "http://shared:8188")
+        monkeypatch.setenv("COMFYUI_VIDEO_SERVER_URL", "http://video-gpu:8188")
+        client = ComfyUIClient(capability="video")
+        assert client.server_url == "http://video-gpu:8188"
+
+    def test_falls_back_to_shared_when_capability_var_unset(self, monkeypatch):
+        from tools._comfyui.client import ComfyUIClient
+
+        monkeypatch.setenv("COMFYUI_SERVER_URL", "http://shared:8188")
+        monkeypatch.delenv("COMFYUI_IMAGE_SERVER_URL", raising=False)
+        client = ComfyUIClient(capability="image")
+        assert client.server_url == "http://shared:8188"
+
+    def test_other_capability_env_var_does_not_leak_across_tools(self, monkeypatch):
+        from tools._comfyui.client import ComfyUIClient
+
+        monkeypatch.delenv("COMFYUI_SERVER_URL", raising=False)
+        monkeypatch.setenv("COMFYUI_IMAGE_SERVER_URL", "http://image-gpu:8188")
+        monkeypatch.delenv("COMFYUI_VIDEO_SERVER_URL", raising=False)
+        video_client = ComfyUIClient(capability="video")
+        assert video_client.server_url == "http://localhost:8188"
+
+    def test_explicit_server_url_wins_over_capability_env_var(self, monkeypatch):
+        from tools._comfyui.client import ComfyUIClient
+
+        monkeypatch.setenv("COMFYUI_VIDEO_SERVER_URL", "http://video-gpu:8188")
+        client = ComfyUIClient("http://explicit:1234", capability="video")
+        assert client.server_url == "http://explicit:1234"
+
+    def test_no_capability_behaves_as_before(self, monkeypatch):
+        from tools._comfyui.client import ComfyUIClient
+
+        monkeypatch.setenv("COMFYUI_SERVER_URL", "http://shared:8188")
+        client = ComfyUIClient()
+        assert client.server_url == "http://shared:8188"
+        assert client.is_default_url is False
+
+    def test_is_default_url_true_only_when_both_vars_unset(self, monkeypatch):
+        from tools._comfyui.client import ComfyUIClient
+
+        monkeypatch.delenv("COMFYUI_SERVER_URL", raising=False)
+        monkeypatch.delenv("COMFYUI_IMAGE_SERVER_URL", raising=False)
+        client = ComfyUIClient(capability="image")
+        assert client.is_default_url is True
+
+        monkeypatch.setenv("COMFYUI_IMAGE_SERVER_URL", "http://image-gpu:8188")
+        client2 = ComfyUIClient(capability="image")
+        assert client2.is_default_url is False
+
+    def test_unavailable_reason_mentions_capability_and_shared_var(self, monkeypatch):
+        from tools._comfyui.client import ComfyUIClient
+
+        monkeypatch.delenv("COMFYUI_SERVER_URL", raising=False)
+        monkeypatch.delenv("COMFYUI_VIDEO_SERVER_URL", raising=False)
+        client = ComfyUIClient(capability="video")
+        msg = client.unavailable_reason()
+        assert "COMFYUI_VIDEO_SERVER_URL" in msg
+        assert "COMFYUI_SERVER_URL" in msg
+
+    def test_image_and_video_tools_use_independent_servers(self, monkeypatch):
+        from tools.graphics.comfyui_image import ComfyUIImage
+        from tools.video.comfyui_video import ComfyUIVideo
+
+        monkeypatch.delenv("COMFYUI_SERVER_URL", raising=False)
+        monkeypatch.setenv("COMFYUI_IMAGE_SERVER_URL", "http://image-gpu:8188")
+        monkeypatch.setenv("COMFYUI_VIDEO_SERVER_URL", "http://video-gpu:8188")
+
+        image_tool = ComfyUIImage()
+        video_tool = ComfyUIVideo()
+
+        assert image_tool._client.server_url == "http://image-gpu:8188"
+        assert video_tool._client.server_url == "http://video-gpu:8188"
+
+
+class _FakeWSTimeout(Exception):
+    pass
+
+
+class _FakeWSConn:
+    def __init__(self, frames):
+        self._frames = list(frames)
+
+    def settimeout(self, value):
+        pass
+
+    def recv(self):
+        if not self._frames:
+            raise _FakeWSTimeout()
+        return self._frames.pop(0)
+
+    def close(self):
+        pass
+
+
+def _install_fake_websocket(monkeypatch, frames):
+    """Inject a fake `websocket` module so wait_ws() runs without the real
+    optional websocket-client dependency installed."""
+    import sys
+    import types
+
+    fake_module = types.SimpleNamespace(
+        WebSocketTimeoutException=_FakeWSTimeout,
+        create_connection=lambda url, timeout=10: _FakeWSConn(frames),
+    )
+    monkeypatch.setitem(sys.modules, "websocket", fake_module)
+
+
+class TestWebsocketWait:
+
+    def test_wait_ws_returns_job_completed_before_connection(self, monkeypatch):
+        from tools._comfyui.client import ComfyUIClient
+        import sys
+
+        client = ComfyUIClient("http://comfy.test")
+        _install_fake_websocket(monkeypatch, frames=[])
+        monkeypatch.setattr(
+            sys.modules["websocket"],
+            "create_connection",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("completed history must avoid websocket connection")
+            ),
+        )
+        monkeypatch.setattr(
+            "tools._comfyui.client.requests.get",
+            lambda *a, **k: type("R", (), {
+                "raise_for_status": lambda self: None,
+                "json": lambda self: {"done": {"outputs": {"9": {}}}},
+            })(),
+        )
+
+        assert client.wait_ws("done", timeout=5) == {"outputs": {"9": {}}}
+
+    def test_wait_ws_completes_on_executing_none_node(self, monkeypatch, tmp_path):
+        from tools._comfyui.client import ComfyUIClient
+
+        client = ComfyUIClient("http://comfy.test")
+        progress_events = []
+        frames = [
+            json.dumps({"type": "progress", "data": {
+                "value": 2, "max": 20, "prompt_id": "p1",
+            }}),
+            json.dumps({"type": "executing", "data": {
+                "node": None, "prompt_id": "p1",
+            }}),
+        ]
+        _install_fake_websocket(monkeypatch, frames)
+        history_calls = iter(({}, {}, {"p1": {"outputs": {"9": {}}}}))
+        monkeypatch.setattr(
+            "tools._comfyui.client.requests.get",
+            lambda *a, **k: type("R", (), {
+                "raise_for_status": lambda self: None,
+                "json": lambda self: next(history_calls),
+            })(),
+        )
+
+        entry = client.wait_ws("p1", timeout=5, on_progress=progress_events.append)
+
+        assert entry == {"outputs": {"9": {}}}
+        assert progress_events == [{"value": 2, "max": 20, "prompt_id": "p1"}]
+
+    def test_wait_ws_execution_error_raises_with_prompt_id(self, monkeypatch):
+        from tools._comfyui.client import ComfyUIClient, ComfyUIError
+
+        client = ComfyUIClient("http://comfy.test")
+        frames = [
+            json.dumps({"type": "execution_error", "data": {
+                "prompt_id": "p2", "exception_message": "boom",
+            }}),
+        ]
+        _install_fake_websocket(monkeypatch, frames)
+
+        with pytest.raises(ComfyUIError) as excinfo:
+            client.wait_ws("p2", timeout=5)
+
+        assert excinfo.value.prompt_id == "p2"
+
+    def test_wait_ws_ignores_other_prompts_on_shared_connection(self, monkeypatch):
+        from tools._comfyui.client import ComfyUIClient
+
+        client = ComfyUIClient("http://comfy.test")
+        frames = [
+            # Another job's event on the same client_id -- must not trigger completion.
+            json.dumps({"type": "executing", "data": {
+                "node": None, "prompt_id": "someone-elses-job",
+            }}),
+            json.dumps({"type": "executing", "data": {
+                "node": None, "prompt_id": "p3",
+            }}),
+        ]
+        _install_fake_websocket(monkeypatch, frames)
+        monkeypatch.setattr(
+            "tools._comfyui.client.requests.get",
+            lambda *a, **k: type("R", (), {
+                "raise_for_status": lambda self: None,
+                "json": lambda self: {"p3": {"outputs": {}}},
+            })(),
+        )
+
+        entry = client.wait_ws("p3", timeout=5)
+        assert entry == {"outputs": {}}
+
+    def test_wait_ws_timeout_raises_comfyuierror_with_prompt_id(self, monkeypatch):
+        from tools._comfyui.client import ComfyUIClient, ComfyUIError
+
+        client = ComfyUIClient("http://comfy.test")
+        _install_fake_websocket(monkeypatch, frames=[])  # recv() always times out
+
+        with pytest.raises(ComfyUIError) as excinfo:
+            client.wait_ws("p4", timeout=0)
+
+        assert excinfo.value.prompt_id == "p4"
+
+    def test_wait_falls_back_to_poll_when_websocket_unavailable(self, monkeypatch):
+        """No websocket-client installed (or any transport failure) must
+        silently fall back to REST polling, not blow up the whole call."""
+        from tools._comfyui.client import ComfyUIClient
+        import sys
+
+        client = ComfyUIClient("http://comfy.test")
+        monkeypatch.delitem(sys.modules, "websocket", raising=False)
+        monkeypatch.setattr(
+            "builtins.__import__",
+            _raise_on_websocket_import(__import__),
+        )
+        monkeypatch.setattr(
+            client, "poll", lambda prompt_id, **kwargs: {"outputs": {"used": "poll"}}
+        )
+
+        entry = client._wait("p5", timeout=5, interval=5)
+        assert entry == {"outputs": {"used": "poll"}}
+
+    def test_wait_does_not_swallow_genuine_comfyuierror_from_websocket(self, monkeypatch):
+        """A real execution error detected over the websocket must propagate,
+        not be masked by a fallback-to-poll retry."""
+        from tools._comfyui.client import ComfyUIClient, ComfyUIError
+
+        client = ComfyUIClient("http://comfy.test")
+        frames = [
+            json.dumps({"type": "execution_error", "data": {
+                "prompt_id": "p6", "exception_message": "bad node",
+            }}),
+        ]
+        _install_fake_websocket(monkeypatch, frames)
+
+        def fail_poll(prompt_id, **kwargs):
+            raise AssertionError("poll() should not be called after a real ws error")
+
+        monkeypatch.setattr(client, "poll", fail_poll)
+
+        with pytest.raises(ComfyUIError) as excinfo:
+            client._wait("p6", timeout=5, interval=5)
+        assert excinfo.value.prompt_id == "p6"
+
+
+def _raise_on_websocket_import(real_import):
+    def _import(name, *args, **kwargs):
+        if name == "websocket":
+            raise ImportError("no module named websocket")
+        return real_import(name, *args, **kwargs)
+    return _import
+
 
 # ------------------------------------------------------------------
 # Model discovery (offline, no server needed)
@@ -331,6 +763,11 @@ class TestModelRequirements:
         from tools.video.comfyui_video import _REQUIRED_MODELS_T2V
         assert len(_REQUIRED_MODELS_T2V) > 0
         assert any("t2v" in m.lower() for m in _REQUIRED_MODELS_T2V)
+
+    def test_music_tool_has_required_models(self):
+        from tools.audio.comfyui_music import _REQUIRED_MODELS
+        assert len(_REQUIRED_MODELS) > 0
+        assert any("ace_step" in m.lower() for m in _REQUIRED_MODELS)
 
 
 # ------------------------------------------------------------------
@@ -401,6 +838,44 @@ class TestCustomWorkflowContract:
             "unknown_custom_workflow"
         )
 
+    def test_video_custom_workflow_path_loads_utf8_and_uses_output_node(self, tmp_path):
+        workflow = {
+            "20": {
+                "inputs": {"text": "\u955c\u5934\u7f13\u6162\u63a8\u8fdb"},
+                "class_type": "SaveVideo",
+            }
+        }
+        workflow_path = tmp_path / "workflow.json"
+        workflow_path.write_text(
+            json.dumps(workflow, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        tool = ComfyUIVideo()
+        tool._client.is_available = lambda: True
+        seen = {}
+
+        def fake_generate(loaded_workflow, output_node, dest, **kwargs):
+            seen["workflow"] = loaded_workflow
+            seen["output_node"] = output_node
+            return [Path(dest)]
+
+        tool._client.generate = fake_generate
+
+        result = tool.execute({
+            "prompt": "test",
+            "workflow_path": str(workflow_path),
+            "output_node": "20",
+            "workflow_model": "MiniMax-H3",
+            "model_family": "minimax_h3_local",
+            "output_path": str(tmp_path / "video.mp4"),
+        })
+
+        assert result.success is True
+        assert seen == {"workflow": workflow, "output_node": "20"}
+        assert result.data["workflow_provenance"]["workflow_path"] == str(workflow_path)
+        assert result.data["workflow_provenance"]["output_node"] == "20"
+
     def test_custom_workflow_accepts_model_stack_provenance(self, tmp_path):
         tool = ComfyUIVideo()
         tool._client.is_available = lambda: True
@@ -417,6 +892,141 @@ class TestCustomWorkflowContract:
         provenance = result.data["workflow_provenance"]
         assert provenance["model_stack"] == [{"role": "lora", "name": "style.safetensors"}]
         assert provenance["model_stack_source"] == "caller_supplied"
+
+    @staticmethod
+    def _render_tiny_clip(workflow, output_node, dest, **kwargs):
+        # 64x112, 13 frames at 24 fps: nothing like the WAN 832x480/81/16 defaults.
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-v", "error",
+                "-f", "lavfi", "-i", "testsrc=size=64x112:rate=24",
+                "-frames:v", "13", "-pix_fmt", "yuv420p", str(dest),
+            ],
+            check=True,
+        )
+        return [Path(dest)]
+
+    @pytest.mark.skipif(
+        not shutil.which("ffmpeg") or not shutil.which("ffprobe"),
+        reason="FFmpeg required",
+    )
+    def test_video_custom_workflow_reports_probed_output_metadata(self, tmp_path):
+        tool = ComfyUIVideo()
+        tool._client.is_available = lambda: True
+        tool._client.generate = self._render_tiny_clip
+
+        result = tool.execute({
+            "prompt": "test",
+            "model_family": "ltx_2.5_local",
+            "workflow_json": json.dumps({"3": {"inputs": {}}}),
+            "output_node": "3",
+            "output_path": str(tmp_path / "clip.mp4"),
+        })
+
+        assert result.success is True
+        assert result.data["metadata_source"] == "ffprobe"
+        assert result.data["width"] == 64
+        assert result.data["height"] == 112
+        assert result.data["fps"] == 24
+        assert result.data["num_frames"] == 13
+        assert result.data["duration_seconds"] == pytest.approx(13 / 24, abs=0.01)
+        assert "metadata_warning" not in result.data
+
+    @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg required")
+    def test_video_metadata_falls_back_to_request_when_probe_fails(
+        self, tmp_path, monkeypatch
+    ):
+        tool = ComfyUIVideo()
+        tool._client.is_available = lambda: True
+        tool._client.generate = self._render_tiny_clip
+        monkeypatch.setattr("tools.video._shared.shutil.which", lambda name: None)
+
+        result = tool.execute({
+            "prompt": "test",
+            "workflow_json": json.dumps({"3": {"inputs": {}}}),
+            "output_node": "3",
+            "num_frames": 49,
+            "output_path": str(tmp_path / "clip.mp4"),
+        })
+
+        assert result.success is True
+        assert result.data["metadata_source"] == "requested"
+        assert "not the output file" in result.data["metadata_warning"]
+        assert result.data["width"] == 832
+        assert result.data["height"] == 480
+        assert result.data["num_frames"] == 49
+        assert result.data["fps"] == 16
+
+    def test_video_timeout_surfaces_resumable_prompt_id(self, tmp_path):
+        from tools._comfyui.client import ComfyUIError
+
+        tool = ComfyUIVideo()
+        tool._client.is_available = lambda: True
+
+        def fake_generate(workflow, output_node, dest, **kwargs):
+            raise ComfyUIError("Prompt timed-out-id did not complete within 5s", prompt_id="timed-out-id")
+
+        tool._client.generate = fake_generate
+
+        result = tool.execute({
+            "prompt": "test",
+            "workflow_json": json.dumps({"42": {"inputs": {}}}),
+            "output_node": "42",
+            "output_path": str(tmp_path / "video.mp4"),
+            "timeout_seconds": 5,
+        })
+
+        assert result.success is False
+        assert result.data["prompt_id"] == "timed-out-id"
+        assert "resume_prompt_id" in result.error
+        assert "timed-out-id" in result.error
+
+    def test_video_passes_timeout_and_resume_prompt_id_through(self, tmp_path):
+        tool = ComfyUIVideo()
+        tool._client.is_available = lambda: True
+        seen = {}
+
+        def fake_generate(workflow, output_node, dest, **kwargs):
+            seen.update(kwargs)
+            return [Path(dest)]
+
+        tool._client.generate = fake_generate
+
+        result = tool.execute({
+            "prompt": "test",
+            "workflow_json": json.dumps({"42": {"inputs": {}}}),
+            "output_node": "42",
+            "output_path": str(tmp_path / "video.mp4"),
+            "timeout_seconds": 7200,
+            "resume_prompt_id": "already-running-id",
+        })
+
+        assert result.success is True
+        assert seen["timeout"] == 7200
+        assert seen["resume_prompt_id"] == "already-running-id"
+
+    def test_video_default_timeout_is_generous_not_900s(self, tmp_path):
+        tool = ComfyUIVideo()
+        tool._client.is_available = lambda: True
+        seen = {}
+
+        def fake_generate(workflow, output_node, dest, **kwargs):
+            seen.update(kwargs)
+            return [Path(dest)]
+
+        tool._client.generate = fake_generate
+
+        tool.execute({
+            "prompt": "test",
+            "workflow_json": json.dumps({"42": {"inputs": {}}}),
+            "output_node": "42",
+            "output_path": str(tmp_path / "video.mp4"),
+        })
+
+        # Regression guard: the old hardcoded 900s timeout false-failed real
+        # renders on modest local GPUs (observed ~1360-1630s for non-accelerated
+        # custom Wan 1.3B workflows at 832x480/81-97 frames).
+        assert seen["timeout"] > 900
 
     def test_image_missing_models_are_structured(self):
         tool = ComfyUIImage()
@@ -464,6 +1074,216 @@ class TestCustomWorkflowContract:
         assert provenance["source"] == "bundled"
         assert provenance["workflow_hash_sha256"]
         assert any(item["role"] == "vae" for item in provenance["model_stack"])
+
+
+class TestComfyUIMusic:
+
+    def test_capability_and_provider(self):
+        tool = ComfyUIMusic()
+        assert tool.capability == "music_generation"
+        assert tool.provider == "comfyui"
+
+    def test_bundled_path_requires_no_workflow_json_or_output_node(self, tmp_path):
+        """Without workflow_json/workflow_path it should attempt the bundled
+        ACE-Step workflow, not demand a custom one."""
+        tool = ComfyUIMusic()
+        tool._client.is_available = lambda: True
+        tool._client.check_models = lambda required: (list(required), [])
+        tool._client.generate = lambda workflow, output_node, dest, **kwargs: [Path(dest)]
+
+        result = tool.execute({
+            "prompt": "ambient pad",
+            "output_path": str(tmp_path / "music.mp3"),
+        })
+
+        assert result.success is True
+        assert result.data["workflow_provenance"]["source"] == "bundled"
+
+    def test_custom_workflow_without_output_node_errors(self):
+        tool = ComfyUIMusic()
+        tool._client.is_available = lambda: True
+
+        result = tool.execute({
+            "prompt": "ambient pad",
+            "workflow_json": json.dumps({"9": {"inputs": {}}}),
+        })
+
+        assert result.success is False
+        assert "output_node" in result.error
+
+    def test_bundled_missing_models_returns_structured_payload(self):
+        tool = ComfyUIMusic()
+        tool._client.is_available = lambda: True
+        tool._client.check_models = lambda required: ([], list(required))
+
+        result = tool.execute({"prompt": "ambient pad"})
+
+        assert result.success is False
+        assert result.data["missing_models"][0]["name"] == "ace_step_v1_3.5b.safetensors"
+        assert result.data["missing_models"][0]["download_url"]
+
+    def test_bundled_generation_patches_tags_lyrics_and_seed(self, tmp_path):
+        tool = ComfyUIMusic()
+        tool._client.is_available = lambda: True
+        tool._client.check_models = lambda required: (list(required), [])
+        seen = {}
+
+        def fake_generate(workflow, output_node, dest, **kwargs):
+            seen["workflow"] = workflow
+            seen["output_node"] = output_node
+            return [Path(dest)]
+
+        tool._client.generate = fake_generate
+
+        result = tool.execute({
+            "prompt": "lofi hip hop, chill, rain sounds",
+            "lyrics": "[verse]\nquiet streets",
+            "duration_seconds": 45,
+            "seed": 777,
+            "output_path": str(tmp_path / "music.mp3"),
+        })
+
+        assert result.success is True
+        assert seen["output_node"] == "10"
+        assert seen["workflow"]["2"]["inputs"]["tags"] == "lofi hip hop, chill, rain sounds"
+        assert seen["workflow"]["2"]["inputs"]["lyrics"] == "[verse]\nquiet streets"
+        assert seen["workflow"]["4"]["inputs"]["seconds"] == 45
+        assert seen["workflow"]["8"]["inputs"]["seed"] == 777
+        assert result.data["model"] == "ace-step-v1-3.5b"
+
+    def test_bundled_generation_preserves_seed_zero(self, tmp_path):
+        tool = ComfyUIMusic()
+        tool._client.is_available = lambda: True
+        tool._client.check_models = lambda required: (list(required), [])
+        seen = {}
+
+        def fake_generate(workflow, output_node, dest, **kwargs):
+            seen["seed"] = workflow["8"]["inputs"]["seed"]
+            return [Path(dest)]
+
+        tool._client.generate = fake_generate
+        result = tool.execute({
+            "prompt": "deterministic test",
+            "seed": 0,
+            "output_path": str(tmp_path / "music.mp3"),
+        })
+
+        assert result.success is True
+        assert result.seed == 0
+        assert seen["seed"] == 0
+
+    def test_get_status_degraded_when_model_missing(self):
+        tool = ComfyUIMusic()
+        tool._client.is_available = lambda: True
+        tool._client.check_models = lambda required: ([], list(required))
+        assert tool.get_status() == ToolStatus.DEGRADED
+
+    def test_unavailable_server_reports_unavailable_reason(self):
+        tool = ComfyUIMusic()
+        tool._client.is_available = lambda: False
+        tool._client.unavailable_reason = lambda: "no server here"
+
+        result = tool.execute({
+            "prompt": "ambient pad",
+            "workflow_json": json.dumps({"9": {"inputs": {}}}),
+            "output_node": "9",
+        })
+
+        assert result.success is False
+        assert result.error == "no server here"
+
+    def test_successful_generation_returns_provenance_and_duration(self, tmp_path, monkeypatch):
+        tool = ComfyUIMusic()
+        tool._client.is_available = lambda: True
+
+        dest_file = tmp_path / "music.mp3"
+
+        def fake_generate(workflow, output_node, dest, **kwargs):
+            Path(dest).write_bytes(b"fake-audio-bytes")
+            return [Path(dest)]
+
+        tool._client.generate = fake_generate
+        monkeypatch.setattr("shutil.which", lambda name: None)  # no ffprobe in test env
+
+        result = tool.execute({
+            "prompt": "upbeat synthwave",
+            "workflow_json": json.dumps({"9": {"inputs": {}}}),
+            "output_node": "9",
+            "output_path": str(dest_file),
+            "workflow_name": "my-ace-step-graph",
+            "workflow_model": "ace-step-v1-3.5b",
+        })
+
+        assert result.success is True
+        assert result.data["provider"] == "comfyui"
+        assert result.data["model"] == "ace-step-v1-3.5b"
+        assert result.data["output"] == str(dest_file)
+        assert result.data["format"] == "mp3"
+        assert result.data["duration_seconds"] is None  # ffprobe unavailable
+        provenance = result.data["workflow_provenance"]
+        assert provenance["source"] == "user_supplied"
+        assert provenance["output_node"] == "9"
+        assert provenance["workflow_hash_sha256"]
+
+    def test_timeout_surfaces_resumable_prompt_id(self, tmp_path):
+        from tools._comfyui.client import ComfyUIError
+
+        tool = ComfyUIMusic()
+        tool._client.is_available = lambda: True
+
+        def fake_generate(workflow, output_node, dest, **kwargs):
+            raise ComfyUIError("timed out", prompt_id="music-prompt-id")
+
+        tool._client.generate = fake_generate
+
+        result = tool.execute({
+            "prompt": "ambient pad",
+            "workflow_json": json.dumps({"9": {"inputs": {}}}),
+            "output_node": "9",
+            "output_path": str(tmp_path / "music.mp3"),
+        })
+
+        assert result.success is False
+        assert result.data["prompt_id"] == "music-prompt-id"
+        assert "resume_prompt_id" in result.error
+
+    def test_passes_timeout_and_resume_prompt_id_through(self, tmp_path):
+        tool = ComfyUIMusic()
+        tool._client.is_available = lambda: True
+        seen = {}
+
+        def fake_generate(workflow, output_node, dest, **kwargs):
+            seen.update(kwargs)
+            return [Path(dest)]
+
+        tool._client.generate = fake_generate
+
+        tool.execute({
+            "prompt": "ambient pad",
+            "workflow_json": json.dumps({"9": {"inputs": {}}}),
+            "output_node": "9",
+            "output_path": str(tmp_path / "music.mp3"),
+            "timeout_seconds": 3600,
+            "resume_prompt_id": "already-running-id",
+        })
+
+        assert seen["timeout"] == 3600
+        assert seen["resume_prompt_id"] == "already-running-id"
+
+    def test_registry_discovers_comfyui_music_under_music_generation(self):
+        registry = ToolRegistry()
+        tool = ComfyUIMusic()
+        registry.register(tool)
+        registry._discovered_packages.add("tools")
+
+        by_capability = registry.get_by_capability("music_generation")
+        assert any(t.name == "comfyui_music" for t in by_capability)
+
+    def test_uses_music_capability_env_var_for_multi_server(self, monkeypatch):
+        monkeypatch.delenv("COMFYUI_SERVER_URL", raising=False)
+        monkeypatch.setenv("COMFYUI_MUSIC_SERVER_URL", "http://music-gpu:8188")
+        tool = ComfyUIMusic()
+        assert tool._client.server_url == "http://music-gpu:8188"
 
 
 class TestComfyUISetupOffer:
@@ -664,3 +1484,197 @@ class TestCustomWorkflowSelectorEligibility:
                 "workflow_model_stack",
             ):
                 assert field in props, f"{selector.name} missing {field}"
+
+
+class TestCompactExecutionError:
+    """Issue #615: surface one actionable line instead of raw message dumps."""
+
+    _EXEC_ERROR_MESSAGES = [
+        "execution_interrupt",
+        [
+            "execution_error",
+            {
+                "prompt_id": "abc",
+                "node_id": "3",
+                "node_type": "KSampler",
+                "exception_type": "ValueError",
+                "exception_message": "expected float tensor\n<hundreds of lines of latent tensor repr>",
+                "traceback": ["tb line 1", "tb line 2"],
+            },
+        ],
+    ]
+
+    def test_extracts_node_type_and_first_line(self):
+        from tools._comfyui.client import compact_execution_error
+
+        text = compact_execution_error(self._EXEC_ERROR_MESSAGES)
+        assert text == "KSampler: ValueError: expected float tensor"
+        assert "latent tensor repr" not in text
+
+    def test_falls_back_to_node_id_when_node_type_missing(self):
+        from tools._comfyui.client import compact_execution_error
+
+        msgs = [["execution_error", {"node_id": "7", "exception_message": "boom"}]]
+        assert compact_execution_error(msgs) == "7: Error: boom"
+
+    def test_truncates_at_limit(self):
+        from tools._comfyui.client import compact_execution_error
+
+        msgs = [["execution_error", {"node_type": "N", "exception_message": "x" * 5000}]]
+        assert len(compact_execution_error(msgs)) == 1500
+        assert len(compact_execution_error(msgs, limit=50)) == 50
+
+    def test_non_exec_error_payloads_json_fallback(self):
+        from tools._comfyui.client import compact_execution_error
+
+        assert compact_execution_error("plain string") == "plain string"
+        text = compact_execution_error([["other_event", {"k": "v"}]])
+        assert "other_event" in text
+
+    def test_history_entry_raises_compact_error_with_prompt_id(self, monkeypatch):
+        from tools._comfyui import client as client_module
+        from tools._comfyui.client import ComfyUIClient, ComfyUIError
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "abc": {
+                        "status": {
+                            "status_str": "error",
+                            "messages": TestCompactExecutionError._EXEC_ERROR_MESSAGES,
+                        }
+                    }
+                }
+
+        monkeypatch.setattr(
+            "tools._comfyui.client.requests.get", lambda *a, **k: FakeResponse()
+        )
+        c = ComfyUIClient("http://localhost:8188")
+        with pytest.raises(ComfyUIError) as exc_info:
+            c._history_entry("abc")
+        assert exc_info.value.prompt_id == "abc"
+        assert "KSampler: ValueError: expected float tensor" in str(exc_info.value)
+        assert "latent tensor repr" not in str(exc_info.value)
+
+
+class TestComfyUITiming:
+    """Issue #617: split queue / execution / download instead of wall time."""
+
+    _ENTRY = {
+        "status": {
+            "messages": [
+                ["execution_start", {"timestamp": 1000.0}],
+                ["execution_cached", {"nodes": ["1"]}],
+                ["execution_success", {"timestamp": 1042.5}],
+            ]
+        },
+        "outputs": {
+            "9": {"images": [{"filename": "out.mp4", "subfolder": "", "type": "output"}]}
+        },
+    }
+
+    def test_history_execution_seconds_from_server_timestamps(self):
+        from tools._comfyui.client import history_execution_seconds
+
+        assert history_execution_seconds(self._ENTRY) == 42.5
+
+    def test_history_execution_seconds_normalizes_milliseconds(self):
+        from tools._comfyui.client import history_execution_seconds
+
+        entry = {
+            "status": {
+                "messages": [
+                    ["execution_start", {"timestamp": 1700000000000}],
+                    ["execution_success", {"timestamp": 1700000007500}],
+                ]
+            }
+        }
+        assert history_execution_seconds(entry) == 7.5
+
+    def test_history_execution_seconds_missing_or_negative(self):
+        from tools._comfyui.client import history_execution_seconds
+
+        assert history_execution_seconds({"status": {"messages": []}}) is None
+        assert history_execution_seconds({}) is None
+        entry = {
+            "status": {
+                "messages": [
+                    ["execution_start", {"timestamp": 200.0}],
+                    ["execution_success", {"timestamp": 100.0}],
+                ]
+            }
+        }
+        assert history_execution_seconds(entry) is None
+
+    def test_generate_populates_last_timing(self, tmp_path):
+        from tools._comfyui.client import ComfyUIClient
+
+        client = ComfyUIClient("http://localhost:8188")
+        client.submit = lambda workflow: "prompt-1"
+        client._wait = lambda prompt_id, **kw: dict(self._ENTRY)
+        client.download = lambda *a, **k: None
+
+        dest = tmp_path / "out.mp4"
+        paths = client.generate(
+            {"1": {}}, output_node="9", dest=dest, timeout=5, interval=1
+        )
+        assert paths == [dest]
+        timing = client.last_timing
+        assert timing is not None
+        assert timing["prompt_id"] == "prompt-1"
+        assert timing["comfy_prompt_exec_s"] == 42.5
+        assert timing["timing_source"] == "history_messages"
+        for key in ("submit_s", "client_queue_and_poll_s", "download_s"):
+            assert isinstance(timing[key], float) and timing[key] >= 0
+
+    def test_generate_last_timing_without_history_timestamps(self, tmp_path):
+        from tools._comfyui.client import ComfyUIClient
+
+        client = ComfyUIClient("http://localhost:8188")
+        client.submit = lambda workflow: "prompt-2"
+        client._wait = lambda prompt_id, **kw: {
+            "status": {},
+            "outputs": {"9": {"images": [{"filename": "o.mp4", "subfolder": "", "type": "output"}]}},
+        }
+        client.download = lambda *a, **k: None
+
+        client.generate({"1": {}}, output_node="9", dest=tmp_path / "o.mp4")
+        assert client.last_timing["comfy_prompt_exec_s"] is None
+        assert client.last_timing["timing_source"] == "poll_wall"
+
+    def test_video_result_surfaces_timing_split(self, tmp_path):
+        from tools.video.comfyui_video import ComfyUIVideo
+
+        tool = ComfyUIVideo()
+        tool._client.is_available = lambda: True
+        tool._client.check_models = lambda required: (list(required), [])
+
+        def fake_generate(workflow, output_node, dest, **kwargs):
+            Path(dest).write_bytes(b"mp4")
+            tool._client.last_timing = {
+                "prompt_id": "p",
+                "submit_s": 0.1,
+                "client_queue_and_poll_s": 30.0,
+                "comfy_prompt_exec_s": 120.0,
+                "download_s": 1.2,
+                "poll_interval_s": 10,
+                "timing_source": "history_messages",
+            }
+            return [Path(dest)]
+
+        tool._client.generate = fake_generate
+
+        result = tool.execute({
+            "prompt": "test",
+            "workflow_json": json.dumps({"42": {"inputs": {}}}),
+            "output_node": "42",
+            "output_path": str(tmp_path / "video.mp4"),
+        })
+        assert result.success is True
+        timing = result.data["timing"]
+        assert timing["comfy_prompt_exec_s"] == 120.0
+        assert timing["client_queue_and_poll_s"] == 30.0
+        assert timing["wall_s"] >= timing["client_overhead_s"] >= 0

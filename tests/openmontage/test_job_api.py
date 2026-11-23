@@ -846,6 +846,7 @@ def test_stage_contract_distinguishes_manifest_and_gateway_tool_names(tmp_path: 
     contract = stage_execution_contract(service.get_job(job.job_id), "assets")
 
     assert contract["declaredTools"] == [
+        "heygen_avatar",
         "talking_head",
         "lip_sync",
         "tts_selector",
