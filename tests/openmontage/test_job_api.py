@@ -433,18 +433,17 @@ async def test_mcp_job_tools_do_not_expose_trusted_attribution_as_model_input(tm
     assert "stage names such as compose are invalid" in submit_schema["properties"]["workflow"][
         "description"
     ]
-    assert "discriminator" in submit_schema["properties"]["input"]
-    assert "oneOf" in submit_schema["properties"]["input"]
-    nested_refs = {
-        submit_schema["properties"][name]["$ref"].rsplit("/", 1)[-1]
-        for name in ("brief", "output", "budget")
-    }
-    input_refs = {
-        item["$ref"].rsplit("/", 1)[-1]
-        for item in submit_schema["properties"]["input"]["oneOf"]
-    }
-    for definition_name in nested_refs | input_refs:
-        assert submit_schema["$defs"][definition_name]["additionalProperties"] is False
+    assert "$ref" not in serialized_schema
+    assert "$defs" not in serialized_schema
+    assert "discriminator" not in serialized_schema
+    text_input = next(
+        branch
+        for branch in submit_schema["properties"]["input"]["oneOf"]
+        if branch["properties"]["type"]["const"] == "text"
+    )
+    assert text_input["properties"]["inlineText"]["type"] == "string"
+    for name in ("brief", "output", "budget"):
+        assert submit_schema["properties"][name]["additionalProperties"] is False
     for command_tool in ("cancel_video_job", "approve_video_stage"):
         command_schema = by_name[command_tool].input_schema
         assert {"expected_sequence", "idempotency_key"}.issubset(

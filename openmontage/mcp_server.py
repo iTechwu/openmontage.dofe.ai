@@ -21,6 +21,7 @@ from openmontage.contracts import (
 from openmontage.exchange import ProjectFileExporter
 from openmontage.instruction_files import read_instruction_file
 from openmontage.reference_clone import ReferenceCloneService, capability_summary
+from openmontage.tool_schema import publish_flat_tool_schemas
 
 try:
     from mcp.server.mcpserver.context import Context
@@ -717,6 +718,8 @@ def create_server(
             max_age_days=max_age_days,
             max_bytes=max_bytes or None,
         )
+
+    publish_flat_tool_schemas(server)
 
     @server.resource("openmontage://reference-clone-guide")
     def reference_clone_guide() -> str:
